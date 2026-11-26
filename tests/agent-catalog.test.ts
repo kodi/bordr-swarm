@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
 import { parseAgentsCliArgs } from "../scripts/agents.ts";
 import {
@@ -8,6 +10,7 @@ import {
   parseAgyModelList,
   parseCodexModelCatalog,
   parsePiModelList,
+  shouldUseColor,
   type CommandRunner,
 } from "../src/lib/agent-catalog.ts";
 import { BUILTIN_AGENT_PROFILES } from "../src/lib/config.ts";
@@ -53,6 +56,9 @@ function fakeRunner(responses: Record<string, { ok: boolean; stdout?: string; er
 }
 
 const defaults = WorkerDefaultsConfigSchema.parse({});
+
+// oxlint-disable-next-line no-control-regex
+const ANSI_RE = /\u001b\[/;
 
 describe("agent catalog parsers", () => {
   it("parses pi --list-models into provider/model IDs", () => {
@@ -133,7 +139,11 @@ describe("buildAgentCatalog", () => {
     assert.ok((byName.agy?.models.models.length ?? 0) > 0);
 
     const text = formatAgentCatalog(catalog, { maxModels: 1 });
-    assert.match(text, /== agy \[NOT INSTALLED\]/);
+    assert.match(text, /━━ agy  ❌ NOT INSTALLED/);
+    assert.match(text, /━━ claude  ✅ installed  \[default\]/);
+    assert.match(text, /4 profiles · 3 installed · 1 missing · default claude/);
+    assert.doesNotMatch(text, ANSI_RE);
+    assert.match(formatAgentCatalog(catalog, { maxModels: 1, color: true }), ANSI_RE);
     assert.match(text, /dynamic, via `pi --list-models`/);
     assert.match(text, /… 2 more/);
   });
@@ -211,5 +221,48 @@ describe("parseAgentsCliArgs", () => {
     assert.equal(parseAgentsCliArgs(["codex"]).agent, "codex");
     assert.equal(parseAgentsCliArgs(["--all-models"]).maxModels, 0);
     assert.throws(() => parseAgentsCliArgs(["--bogus"]), /Unknown argument/);
+  });
+});
+
+describe("agents CLI color handling", () => {
+  it("decides color from FORCE_COLOR, NO_COLOR and TTY", () => {
+    assert.equal(shouldUseColor({}, true), true);
+    assert.equal(shouldUseColor({}, false), false);
+    assert.equal(shouldUseColor({}, undefined), false);
+    assert.equal(shouldUseColor({ NO_COLOR: "1" }, true), false);
+    assert.equal(shouldUseColor({ NO_COLOR: "" }, true), true);
+    assert.equal(shouldUseColor({ FORCE_COLOR: "1" }, false), true);
+    assert.equal(shouldUseColor({ FORCE_COLOR: "" }, false), true);
+    assert.equal(shouldUseColor({ FORCE_COLOR: "0" }, true), false);
+    assert.equal(shouldUseColor({ FORCE_COLOR: "false" }, true), false);
+    assert.equal(shouldUseColor({ FORCE_COLOR: "1", NO_COLOR: "1" }, false), true);
+  });
+
+  const script = fileURLToPath(new URL("../scripts/agents.ts", import.meta.url));
+  const runCli = (args: string[], env: Record<string, string>) => {
+    const baseEnv: Record<string, string | undefined> = { ...process.env };
+    delete baseEnv.FORCE_COLOR;
+    delete baseEnv.NO_COLOR;
+    const res = spawnSync(process.execPath, [script, "--static", ...args], {
+      encoding: "utf8",
+      env: { ...baseEnv, SWARM_CONFIG_PATH: "/nonexistent/swarm.json", ...env },
+    });
+    assert.equal(res.status, 0, res.stderr);
+    return res.stdout;
+  };
+
+  it("emits no ANSI codes when stdout is not a TTY or NO_COLOR is set", () => {
+    const piped = runCli([], {});
+    assert.match(piped, /━━ claude/);
+    assert.doesNotMatch(piped, ANSI_RE);
+    assert.doesNotMatch(runCli([], { NO_COLOR: "1" }), ANSI_RE);
+    assert.match(runCli([], { FORCE_COLOR: "1" }), ANSI_RE);
+  });
+
+  it("keeps --json free of ANSI codes even with FORCE_COLOR", () => {
+    const out = runCli(["--json", "--agent", "claude"], { FORCE_COLOR: "1" });
+    assert.doesNotMatch(out, ANSI_RE);
+    const parsed = JSON.parse(out) as { defaultAgent: string; agents: { profile: string }[] };
+    assert.equal(parsed.agents[0]?.profile, "claude");
   });
 });

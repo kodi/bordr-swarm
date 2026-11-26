@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import {
   buildAgentCatalog,
   formatAgentCatalog,
+  shouldUseColor,
   type CatalogWorkerDefaults,
 } from "../src/lib/agent-catalog.ts";
 import { BUILTIN_AGENT_PROFILES, loadSwarmConfig } from "../src/lib/config.ts";
@@ -65,6 +66,8 @@ Options:
   --all-models        Do not truncate model lists in text output (default: ${DEFAULT_MAX_MODELS})
   --timeout=<secs>    Per-CLI discovery timeout (default 20)
   -h, --help          Show this help
+
+Color is used when stdout is a TTY; NO_COLOR disables it, FORCE_COLOR (≠0) forces it.
 `;
 
 function loadWorkerDefaults(repoRoot: string): {
@@ -111,7 +114,12 @@ function main(): void {
   if (opts.json) {
     console.log(JSON.stringify(catalog, null, 2));
   } else {
-    console.log(formatAgentCatalog(catalog, { maxModels: opts.maxModels }));
+    console.log(
+      formatAgentCatalog(catalog, {
+        maxModels: opts.maxModels,
+        color: shouldUseColor(process.env, process.stdout.isTTY),
+      }),
+    );
   }
 }
 

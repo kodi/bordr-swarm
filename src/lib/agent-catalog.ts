@@ -7,6 +7,7 @@
  * All parsing is pure and the command runner is injectable so it can be unit-tested.
  */
 import { spawnSync } from "node:child_process";
+import { styleText } from "node:util";
 import { buildAgentCliArgs, type WorkerAgentProfile } from "./config.ts";
 
 /** Effort values the Dispatcher accepts from the `effort=` / `reviewer_effort=` labels. */
@@ -389,60 +390,100 @@ export function buildAgentCatalog(params: {
 // Text rendering
 // ---------------------------------------------------------------------------
 
+/** Decide whether to emit ANSI color. `FORCE_COLOR` wins (as in Node), then `NO_COLOR`, then TTY. */
+export function shouldUseColor(
+  env: Record<string, string | undefined>,
+  isTTY: boolean | undefined,
+): boolean {
+  const force = env.FORCE_COLOR;
+  if (force !== undefined) return force !== "0" && force.toLowerCase() !== "false";
+  if (env.NO_COLOR !== undefined && env.NO_COLOR !== "") return false;
+  return isTTY === true;
+}
+
+type StyleFormat = Parameters<typeof styleText>[0];
+type Paint = (format: StyleFormat, text: string) => string;
+
+function painter(color: boolean): Paint {
+  return color
+    ? (format, text) => styleText(format, text, { validateStream: false })
+    : (_format, text) => text;
+}
+
 export function formatAgentCatalog(
   catalog: AgentCatalog,
-  opts: { maxModels?: number } = {},
+  opts: { maxModels?: number; color?: boolean } = {},
 ): string {
   const maxModels = opts.maxModels ?? 0;
+  const c = painter(opts.color ?? false);
   const lines: string[] = [];
-  lines.push(`Swarm worker agents (config: ${catalog.configSource})`);
-  lines.push(`Default agent: ${catalog.defaultAgent}`);
+  const KEY_WIDTH = 16;
+  const row = (key: string, value: string): string =>
+    `   ${c("dim", key.padEnd(KEY_WIDTH))} ${value}`;
+  const sep = c("dim", " · ");
+
+  const installedCount = catalog.agents.filter((a) => a.installed).length;
   lines.push(
-    "Labels: agent=, model=, effort=, reviewer=, reviewer_model=, reviewer_effort= (reviewer_* use the same IDs)",
+    `${c("bold", "Swarm worker agents")}${sep}${catalog.agents.length} profile${catalog.agents.length === 1 ? "" : "s"}` +
+      `${sep}${c("green", `${installedCount} installed`)}` +
+      (installedCount < catalog.agents.length
+        ? `${sep}${c("red", `${catalog.agents.length - installedCount} missing`)}`
+        : "") +
+      `${sep}default ${c("bold", catalog.defaultAgent)}`,
+  );
+  lines.push(row("Config", c("dim", catalog.configSource)));
+  lines.push(
+    row(
+      "Labels",
+      `agent= model= effort= reviewer= reviewer_model= reviewer_effort= ${c("dim", "(reviewer_* use the same IDs)")}`,
+    ),
   );
 
   for (const a of catalog.agents) {
     lines.push("");
-    const tags = [a.installed ? "installed" : "NOT INSTALLED", a.isDefault ? "default" : ""]
-      .filter(Boolean)
-      .join(", ");
-    const kindPart = a.kind !== a.profile ? ` (kind: ${a.kind})` : "";
-    lines.push(`== ${a.profile}${kindPart} [${tags}]`);
-    lines.push(`  Default model:   ${a.defaultModel || "(CLI default — --model omitted)"}`);
-    lines.push(`  Default effort:  ${a.defaultEffort || "(CLI default)"}`);
-    lines.push(`  Effort labels:   ${a.effortLabels.join(", ")}`);
+    const status = a.installed ? c("green", "✅ installed") : c("red", "❌ NOT INSTALLED");
+    const kindPart = a.kind !== a.profile ? c("dim", ` (kind: ${a.kind})`) : "";
+    const defaultTag = a.isDefault ? `  ${c(["bold", "yellow"], "[default]")}` : "";
+    lines.push(`${c(["bold", "cyan"], `━━ ${a.profile}`)}${kindPart}  ${status}${defaultTag}`);
+    lines.push(row("Default model", a.defaultModel || c("dim", "(CLI default — --model omitted)")));
+    lines.push(row("Default effort", a.defaultEffort || c("dim", "(CLI default)")));
+    lines.push(row("Effort labels", a.effortLabels.join(", ")));
     const extra = a.cliEfforts.filter((e) => !a.effortLabels.includes(e));
     if (extra.length > 0) {
       lines.push(
-        `                   (CLI also supports ${extra.join(", ")} — not accepted as swarm labels)`,
+        row("", c("dim", `(CLI also supports ${extra.join(", ")} — not accepted as swarm labels)`)),
       );
     }
-    lines.push(`  Swarm CLI flags: ${a.defaultCliArgs.join(" ") || "(none)"}`);
+    lines.push(row("Swarm CLI flags", a.defaultCliArgs.join(" ") || c("dim", "(none)")));
 
     const src =
       a.models.source === "dynamic"
         ? `dynamic, via \`${a.models.command}\``
         : "static fallback list";
-    lines.push(`  Models (${a.models.models.length}, ${src}):`);
-    if (a.models.note) lines.push(`    note: ${a.models.note}`);
+    lines.push(
+      row("Models", `${c("bold", String(a.models.models.length))} ${c("dim", `(${src})`)}`),
+    );
+    if (a.models.note) lines.push(`     ${c(["dim", "italic"], `note: ${a.models.note}`)}`);
     const shown = maxModels > 0 ? a.models.models.slice(0, maxModels) : a.models.models;
     const width = Math.min(48, Math.max(0, ...shown.map((m) => m.id.length)));
     for (const m of shown) {
       const details = [
-        m.description,
-        m.efforts ? `efforts: ${m.efforts.join("/")}` : "",
-        m.labelSafe ? "" : "NOT label-safe",
+        m.description ? c("dim", m.description) : "",
+        m.efforts ? c("dim", `efforts: ${m.efforts.join("/")}`) : "",
+        m.labelSafe ? "" : c("red", "NOT label-safe"),
       ]
         .filter(Boolean)
-        .join(" · ");
-      lines.push(`    ${m.id.padEnd(width)}${details ? `  ${details}` : ""}`);
+        .join(sep);
+      lines.push(`     ${m.id.padEnd(width)}${details ? `  ${details}` : ""}`.trimEnd());
     }
     if (shown.length < a.models.models.length) {
       lines.push(
-        `    … ${a.models.models.length - shown.length} more (use --all-models or --json for the full list)`,
+        `     ${c("dim", `… ${a.models.models.length - shown.length} more (use --all-models or --json for the full list)`)}`,
       );
     }
-    lines.push(`  Example: vercel board tasks create <channel> "<title>" ${a.exampleLabels}`);
+    lines.push(
+      `   👉 ${c("cyan", `vercel board tasks create <channel> "<title>" ${a.exampleLabels}`)}`,
+    );
   }
   return lines.join("\n");
 }
