@@ -52,6 +52,8 @@ export interface ResolvedWorkerRuntime {
   cliArgs: string[];
 }
 
+export const BUILTIN_AGENT_KINDS = ["claude", "agy", "codex", "pi"] as const;
+
 const BUILTIN_AGENT_PROFILES: Record<string, WorkerAgentProfile> = {
   claude: {
     kind: "claude",
@@ -62,6 +64,20 @@ const BUILTIN_AGENT_PROFILES: Record<string, WorkerAgentProfile> = {
   },
   agy: {
     kind: "agy",
+    model: "",
+    effort: "medium",
+    permissionMode: "auto",
+    extraArgs: [],
+  },
+  codex: {
+    kind: "codex",
+    model: "",
+    effort: "medium",
+    permissionMode: "auto",
+    extraArgs: [],
+  },
+  pi: {
+    kind: "pi",
     model: "",
     effort: "medium",
     permissionMode: "auto",
@@ -301,6 +317,71 @@ export function buildAgentCliArgs(profile: WorkerAgentProfile): string[] {
         args.push("--mode", "accept-edits");
       } else if (mode === "auto" || mode === "plan") {
         args.push("--mode", mode);
+      }
+    }
+  } else if (kind === "codex") {
+    if (profile.model) {
+      args.push("--model", profile.model);
+    }
+    if (profile.effort) {
+      args.push("-c", `model_reasoning_effort="${profile.effort}"`);
+    }
+    if (profile.permissionMode) {
+      const mode = profile.permissionMode;
+      if (mode === "bypassPermissions") {
+        args.push("--dangerously-bypass-approvals-and-sandbox");
+      } else if (mode === "auto" || mode === "acceptEdits") {
+        // workspace-write blocks outbound network by default; enable network so `vercel board` CLI works
+        args.push("-c", "sandbox_workspace_write.network_access=true", "--approve-for-me");
+      } else if (mode === "dontAsk") {
+        args.push(
+          "-s",
+          "workspace-write",
+          "-c",
+          "sandbox_workspace_write.network_access=true",
+          "-a",
+          "never",
+        );
+      } else if (mode === "plan") {
+        args.push(
+          "-s",
+          "read-only",
+          "-c",
+          "sandbox_workspace_write.network_access=true",
+          "-a",
+          "on-request",
+        );
+      } else if (mode === "manual") {
+        args.push(
+          "-s",
+          "workspace-write",
+          "-c",
+          "sandbox_workspace_write.network_access=true",
+          "-a",
+          "on-request",
+        );
+      }
+    }
+  } else if (kind === "pi") {
+    if (profile.model) {
+      args.push("--model", profile.model);
+    }
+    if (profile.effort) {
+      args.push("--thinking", profile.effort);
+    }
+    if (profile.permissionMode) {
+      const mode = profile.permissionMode;
+      if (mode === "plan") {
+        args.push("--tools", "read,grep,find,ls", "--approve");
+      } else if (mode === "manual") {
+        args.push("--no-approve");
+      } else if (
+        mode === "auto" ||
+        mode === "acceptEdits" ||
+        mode === "bypassPermissions" ||
+        mode === "dontAsk"
+      ) {
+        args.push("--approve");
       }
     }
   } else {

@@ -182,7 +182,7 @@ export function detectLinuxLinger(): {
 }
 
 export function detectInstalledAgentKinds(extraKinds: string[] = []): string[] {
-  const candidates = [...new Set(["claude", "agy", ...extraKinds])];
+  const candidates = [...new Set(["claude", "agy", "codex", "pi", ...extraKinds])];
   const found: string[] = [];
   for (const kind of candidates) {
     const res = runQuickCommand("which", [kind], 5_000);

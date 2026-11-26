@@ -4,6 +4,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { BoardClient, type BoardTask } from "./lib/board.ts";
 import {
+  BUILTIN_AGENT_KINDS,
   loadProjectsConfig,
   loadProjectsConfigOptional,
   loadSwarmConfig,
@@ -104,7 +105,7 @@ function sleep(ms: number): Promise<void> {
 
 function detectAvailableAgentKinds(swarm: SwarmConfig): Set<string> {
   const available = new Set<string>();
-  const kinds = new Set<string>(["claude", "agy"]);
+  const kinds = new Set<string>(BUILTIN_AGENT_KINDS);
   for (const profile of Object.values(swarm.workerDefaults.agents)) {
     kinds.add(profile.kind);
   }

@@ -58,6 +58,8 @@ const results: CheckResult[] = [
     fixHint: "install Claude Code CLI (`claude`)",
   }),
   checkVersion("agy", "agy", ["--help"], { optional: true }),
+  checkVersion("codex", "codex", ["--version"], { optional: true }),
+  checkVersion("pi", "pi", ["--version"], { optional: true }),
 ];
 
 // Validate swarm.json and projects.json via Zod schemas

@@ -105,7 +105,7 @@ Uses the hosted Vercel team board (`vercel board whoami` on every machine authen
 
 - Labels:
   - `machine=<name>` (or `machine=any`, `os=macos|linux`) — routes the task to a matching host dispatcher.
-  - `agent=claude` (default) or `agent=agy` — selects the worker CLI profile from `workerDefaults.agents` in `config/swarm.json`.
+  - `agent=claude` (default), `agent=agy`, `agent=codex`, or `agent=pi` — selects the worker CLI profile from `workerDefaults.agents` in `config/swarm.json`.
   - Optional overrides: `model=<model>`, `effort=low|medium|high|xhigh|max`, `kind=bug|feature|chore`.
 - Dependencies: `--needs <task_id>` to sequence cross-project or review tasks automatically.
 - Identities: `--as <name>` or `BOARD_PROFILE=<name>` env var (`lead`, `worker-<machine>-<taskId>`).
@@ -138,9 +138,11 @@ Runs as a **per-machine daemon** locally on each worker machine (Linux or macOS)
      - Find or create a workspace for `<project>`, then `herdr tab create --workspace <wsId> --cwd <repoPath> --label "task-<taskId> (<agent>)" --env BOARD_PROFILE=<workerProfile> --no-focus`.
    - **Optional worktree mode (`useWorktree: true`):**
      - `herdr worktree create --cwd <repoPath> --branch task/<taskId> --base <baseBranch> --label "task-<taskId> (<agent>)" --no-focus` and export `BOARD_PROFILE` / `VERCEL_SCOPE` in the pane before starting the agent.
-   - Start the selected agent via `herdr agent start <agentName> --kind <claude|agy> --pane <paneId> -- <args...>`:
+   - Start the selected agent via `herdr agent start <agentName> --kind <claude|agy|codex|pi> --pane <paneId> -- <args...>`:
      - `claude`: `--model <model> --effort <effort> --permission-mode auto`
      - `agy`: `--effort <effort> --mode auto` (+ `--model <model>` when configured, otherwise `agy`'s default model)
+     - `codex`: `-c model_reasoning_effort="<effort>" -c sandbox_workspace_write.network_access=true --approve-for-me` (+ `--model <model>` when configured; network access is enabled in `workspace-write` so `vercel board` CLI calls succeed)
+     - `pi`: `--thinking <effort> --approve` (+ `--model <model>` when configured, including `provider/id` patterns such as `openai-codex/...`)
    - Deliver rendered `prompts/worker-prompt.md` via `herdr agent prompt`.
 4. **Monitor & Cleanup:**
    - Poll Board task state + `herdr tab list` + `herdr agent list`:

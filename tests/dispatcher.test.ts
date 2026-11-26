@@ -150,6 +150,86 @@ describe("config & worker agent selection", () => {
     assert.deepEqual(bypassArgs, ["--effort", "medium", "--dangerously-skip-permissions"]);
   });
 
+  it("selects codex with reasoning effort, network-enabled workspace-write, and --approve-for-me", () => {
+    const swarm = createTestSwarmConfig();
+    const rt = resolveWorkerRuntime(swarm.workerDefaults, { agent: "codex" });
+    assert.equal(rt.profileName, "codex");
+    assert.equal(rt.kind, "codex");
+    assert.equal(rt.model, "");
+    assert.deepEqual(rt.cliArgs, [
+      "-c",
+      'model_reasoning_effort="medium"',
+      "-c",
+      "sandbox_workspace_write.network_access=true",
+      "--approve-for-me",
+    ]);
+
+    const overrideRt = resolveWorkerRuntime(swarm.workerDefaults, {
+      agent: "codex",
+      model: "gpt-5.4",
+      effort: "high",
+    });
+    assert.deepEqual(overrideRt.cliArgs, [
+      "--model",
+      "gpt-5.4",
+      "-c",
+      'model_reasoning_effort="high"',
+      "-c",
+      "sandbox_workspace_write.network_access=true",
+      "--approve-for-me",
+    ]);
+
+    const bypassArgs = buildAgentCliArgs({
+      kind: "codex",
+      model: "",
+      effort: "low",
+      permissionMode: "bypassPermissions",
+      extraArgs: [],
+    });
+    assert.deepEqual(bypassArgs, [
+      "-c",
+      'model_reasoning_effort="low"',
+      "--dangerously-bypass-approvals-and-sandbox",
+    ]);
+  });
+
+  it("selects pi with --thinking and --approve (and supports provider/model and plan mode)", () => {
+    const swarm = createTestSwarmConfig();
+    const rt = resolveWorkerRuntime(swarm.workerDefaults, { agent: "pi" });
+    assert.equal(rt.profileName, "pi");
+    assert.equal(rt.kind, "pi");
+    assert.equal(rt.model, "");
+    assert.deepEqual(rt.cliArgs, ["--thinking", "medium", "--approve"]);
+
+    const overrideRt = resolveWorkerRuntime(swarm.workerDefaults, {
+      agent: "pi",
+      model: "openai-codex/gpt-5.4",
+      effort: "xhigh",
+    });
+    assert.deepEqual(overrideRt.cliArgs, [
+      "--model",
+      "openai-codex/gpt-5.4",
+      "--thinking",
+      "xhigh",
+      "--approve",
+    ]);
+
+    const planArgs = buildAgentCliArgs({
+      kind: "pi",
+      model: "",
+      effort: "medium",
+      permissionMode: "plan",
+      extraArgs: [],
+    });
+    assert.deepEqual(planArgs, [
+      "--thinking",
+      "medium",
+      "--tools",
+      "read,grep,find,ls",
+      "--approve",
+    ]);
+  });
+
   it("resolves explicit or role-based machine names cleanly", () => {
     const swarm = createTestSwarmConfig();
     assert.equal(resolveCurrentMachineName(swarm, "worker-machine"), "worker-machine");

@@ -4,7 +4,7 @@
 
 `bordr-swarm` wires together **[Vercel Board](https://vercel.com/docs/board)** (hosted team control plane & atomic task queue), **Herdr** (terminal, workspace & agent runtime), and **Sheprd** (desktop + mobile UI) using a lightweight, declarative TypeScript/Node 24+ toolkit.
 
-> **1 runtime dependency (`zod`)** · **Zero build step** (native Node TS) · **0 idle LLM tokens** · **macOS & Linux** · **Claude Code + Antigravity (`agy`)**
+> **1 runtime dependency (`zod`)** · **Zero build step** (native Node TS) · **0 idle LLM tokens** · **macOS & Linux** · **Claude Code + Antigravity (`agy`) + Codex + Pi**
 
 ---
 
@@ -12,7 +12,7 @@
 
 1. **Drop an idea in `#inbox`** from your browser or phone — _"In `my-api`, add a `/healthz` endpoint with tests, and in `my-web`, wire a status badge (`agent=agy`)."_
 2. **Lead wakes up instantly** (0 tokens while idle), reads the live fleet catalog, splits your request into self-contained tasks under `#projects/my-api` and `#projects/my-web`, and wires dependencies with `--needs`.
-3. **Workers across your machines claim & execute** — each host's deterministic Dispatcher atomically claims matching tasks, renews leases every 5 minutes, opens a fresh Herdr tab in the right checkout, and runs `claude` or `agy`.
+3. **Workers across your machines claim & execute** — each host's deterministic Dispatcher atomically claims matching tasks, renews leases every 5 minutes, opens a fresh Herdr tab in the right checkout, and runs `claude`, `agy`, `codex`, or `pi`.
 4. **Finished tabs vanish; blockers surface** — when a task completes, its tab closes automatically. **Any worker tab still open in Sheprd means either actively working or `[BLOCKED]` / `[FAILED]` waiting on human eyes.**
 
 ---
@@ -27,7 +27,7 @@ Most DIY agent swarms fail in the same four ways: polling loops burn tokens over
 | **Tab soup & babysitting**       | Completed worker tabs auto-close. Blocked or failed tabs stay open, renamed `[BLOCKED]` / `[FAILED]`, and light up in **Sheprd** (desktop & mobile). Closing a parked tab frees its slot and repo lock.                                                    |
 | **Cross-machine config drift**   | **Zero fleet-wide config.** Each machine runs a ~10-line local `config/swarm.json`. Workers auto-publish their capabilities and repo slugs to `#swarm/registry` (keeping local filesystem paths private), and Lead auto-syncs the merged catalog.          |
 | **Repo collisions**              | Workers spawn in plain Herdr tabs guarded by a **per-repo lock** so two agents never mutate the same working tree simultaneously — with opt-in `useWorktree: true` per project when you want parallel work on one repo.                                    |
-| **Single-agent lock-in**         | Default workers run **Claude Code** (`opus`, medium effort, `--permission-mode auto`), and any task can route to **Antigravity (`agy`)** via `--label agent=agy` (or override `model=` / `effort=` per task).                                              |
+| **Single-agent lock-in**         | Default workers run **Claude Code** (`opus`, medium effort, `--permission-mode auto`), and any task can route to **Antigravity (`agy`)**, **Codex (`codex`)**, or **Pi (`pi`)** via `--label agent=<name>` (plus optional `model=` / `effort=` overrides). |
 | **OS service & proxy headaches** | One unified CLI (`mise run ...`) wraps `systemd --user` (Linux, unprivileged, `linger`-checked), `launchd` (macOS, race-free `kickstart`/`bootout`), auto-detected Tailscale MagicDNS `--allow-host`, and pull-based `mise run update`.                    |
 
 ---
@@ -158,8 +158,10 @@ Ask Lead in natural language in `#inbox` — or create tasks directly via CLI wi
 # Default worker (Claude Code: opus, medium effort, auto mode) on any matching machine
 vercel board tasks create projects/example-app "Add health check endpoint"
 
-# Route to Antigravity CLI (agy) with its default model
+# Route to Antigravity (agy), Codex (codex), or Pi (pi) with their default models
 vercel board tasks create projects/example-app "Refactor parser" --label agent=agy
+vercel board tasks create projects/example-app "Write integration tests" --label agent=codex
+vercel board tasks create projects/example-app "Audit build scripts" --label agent=pi --label effort=high
 
 # Target a specific host, OS, model, or reasoning effort
 vercel board tasks create projects/example-app "Build macOS bundle" \

@@ -5,6 +5,7 @@ import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { BoardClient } from "../src/lib/board.ts";
 import {
+  BUILTIN_AGENT_KINDS,
   loadProjectsConfig,
   loadSwarmConfig,
   resolveCurrentMachineName,
@@ -46,7 +47,7 @@ function detectGitBaseBranch(repoPath: string): string {
 
 function detectInstalledAgents(swarm: SwarmConfig): Set<string> {
   const available = new Set<string>();
-  const kinds = new Set<string>(["claude", "agy"]);
+  const kinds = new Set<string>(BUILTIN_AGENT_KINDS);
   for (const p of Object.values(swarm.workerDefaults.agents)) {
     kinds.add(p.kind);
   }

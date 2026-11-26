@@ -37,6 +37,20 @@
         "effort": "medium",
         "permissionMode": "auto",
         "extraArgs": []
+      },
+      "codex": {
+        "kind": "codex",
+        "model": "",
+        "effort": "medium",
+        "permissionMode": "auto",
+        "extraArgs": []
+      },
+      "pi": {
+        "kind": "pi",
+        "model": "",
+        "effort": "medium",
+        "permissionMode": "auto",
+        "extraArgs": []
       }
     },
     "useWorktree": false,

@@ -1,6 +1,6 @@
 # Worker Machine Setup Guide
 
-A **worker machine** (macOS or Linux) runs **Herdr**, optional **Sheprd**, and the local **Worker Dispatcher** daemon that claims tasks from Vercel Board and spawns ephemeral coding agents (`claude` by default, or `agy` when labeled `agent=agy`).
+A **worker machine** (macOS or Linux) runs **Herdr**, optional **Sheprd**, and the local **Worker Dispatcher** daemon that claims tasks from Vercel Board and spawns ephemeral coding agents (`claude` by default, or `agy` / `codex` / `pi` via `agent=<name>` labels).
 
 ## 1. Install Tools & Run Setup Wizard
 
@@ -72,8 +72,11 @@ vercel board tasks create projects/example-app "Build macOS bundle" --label mach
 # Target Antigravity CLI (agy) with its default model
 vercel board tasks create projects/example-app "Refactor parser" --label agent=agy
 
-# Target agy with an explicit model and high effort
-vercel board tasks create projects/example-app "Audit auth flow" --label agent=agy --label effort=high
+# Target OpenAI Codex CLI (codex) with high reasoning effort
+vercel board tasks create projects/example-app "Write integration tests" --label agent=codex --label effort=high
+
+# Target Pi CLI (pi) with its default model (or an explicit provider/model)
+vercel board tasks create projects/example-app "Audit auth flow" --label agent=pi --label effort=high
 ```
 
 ## 5. Monitoring in Sheprd

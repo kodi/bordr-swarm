@@ -37,7 +37,7 @@ export const EffortLevelSchema = z
 export const PermissionModeSchema = z
   .enum(["", "auto", "acceptEdits", "bypassPermissions", "manual", "dontAsk", "plan"])
   .describe(
-    'Permission/approval policy for autonomous agents. Recommended: "auto" (maps to `--permission-mode auto` for claude and `--mode auto` for agy). "bypassPermissions" maps to `--dangerously-skip-permissions` on agy.',
+    'Permission/approval policy for autonomous agents. Recommended: "auto" (maps to `--permission-mode auto` for claude, `--mode auto` for agy, `-c sandbox_workspace_write.network_access=true --approve-for-me` for codex, and `--approve` for pi).',
   );
 
 export const LabelStringSchema = z
@@ -64,13 +64,13 @@ export const WorkerAgentProfileSchema = z
       .string()
       .min(1)
       .describe(
-        'Herdr agent kind & CLI binary name passed to `herdr agent start --kind <kind>` (e.g. "claude", "agy", "codex", "opencode").',
+        'Herdr agent kind & CLI binary name passed to `herdr agent start --kind <kind>` (e.g. "claude", "agy", "codex", "pi").',
       ),
     model: z
       .string()
       .default("")
       .describe(
-        'Model name or alias passed via `--model` (e.g. "opus" for claude). Leave empty ("") to omit `--model` and use the CLI\'s own default model (recommended for `agy`).',
+        'Model name, alias, or provider/id pattern passed via `--model` (e.g. "opus" for claude, "openai-codex/..." for pi). Leave empty ("") to omit `--model` and use the CLI\'s own default model (recommended for `agy`, `codex`, and `pi`).',
       ),
     effort: EffortLevelSchema.default("medium"),
     permissionMode: PermissionModeSchema.default("auto"),
@@ -230,9 +230,23 @@ export const WorkerDefaultsConfigSchema = z
           permissionMode: "auto",
           extraArgs: [],
         },
+        codex: {
+          kind: "codex",
+          model: "",
+          effort: "medium",
+          permissionMode: "auto",
+          extraArgs: [],
+        },
+        pi: {
+          kind: "pi",
+          model: "",
+          effort: "medium",
+          permissionMode: "auto",
+          extraArgs: [],
+        },
       })
       .describe(
-        "Map of worker agent profile keys to CLI settings. Tasks can target any key here with `--label agent=<key>` (e.g. `agent=claude`, `agent=agy`).",
+        "Map of worker agent profile keys to CLI settings. Tasks can target any key here with `--label agent=<key>` (e.g. `agent=claude`, `agent=agy`, `agent=codex`, `agent=pi`).",
       ),
     useWorktree: z
       .boolean()
@@ -351,7 +365,7 @@ export const SwarmConfigSchema = z
         message: `lead.machine "${cfg.lead.machine}" does not exist in machines (${Object.keys(cfg.machines).join(", ")}).`,
       });
     }
-    const builtinAgents = new Set(["claude", "agy"]);
+    const builtinAgents = new Set(["claude", "agy", "codex", "pi"]);
     if (
       !cfg.workerDefaults.agents[cfg.workerDefaults.defaultAgent] &&
       !builtinAgents.has(cfg.workerDefaults.defaultAgent)
@@ -531,7 +545,9 @@ export const MachineRegistryEntrySchema = z
     maxWorkers: z.number().int().min(0),
     agents: z
       .array(z.string().min(1))
-      .describe("Agent CLI profiles installed and available on this machine (e.g. claude, agy)."),
+      .describe(
+        "Agent CLI profiles installed and available on this machine (e.g. claude, agy, codex, pi).",
+      ),
     labels: z.array(z.string()).describe("Routing labels advertised by this machine."),
     projects: z
       .array(MachineRegistryProjectSchema)

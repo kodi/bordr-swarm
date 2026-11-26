@@ -105,7 +105,7 @@
           "default": "auto",
           "type": "string",
           "enum": ["", "auto", "acceptEdits", "bypassPermissions", "manual", "dontAsk", "plan"],
-          "description": "Permission/approval policy for autonomous agents. Recommended: \"auto\" (maps to `--permission-mode auto` for claude and `--mode auto` for agy). \"bypassPermissions\" maps to `--dangerously-skip-permissions` on agy."
+          "description": "Permission/approval policy for autonomous agents. Recommended: \"auto\" (maps to `--permission-mode auto` for claude, `--mode auto` for agy, `-c sandbox_workspace_write.network_access=true --approve-for-me` for codex, and `--approve` for pi)."
         },
         "workspaceDir": {
           "default": "~/swarm-hq",
@@ -149,9 +149,23 @@
               "effort": "medium",
               "permissionMode": "auto",
               "extraArgs": []
+            },
+            "codex": {
+              "kind": "codex",
+              "model": "",
+              "effort": "medium",
+              "permissionMode": "auto",
+              "extraArgs": []
+            },
+            "pi": {
+              "kind": "pi",
+              "model": "",
+              "effort": "medium",
+              "permissionMode": "auto",
+              "extraArgs": []
             }
           },
-          "description": "Map of worker agent profile keys to CLI settings. Tasks can target any key here with `--label agent=<key>` (e.g. `agent=claude`, `agent=agy`).",
+          "description": "Map of worker agent profile keys to CLI settings. Tasks can target any key here with `--label agent=<key>` (e.g. `agent=claude`, `agent=agy`, `agent=codex`, `agent=pi`).",
           "type": "object",
           "propertyNames": {
             "type": "string",
@@ -163,11 +177,11 @@
               "kind": {
                 "type": "string",
                 "minLength": 1,
-                "description": "Herdr agent kind & CLI binary name passed to `herdr agent start --kind <kind>` (e.g. \"claude\", \"agy\", \"codex\", \"opencode\")."
+                "description": "Herdr agent kind & CLI binary name passed to `herdr agent start --kind <kind>` (e.g. \"claude\", \"agy\", \"codex\", \"pi\")."
               },
               "model": {
                 "default": "",
-                "description": "Model name or alias passed via `--model` (e.g. \"opus\" for claude). Leave empty (\"\") to omit `--model` and use the CLI's own default model (recommended for `agy`).",
+                "description": "Model name, alias, or provider/id pattern passed via `--model` (e.g. \"opus\" for claude, \"openai-codex/...\" for pi). Leave empty (\"\") to omit `--model` and use the CLI's own default model (recommended for `agy`, `codex`, and `pi`).",
                 "type": "string"
               },
               "effort": {
@@ -188,7 +202,7 @@
                   "dontAsk",
                   "plan"
                 ],
-                "description": "Permission/approval policy for autonomous agents. Recommended: \"auto\" (maps to `--permission-mode auto` for claude and `--mode auto` for agy). \"bypassPermissions\" maps to `--dangerously-skip-permissions` on agy."
+                "description": "Permission/approval policy for autonomous agents. Recommended: \"auto\" (maps to `--permission-mode auto` for claude, `--mode auto` for agy, `-c sandbox_workspace_write.network_access=true --approve-for-me` for codex, and `--approve` for pi)."
               },
               "extraArgs": {
                 "default": [],

@@ -109,7 +109,7 @@ async function main(): Promise<void> {
       `  Tailscale:     ${tailscale.ok ? `${tailscale.dnsName}${tailscale.online ? "" : " (offline)"}` : "not detected"}`,
     );
     console.log(
-      `  Agent CLIs:    ${installedAgents.length > 0 ? installedAgents.join(", ") : "none found (install claude or agy)"}`,
+      `  Agent CLIs:    ${installedAgents.length > 0 ? installedAgents.join(", ") : "none found (install claude, agy, codex, or pi)"}`,
     );
     console.log(
       `  Vercel Board:  ${boardId.ok ? boardId.rawSummary || "authenticated" : `not authenticated (${boardId.error})`}`,

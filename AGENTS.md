@@ -17,7 +17,7 @@ Machine names, OS (`"linux"` or `"macos"`), hostnames, capacities, and repo path
 - **Main machine** (example key: `main-machine`, `role: "main"`):
   - Hosts the **Vercel Board Inspector UI** (`board inspect` from `@vercel/board` bound to localhost, optionally reverse-proxied over a private network/Tailscale) and the **Lead Agent** (Claude CLI, Opus high).
 - **Worker machine(s)** (example key: `worker-machine`, `role: "worker"`):
-  - Runs `herdr server`, optional `sheprd`, coding agent CLIs (`claude`, optional `agy`), and the local **Worker Dispatcher** daemon (`maxWorkers` concurrent slots).
+  - Runs `herdr server`, optional `sheprd`, coding agent CLIs (`claude`, optional `agy`, `codex`, `pi`), and the local **Worker Dispatcher** daemon (`maxWorkers` concurrent slots).
 
 ## Architectural Decisions
 
@@ -25,7 +25,7 @@ Machine names, OS (`"linux"` or `"macos"`), hostnames, capacities, and repo path
   - Keep TS code compatible with Node's built-in type stripping (`erasableSyntaxOnly: true`, `verbatimModuleSyntax: true` — no `enum`, `namespace`, or parameter properties).
 - **Per-machine Dispatcher:** Runs locally on each worker machine, talking directly to the local `herdr` socket. Owns atomic claiming, background lease renewal (`15m` leases renewed every `5m`), spawning, and cleanup — never rely on the LLM to remember `vercel board tasks renew`.
 - **Plain Herdr tabs by default + per-repo lock:** Workers spawn via `herdr tab create` with `--env BOARD_PROFILE=...` and `--env VERCEL_SCOPE=...`, guarded by a per-repo lock so two plain-tab workers never mutate the same checkout simultaneously. Optional `useWorktree: true` per project remains supported.
-- **Worker agent label routing:** Workers default to `claude` (`--model opus --effort medium --permission-mode auto`), and support target label routing via `agent=agy` (launches `agy --effort medium --mode auto`, using `agy`'s default model unless `model=...` is configured or labeled). Lead uses `claude --model opus --effort high --permission-mode auto`.
+- **Worker agent label routing:** Workers default to `claude` (`--model opus --effort medium --permission-mode auto`), and support target label routing via `agent=agy` (`agy --effort medium --mode auto`), `agent=codex` (`codex -c model_reasoning_effort="medium" -c sandbox_workspace_write.network_access=true --approve-for-me`), and `agent=pi` (`pi --thinking medium --approve`) — each omitting `--model` by default unless `model=...` is configured or labeled. Lead uses `claude --model opus --effort high --permission-mode auto`.
 - **Board Inspector UI:** Uses `board inspect` from `@vercel/board` (pinned in `mise.toml` as `"npm:@vercel/board" = "latest"`), with `--allow-host` rendered from `machines.<main>.allowedHosts`.
 - **No secrets or personal machine details in git:** `config/swarm.json` and `config/projects.json` are gitignored; keep generic templates in `*.example.json`.
 
