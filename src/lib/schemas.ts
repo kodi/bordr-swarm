@@ -63,8 +63,9 @@ export const WorkerAgentProfileSchema = z
     kind: z
       .string()
       .min(1)
+      .optional()
       .describe(
-        'Herdr agent kind & CLI binary name passed to `herdr agent start --kind <kind>` (e.g. "claude", "agy", "codex", "pi").',
+        'Herdr agent kind & CLI binary name passed to `herdr agent start --kind <kind>` (e.g. "claude", "agy", "codex", "pi"). Optional when the profile key itself is a built-in kind.',
       ),
     model: z
       .string()
@@ -82,6 +83,92 @@ export const WorkerAgentProfileSchema = z
   .strict()
   .describe(
     "Configuration profile for a selectable worker agent CLI, routed via task label `agent=<profileKey>`.",
+  );
+
+export const ReviewerConfigSchema = z
+  .object({
+    enabled: z
+      .boolean()
+      .optional()
+      .describe(
+        "Enable automatic code review before completing tasks. Defaults to false when `reviewer` is omitted, or true when a `reviewer` block is explicitly configured.",
+      ),
+    agent: z
+      .string()
+      .min(1)
+      .default("codex")
+      .describe(
+        'Reviewer agent profile key from `workerDefaults.agents` (e.g. "codex", "pi", "claude", "agy", or a custom profile).',
+      ),
+    model: z
+      .string()
+      .default("")
+      .describe(
+        'Optional model override for the reviewer (e.g. "openai-codex/gpt-5.4" for pi, "opus" for claude). Leave empty ("") to inherit the profile\'s default model.',
+      ),
+    effort: EffortLevelSchema.optional().describe(
+      'Optional reasoning effort override for the reviewer (e.g. "high"). Omit to inherit the profile\'s default effort.',
+    ),
+    maxRounds: z
+      .number()
+      .int()
+      .min(1)
+      .max(10)
+      .default(2)
+      .describe(
+        "Maximum review/fix rounds before escalating the task to `blocked` for human or Lead inspection (default 2).",
+      ),
+    skipIfNoDiff: z
+      .boolean()
+      .default(true)
+      .describe(
+        "When true, automatically skips review if the task produced no local Git changes (e.g. research or Q&A tasks).",
+      ),
+  })
+  .strict()
+  .describe(
+    "Default code-review gate configuration for workers on this machine. Can be overridden per project in `config/projects.json`.",
+  );
+
+export const ProjectReviewerOverrideSchema = z
+  .object({
+    enabled: z
+      .boolean()
+      .optional()
+      .describe(
+        "Enable or disable automated code review for this project. Defaults to true when a project `reviewer` override block is specified without `enabled: false`.",
+      ),
+    agent: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        'Per-project reviewer agent profile override (e.g. "pi", "codex", "claude", "agy", or a custom profile key).',
+      ),
+    model: z
+      .string()
+      .optional()
+      .describe(
+        'Per-project reviewer model override (use "" to inherit the chosen agent profile\'s default model).',
+      ),
+    effort: EffortLevelSchema.optional().describe(
+      "Per-project reviewer reasoning effort override.",
+    ),
+    maxRounds: z
+      .number()
+      .int()
+      .min(1)
+      .max(10)
+      .optional()
+      .describe("Per-project maximum review/fix rounds override."),
+    skipIfNoDiff: z
+      .boolean()
+      .optional()
+      .describe("Per-project override for skipping review when there are no Git changes."),
+  })
+  .strict()
+  .describe(
+    "Optional per-project reviewer override. Omitted fields inherit `workerDefaults.reviewer` from `config/swarm.json`.",
   );
 
 export const BoardConfigSchema = z
@@ -248,6 +335,7 @@ export const WorkerDefaultsConfigSchema = z
       .describe(
         "Map of worker agent profile keys to CLI settings. Tasks can target any key here with `--label agent=<key>` (e.g. `agent=claude`, `agent=agy`, `agent=codex`, `agent=pi`).",
       ),
+    reviewer: ReviewerConfigSchema.optional(),
     useWorktree: z
       .boolean()
       .default(false)
@@ -376,6 +464,25 @@ export const SwarmConfigSchema = z
         message: `workerDefaults.defaultAgent "${cfg.workerDefaults.defaultAgent}" is not defined in workerDefaults.agents.`,
       });
     }
+    for (const [profileKey, profile] of Object.entries(cfg.workerDefaults.agents)) {
+      if (!profile.kind && !builtinAgents.has(profileKey)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["workerDefaults", "agents", profileKey, "kind"],
+          message: `Custom agent profile "${profileKey}" must specify "kind" (e.g. "claude", "agy", "codex", "pi").`,
+        });
+      }
+    }
+    if (cfg.workerDefaults.reviewer) {
+      const revAgent = cfg.workerDefaults.reviewer.agent;
+      if (!cfg.workerDefaults.agents[revAgent] && !builtinAgents.has(revAgent)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["workerDefaults", "reviewer", "agent"],
+          message: `workerDefaults.reviewer.agent "${revAgent}" is not defined in workerDefaults.agents.`,
+        });
+      }
+    }
   })
   .describe(
     "Top-level swarm configuration (generate with `mise run init` or copy `config/swarm.example.json` to gitignored `config/swarm.json`).",
@@ -401,6 +508,7 @@ export const ProjectConfigSchema = z
       .describe(
         "Optional per-project override for `workerDefaults.useWorktree`. Set `true` to allow multiple concurrent workers on this single repo via Git worktrees.",
       ),
+    reviewer: ProjectReviewerOverrideSchema.optional(),
     paths: z
       .record(z.string().min(1), z.string().min(1))
       .refine(
@@ -521,6 +629,14 @@ export const BoardReadChannelEnvelopeSchema = z
   })
   .passthrough();
 
+export const BoardReadThreadEnvelopeSchema = z
+  .object({
+    message: BoardMessageSchema,
+    replies: z.array(BoardMessageSchema).default([]),
+    cursor: z.string().nullable().optional(),
+  })
+  .passthrough();
+
 // ---------------------------------------------------------------------------
 // Swarm Registry channel schemas (#swarm/registry)
 // ---------------------------------------------------------------------------
@@ -533,6 +649,12 @@ export const MachineRegistryProjectSchema = z
       .boolean()
       .optional()
       .describe("Whether this machine uses isolated Git worktrees for this project."),
+    reviewer: z
+      .string()
+      .optional()
+      .describe(
+        'Optional advertised reviewer profile/model summary for this project (e.g. "codex" or "pi (openai-codex/gpt-5.4)").',
+      ),
   })
   .strict();
 
@@ -699,10 +821,12 @@ export type MachineOs = z.infer<typeof MachineOsSchema>;
 export type MachineRole = z.infer<typeof MachineRoleSchema>;
 export type EffortLevel = z.infer<typeof EffortLevelSchema>;
 export type PermissionMode = z.infer<typeof PermissionModeSchema>;
-export type WorkerAgentProfile = z.infer<typeof WorkerAgentProfileSchema>;
+export type RawWorkerAgentProfile = z.infer<typeof WorkerAgentProfileSchema>;
+export type RawReviewerConfig = z.infer<typeof ReviewerConfigSchema>;
+export type ProjectReviewerOverride = z.infer<typeof ProjectReviewerOverrideSchema>;
 export type BoardConfig = z.infer<typeof BoardConfigSchema>;
 export type LeadConfig = z.infer<typeof LeadConfigSchema>;
-export type WorkerDefaultsConfig = z.infer<typeof WorkerDefaultsConfigSchema>;
+export type RawWorkerDefaultsConfig = z.infer<typeof WorkerDefaultsConfigSchema>;
 export type RawMachineConfig = z.infer<typeof MachineConfigSchema>;
 export type RawSwarmConfig = z.infer<typeof SwarmConfigSchema>;
 export type ProjectConfig = z.infer<typeof ProjectConfigSchema>;

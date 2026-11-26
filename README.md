@@ -21,14 +21,15 @@
 
 Most DIY agent swarms fail in the same four ways: polling loops burn tokens overnight, LLMs forget to renew task leases, stale long-lived sessions corrupt repo state, and adding a second machine turns into a YAML/SSH nightmare. `bordr-swarm` solves each one deterministically:
 
-| Pain Point                       | How `bordr-swarm` Solves It                                                                                                                                                                                                                                |
-| -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Idle LLM token burn**          | Two tiny TypeScript daemons — **Lead Watcher** and **Worker Dispatcher** — handle all polling, deduplication, task claiming, and `15m` lease renewals (every `5m`). Lead only wakes when a real `#inbox` post, `@lead` mention, or `blocked` task arrives. |
-| **Tab soup & babysitting**       | Completed worker tabs auto-close. Blocked or failed tabs stay open, renamed `[BLOCKED]` / `[FAILED]`, and light up in **Sheprd** (desktop & mobile). Closing a parked tab frees its slot and repo lock.                                                    |
-| **Cross-machine config drift**   | **Zero fleet-wide config.** Each machine runs a ~10-line local `config/swarm.json`. Workers auto-publish their capabilities and repo slugs to `#swarm/registry` (keeping local filesystem paths private), and Lead auto-syncs the merged catalog.          |
-| **Repo collisions**              | Workers spawn in plain Herdr tabs guarded by a **per-repo lock** so two agents never mutate the same working tree simultaneously — with opt-in `useWorktree: true` per project when you want parallel work on one repo.                                    |
-| **Single-agent lock-in**         | Default workers run **Claude Code** (`opus`, medium effort, `--permission-mode auto`), and any task can route to **Antigravity (`agy`)**, **Codex (`codex`)**, or **Pi (`pi`)** via `--label agent=<name>` (plus optional `model=` / `effort=` overrides). |
-| **OS service & proxy headaches** | One unified CLI (`mise run ...`) wraps `systemd --user` (Linux, unprivileged, `linger`-checked), `launchd` (macOS, race-free `kickstart`/`bootout`), auto-detected Tailscale MagicDNS `--allow-host`, and pull-based `mise run update`.                    |
+| Pain Point                       | How `bordr-swarm` Solves It                                                                                                                                                                                                                                                                                                              |
+| -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Idle LLM token burn**          | Two tiny TypeScript daemons — **Lead Watcher** and **Worker Dispatcher** — handle all polling, deduplication, task claiming, and `15m` lease renewals (every `5m`). Lead only wakes when a real `#inbox` post, `@lead` mention, or `blocked` task arrives.                                                                               |
+| **Tab soup & babysitting**       | Completed worker tabs auto-close. Blocked or failed tabs stay open, renamed `[BLOCKED]` / `[FAILED]`, and light up in **Sheprd** (desktop & mobile). Closing a parked tab frees its slot and repo lock.                                                                                                                                  |
+| **Cross-machine config drift**   | **Zero fleet-wide config.** Each machine runs a ~10-line local `config/swarm.json`. Workers auto-publish their capabilities and repo slugs to `#swarm/registry` (keeping local filesystem paths private), and Lead auto-syncs the merged catalog.                                                                                        |
+| **Repo collisions**              | Workers spawn in plain Herdr tabs guarded by a **per-repo lock** so two agents never mutate the same working tree simultaneously — with opt-in `useWorktree: true` per project when you want parallel work on one repo.                                                                                                                  |
+| **Single-agent lock-in**         | Default workers run **Claude Code** (`opus`, medium effort, `--permission-mode auto`), and any task can route to **Antigravity (`agy`)**, **Codex (`codex`)**, or **Pi (`pi`)** via `--label agent=<name>` (plus optional `model=` / `effort=` overrides).                                                                               |
+| **Unreviewed agent commits**     | Optional **Board-native Code Review Gate** spawns a separate **Reviewer** agent/model (configured globally per worker or overridden per project) in the same checkout before completion — keeping all review comments in the Board task thread, waking the original implementer for fixes, and escalating cleanly if `maxRounds` is hit. |
+| **OS service & proxy headaches** | One unified CLI (`mise run ...`) wraps `systemd --user` (Linux, unprivileged, `linger`-checked), `launchd` (macOS, race-free `kickstart`/`bootout`), auto-detected Tailscale MagicDNS `--allow-host`, and pull-based `mise run update`.                                                                                                  |
 
 ---
 
@@ -148,7 +149,16 @@ vercel board tasks create projects/example-app "Build macOS bundle" \
 
 # Chain cross-project tasks with dependencies
 vercel board tasks create projects/web-app "Display new health badge" --needs <task_id>
+
+# Optional per-task code review overrides (when reviewer is enabled on worker/project)
+vercel board tasks create projects/example-app "Fix README typo" --label review=skip
+vercel board tasks create projects/example-app "Refactor auth flow" \
+  --label reviewer=pi --label reviewer_model=openai-codex/gpt-5.4
 ```
+
+### Optional Cross-Model Code Review Gate
+
+Enable automated code review per worker machine (`workerDefaults.reviewer` in `config/swarm.json`) or override per repository (`config/projects.json` or `mise run project:add -- ~/path/to/repo --reviewer pi --reviewer-model openai-codex/gpt-5.4`). All review comments, fix rounds, and verdicts stay inside the Vercel Board task thread — no GitHub/PR dependency required, and tasks with no Git diff auto-skip review.
 
 ### Minimal Config, Strict Validation
 
@@ -207,7 +217,8 @@ npm run schemas:generate # Regenerate JSON Schemas from Zod definitions
 │   └── projects.schema.json    # Generated Zod v4 JSON Schema
 ├── prompts/
 │   ├── lead-CLAUDE.md          # Lead agent playbook template (GFM Markdown + triage policy)
-│   └── worker-prompt.md        # Ephemeral worker prompt template
+│   ├── worker-prompt.md        # Ephemeral worker prompt template
+│   └── reviewer-prompt.md      # Read-only code reviewer prompt template
 ├── src/
 │   ├── dispatcher.ts           # Per-machine Worker Dispatcher daemon (0 idle tokens)
 │   ├── lead-watcher.ts         # Event-driven Lead Watcher & #swarm/registry sync (0 idle tokens)

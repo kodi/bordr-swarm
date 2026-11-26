@@ -5,6 +5,7 @@ import {
   BoardChannelListEnvelopeSchema,
   BoardRawLabelSchema,
   BoardReadChannelEnvelopeSchema,
+  BoardReadThreadEnvelopeSchema,
   BoardTaskListEnvelopeSchema,
   BoardTaskStateSchema,
   type BoardMessage,
@@ -16,6 +17,12 @@ const execFileAsync = promisify(execFile);
 
 export type { BoardMessage, BoardTaskState, BoardThreadSummary };
 
+export interface BoardThreadDetail {
+  message: BoardMessage;
+  replies: BoardMessage[];
+  cursor: string | null;
+}
+
 export interface BoardTask {
   id: string;
   channel: string;
@@ -23,6 +30,7 @@ export interface BoardTask {
   text: string;
   labels: Record<string, string>;
   assignee?: string;
+  replyCount?: number;
   raw: Record<string, unknown>;
 }
 
@@ -167,6 +175,9 @@ export function normalizeBoardTask(raw: unknown): BoardTask | null {
         ? String(assigneeObj.data.profile ?? assigneeObj.data.handle ?? assigneeObj.data.name ?? "")
         : undefined;
 
+  const replyCount =
+    typeof obj.replies === "number" && Number.isFinite(obj.replies) ? obj.replies : undefined;
+
   return {
     id: String(rawId).replace(/^#/, ""),
     channel,
@@ -174,6 +185,7 @@ export function normalizeBoardTask(raw: unknown): BoardTask | null {
     text,
     labels: mergedLabels,
     assignee: assignee || undefined,
+    ...(replyCount !== undefined ? { replyCount } : {}),
     raw: obj,
   };
 }
@@ -411,6 +423,17 @@ export class BoardClient {
     const parsed = BoardReadChannelEnvelopeSchema.parse(data);
     return {
       threads: parsed.threads,
+      cursor: parsed.cursor ?? null,
+    };
+  }
+
+  async readThread(messageId: string): Promise<BoardThreadDetail> {
+    const cleanId = messageId.replace(/^#/, "");
+    const data = await this.runJson(["read", cleanId]);
+    const parsed = BoardReadThreadEnvelopeSchema.parse(data);
+    return {
+      message: parsed.message,
+      replies: parsed.replies,
       cursor: parsed.cursor ?? null,
     };
   }

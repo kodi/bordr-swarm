@@ -5,6 +5,12 @@
       "defaultMachine": "worker-machine",
       "baseBranch": "main",
       "useWorktree": false,
+      "reviewer": {
+        "enabled": true,
+        "agent": "pi",
+        "model": "openai-codex/gpt-5.4",
+        "effort": "high"
+      },
       "paths": {
         "worker-machine": "/Users/you/projects/example-app",
         "main-machine": "/home/agent/projects/example-app"

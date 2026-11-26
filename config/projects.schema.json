@@ -32,6 +32,41 @@
             "description": "Optional per-project override for `workerDefaults.useWorktree`. Set `true` to allow multiple concurrent workers on this single repo via Git worktrees.",
             "type": "boolean"
           },
+          "reviewer": {
+            "type": "object",
+            "properties": {
+              "enabled": {
+                "description": "Enable or disable automated code review for this project. Defaults to true when a project `reviewer` override block is specified without `enabled: false`.",
+                "type": "boolean"
+              },
+              "agent": {
+                "description": "Per-project reviewer agent profile override (e.g. \"pi\", \"codex\", \"claude\", \"agy\", or a custom profile key).",
+                "type": "string",
+                "minLength": 1
+              },
+              "model": {
+                "description": "Per-project reviewer model override (use \"\" to inherit the chosen agent profile's default model).",
+                "type": "string"
+              },
+              "effort": {
+                "description": "Per-project reviewer reasoning effort override.",
+                "type": "string",
+                "enum": ["", "low", "medium", "high", "xhigh", "max"]
+              },
+              "maxRounds": {
+                "description": "Per-project maximum review/fix rounds override.",
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 10
+              },
+              "skipIfNoDiff": {
+                "description": "Per-project override for skipping review when there are no Git changes.",
+                "type": "boolean"
+              }
+            },
+            "additionalProperties": false,
+            "description": "Optional per-project reviewer override. Omitted fields inherit `workerDefaults.reviewer` from `config/swarm.json`."
+          },
           "paths": {
             "type": "object",
             "propertyNames": {

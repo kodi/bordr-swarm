@@ -4,6 +4,7 @@ import {
   loadProjectsConfig,
   loadSwarmConfig,
   resolveCurrentMachineName,
+  resolveReviewerConfig,
   validateSwarmAndProjects,
   type ProjectsConfig,
   type SwarmConfig,
@@ -136,6 +137,69 @@ if (loadedSwarm && loadedProjects) {
       status: "ok",
       detail: "all project machines match swarm.json",
     });
+  }
+}
+
+// Validate configured reviewer binary availability on worker hosts
+if (loadedSwarm && currentMachineName) {
+  const machineCfg = loadedSwarm.machines[currentMachineName];
+  if (
+    machineCfg &&
+    (machineCfg.role === "worker" || machineCfg.role === "both" || machineCfg.maxWorkers > 0)
+  ) {
+    const reviewerIssues: string[] = [];
+    const activeReviewers = new Set<string>();
+
+    const checkReviewer = (label: string, projectCfg?: ProjectsConfig["projects"][string]) => {
+      try {
+        const rev = resolveReviewerConfig(loadedSwarm!.workerDefaults, projectCfg);
+        if (!rev.enabled || !rev.runtime) return;
+        const binCheck = runQuickCommand("which", [rev.runtime.kind]);
+        if (!binCheck.ok) {
+          reviewerIssues.push(
+            `${label} uses reviewer "${rev.runtime.profileName}" (binary "${rev.runtime.kind}" not in PATH)`,
+          );
+        } else {
+          activeReviewers.add(
+            rev.runtime.model
+              ? `${rev.runtime.profileName}(${rev.runtime.model})`
+              : rev.runtime.profileName,
+          );
+        }
+      } catch (err) {
+        reviewerIssues.push(`${label}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    };
+
+    checkReviewer("workerDefaults.reviewer");
+    if (loadedProjects) {
+      for (const [slug, proj] of Object.entries(loadedProjects.projects)) {
+        if (proj.paths[currentMachineName]) {
+          checkReviewer(`project "${slug}"`, proj);
+        }
+      }
+    }
+
+    if (reviewerIssues.length > 0) {
+      results.push({
+        name: "reviewer config",
+        status: "warn",
+        detail: reviewerIssues.join(" ; "),
+      });
+    } else if (activeReviewers.size > 0) {
+      results.push({
+        name: "reviewer config",
+        status: "ok",
+        detail: `enabled (${[...activeReviewers].join(", ")})`,
+      });
+    } else {
+      results.push({
+        name: "reviewer config",
+        status: "ok",
+        detail:
+          "disabled (configure workerDefaults.reviewer or project reviewer override to enable)",
+      });
+    }
   }
 }
 

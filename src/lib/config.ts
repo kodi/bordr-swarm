@@ -6,25 +6,57 @@ import {
   ProjectsConfigSchema,
   SwarmConfigSchema,
   type BoardConfig,
+  type EffortLevel,
   type LeadConfig,
   type MachineOs,
   type MachineRole,
+  type PermissionMode,
   type ProjectConfig,
+  type ProjectReviewerOverride,
   type ProjectsConfig,
-  type WorkerAgentProfile,
-  type WorkerDefaultsConfig,
 } from "./schemas.ts";
 
 export type {
   BoardConfig,
+  EffortLevel,
   LeadConfig,
   MachineOs,
   MachineRole,
+  PermissionMode,
   ProjectConfig,
+  ProjectReviewerOverride,
   ProjectsConfig,
-  WorkerAgentProfile,
-  WorkerDefaultsConfig,
 };
+
+export interface WorkerAgentProfile {
+  kind: string;
+  model: string;
+  effort: EffortLevel;
+  permissionMode: PermissionMode;
+  extraArgs: string[];
+}
+
+export interface ReviewerConfig {
+  enabled: boolean;
+  agent: string;
+  model: string;
+  effort?: EffortLevel;
+  maxRounds: number;
+  skipIfNoDiff: boolean;
+}
+
+export interface WorkerDefaultsConfig {
+  defaultAgent: string;
+  agents: Record<string, WorkerAgentProfile>;
+  reviewer: ReviewerConfig;
+  useWorktree: boolean;
+  closeTabOnComplete: boolean;
+  keepTabOnBlockedOrFailed: boolean;
+  maxParkedTabs: number;
+  pollIntervalSeconds: number;
+  idleTimeoutSeconds: number;
+  claimWaitSeconds: number;
+}
 
 export interface MachineConfig {
   role: MachineRole;
@@ -50,6 +82,14 @@ export interface ResolvedWorkerRuntime {
   effort: string;
   permissionMode: string;
   cliArgs: string[];
+}
+
+export interface ResolvedReviewerConfig {
+  enabled: boolean;
+  required: boolean;
+  maxRounds: number;
+  skipIfNoDiff: boolean;
+  runtime: ResolvedWorkerRuntime | null;
 }
 
 export const BUILTIN_AGENT_KINDS = ["claude", "agy", "codex", "pi"] as const;
@@ -146,6 +186,35 @@ export function parseSwarmConfig(input: unknown, sourceLabel = "swarm.json"): Sw
     Object.entries(machines).find(([, m]) => m.role === "main" || m.role === "both")?.[0] ||
     "";
 
+  const normalizedAgents: Record<string, WorkerAgentProfile> = {};
+  for (const [profileKey, profile] of Object.entries(parsed.workerDefaults.agents)) {
+    normalizedAgents[profileKey] = {
+      kind: profile.kind ?? profileKey,
+      model: profile.model,
+      effort: profile.effort,
+      permissionMode: profile.permissionMode,
+      extraArgs: profile.extraArgs,
+    };
+  }
+
+  const rawReviewer = parsed.workerDefaults.reviewer;
+  const normalizedReviewer: ReviewerConfig = rawReviewer
+    ? {
+        enabled: rawReviewer.enabled ?? true,
+        agent: rawReviewer.agent,
+        model: rawReviewer.model,
+        ...(rawReviewer.effort !== undefined ? { effort: rawReviewer.effort } : {}),
+        maxRounds: rawReviewer.maxRounds,
+        skipIfNoDiff: rawReviewer.skipIfNoDiff,
+      }
+    : {
+        enabled: false,
+        agent: "codex",
+        model: "",
+        maxRounds: 2,
+        skipIfNoDiff: true,
+      };
+
   return {
     board: {
       ...parsed.board,
@@ -156,7 +225,11 @@ export function parseSwarmConfig(input: unknown, sourceLabel = "swarm.json"): Sw
       ...parsed.lead,
       machine: inferredLeadMachine,
     },
-    workerDefaults: parsed.workerDefaults,
+    workerDefaults: {
+      ...parsed.workerDefaults,
+      agents: normalizedAgents,
+      reviewer: normalizedReviewer,
+    },
     machines,
   };
 }
@@ -172,6 +245,10 @@ export function parseProjectsConfig(input: unknown, sourceLabel = "projects.json
 export function validateSwarmAndProjects(swarm: SwarmConfig, projects: ProjectsConfig): string[] {
   const warnings: string[] = [];
   const knownMachines = new Set(Object.keys(swarm.machines));
+  const knownAgents = new Set<string>([
+    ...BUILTIN_AGENT_KINDS,
+    ...Object.keys(swarm.workerDefaults.agents),
+  ]);
 
   for (const [slug, project] of Object.entries(projects.projects)) {
     if (project.defaultMachine !== "any" && !knownMachines.has(project.defaultMachine)) {
@@ -185,6 +262,12 @@ export function validateSwarmAndProjects(swarm: SwarmConfig, projects: ProjectsC
           `Project "${slug}" defines a path for unknown machine "${machineKey}" not in swarm.json.`,
         );
       }
+    }
+    const revAgent = project.reviewer?.agent?.trim();
+    if (revAgent && !knownAgents.has(revAgent)) {
+      warnings.push(
+        `Project "${slug}" sets reviewer.agent="${revAgent}" which is not defined in swarm.json workerDefaults.agents.`,
+      );
     }
   }
   return warnings;
@@ -438,5 +521,133 @@ export function resolveWorkerRuntime(
     effort: effectiveProfile.effort,
     permissionMode: effectiveProfile.permissionMode,
     cliArgs: buildAgentCliArgs(effectiveProfile),
+  };
+}
+
+const VALID_EFFORT_LEVELS = new Set(["", "low", "medium", "high", "xhigh", "max"]);
+
+export function resolveReviewerConfig(
+  workerDefaults: WorkerDefaultsConfig,
+  project?: ProjectConfig,
+  taskLabels: Record<string, string> = {},
+): ResolvedReviewerConfig {
+  const base = workerDefaults.reviewer;
+  const projOverride = project?.reviewer;
+
+  const reviewLabel = (taskLabels.review ?? "").trim().toLowerCase();
+  const labelReviewerAgent = (taskLabels.reviewer ?? "").trim();
+  const labelReviewerModel = taskLabels.reviewer_model?.trim();
+  const labelReviewerEffort = taskLabels.reviewer_effort?.trim();
+
+  const explicitlySkipped =
+    reviewLabel === "skip" ||
+    reviewLabel === "false" ||
+    reviewLabel === "off" ||
+    reviewLabel === "0" ||
+    reviewLabel === "no";
+  const explicitlyRequired = reviewLabel === "required";
+  const explicitlyEnabledByLabel =
+    explicitlyRequired ||
+    reviewLabel === "true" ||
+    reviewLabel === "on" ||
+    reviewLabel === "1" ||
+    reviewLabel === "yes" ||
+    Boolean(labelReviewerAgent);
+
+  let enabled = base.enabled;
+  if (projOverride) {
+    enabled = projOverride.enabled ?? true;
+  }
+  if (explicitlySkipped) {
+    enabled = false;
+  } else if (explicitlyEnabledByLabel) {
+    enabled = true;
+  }
+
+  const maxRounds = projOverride?.maxRounds ?? base.maxRounds;
+  const skipIfNoDiff = projOverride?.skipIfNoDiff ?? base.skipIfNoDiff;
+
+  if (!enabled) {
+    return {
+      enabled: false,
+      required: false,
+      maxRounds,
+      skipIfNoDiff,
+      runtime: null,
+    };
+  }
+
+  // Resolve agent + model without leaking a previous agent's model when agent changes
+  let selectedAgent = base.agent;
+  let selectedModel = base.model;
+  let selectedEffort: EffortLevel | undefined = base.effort;
+
+  if (projOverride) {
+    const projectChangedAgent =
+      projOverride.agent !== undefined && projOverride.agent !== selectedAgent;
+    if (projOverride.agent !== undefined) {
+      selectedAgent = projOverride.agent;
+    }
+    if (projOverride.model !== undefined) {
+      selectedModel = projOverride.model;
+    } else if (projectChangedAgent) {
+      selectedModel = "";
+    }
+    if (projOverride.effort !== undefined) {
+      selectedEffort = projOverride.effort;
+    }
+  }
+
+  if (labelReviewerAgent) {
+    const labelChangedAgent = labelReviewerAgent !== selectedAgent;
+    selectedAgent = labelReviewerAgent;
+    if (labelReviewerModel !== undefined) {
+      selectedModel = labelReviewerModel;
+    } else if (labelChangedAgent) {
+      selectedModel = "";
+    }
+  } else if (labelReviewerModel !== undefined) {
+    selectedModel = labelReviewerModel;
+  }
+
+  if (labelReviewerEffort !== undefined && VALID_EFFORT_LEVELS.has(labelReviewerEffort)) {
+    selectedEffort = labelReviewerEffort as EffortLevel;
+  }
+
+  const baseProfile = workerDefaults.agents[selectedAgent] ?? BUILTIN_AGENT_PROFILES[selectedAgent];
+  if (!baseProfile) {
+    const known = [
+      ...new Set([...Object.keys(workerDefaults.agents), ...Object.keys(BUILTIN_AGENT_PROFILES)]),
+    ];
+    throw new Error(
+      `Unsupported reviewer agent "${selectedAgent}". Configured profiles: ${known.join(", ")}`,
+    );
+  }
+
+  // Reviewers need shell access for `git diff` and `vercel board reply`, so never run in `plan` mode.
+  const effectivePermissionMode: PermissionMode =
+    baseProfile.permissionMode === "plan" ? "auto" : baseProfile.permissionMode;
+
+  const effectiveProfile: WorkerAgentProfile = {
+    kind: baseProfile.kind,
+    model: selectedModel || baseProfile.model,
+    effort: selectedEffort ?? baseProfile.effort,
+    permissionMode: effectivePermissionMode,
+    extraArgs: [...baseProfile.extraArgs],
+  };
+
+  return {
+    enabled: true,
+    required: explicitlyRequired,
+    maxRounds,
+    skipIfNoDiff,
+    runtime: {
+      profileName: selectedAgent,
+      kind: effectiveProfile.kind,
+      model: effectiveProfile.model,
+      effort: effectiveProfile.effort,
+      permissionMode: effectiveProfile.permissionMode,
+      cliArgs: buildAgentCliArgs(effectiveProfile),
+    },
   };
 }

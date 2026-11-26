@@ -175,9 +175,9 @@
             "type": "object",
             "properties": {
               "kind": {
+                "description": "Herdr agent kind & CLI binary name passed to `herdr agent start --kind <kind>` (e.g. \"claude\", \"agy\", \"codex\", \"pi\"). Optional when the profile key itself is a built-in kind.",
                 "type": "string",
-                "minLength": 1,
-                "description": "Herdr agent kind & CLI binary name passed to `herdr agent start --kind <kind>` (e.g. \"claude\", \"agy\", \"codex\", \"pi\")."
+                "minLength": 1
               },
               "model": {
                 "default": "",
@@ -214,10 +214,48 @@
                 }
               }
             },
-            "required": ["kind"],
             "additionalProperties": false,
             "description": "Configuration profile for a selectable worker agent CLI, routed via task label `agent=<profileKey>`."
           }
+        },
+        "reviewer": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "description": "Enable automatic code review before completing tasks. Defaults to false when `reviewer` is omitted, or true when a `reviewer` block is explicitly configured.",
+              "type": "boolean"
+            },
+            "agent": {
+              "default": "codex",
+              "description": "Reviewer agent profile key from `workerDefaults.agents` (e.g. \"codex\", \"pi\", \"claude\", \"agy\", or a custom profile).",
+              "type": "string",
+              "minLength": 1
+            },
+            "model": {
+              "default": "",
+              "description": "Optional model override for the reviewer (e.g. \"openai-codex/gpt-5.4\" for pi, \"opus\" for claude). Leave empty (\"\") to inherit the profile's default model.",
+              "type": "string"
+            },
+            "effort": {
+              "description": "Optional reasoning effort override for the reviewer (e.g. \"high\"). Omit to inherit the profile's default effort.",
+              "type": "string",
+              "enum": ["", "low", "medium", "high", "xhigh", "max"]
+            },
+            "maxRounds": {
+              "default": 2,
+              "description": "Maximum review/fix rounds before escalating the task to `blocked` for human or Lead inspection (default 2).",
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10
+            },
+            "skipIfNoDiff": {
+              "default": true,
+              "description": "When true, automatically skips review if the task produced no local Git changes (e.g. research or Q&A tasks).",
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false,
+          "description": "Default code-review gate configuration for workers on this machine. Can be overridden per project in `config/projects.json`."
         },
         "useWorktree": {
           "default": false,

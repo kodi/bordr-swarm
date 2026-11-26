@@ -53,6 +53,14 @@
         "extraArgs": []
       }
     },
+    "reviewer": {
+      "enabled": false,
+      "agent": "codex",
+      "model": "",
+      "effort": "high",
+      "maxRounds": 2,
+      "skipIfNoDiff": true
+    },
     "useWorktree": false,
     "closeTabOnComplete": true,
     "keepTabOnBlockedOrFailed": true,

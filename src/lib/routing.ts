@@ -1,9 +1,11 @@
 import type { BoardTask } from "./board.ts";
 import {
+  resolveReviewerConfig,
   resolveWorkerRuntime,
   type MachineConfig,
   type ProjectConfig,
   type ProjectsConfig,
+  type ResolvedReviewerConfig,
   type ResolvedWorkerRuntime,
   type SwarmConfig,
 } from "./config.ts";
@@ -15,6 +17,7 @@ export interface CandidateTask {
   repoPath: string;
   useWorktree: boolean;
   runtime: ResolvedWorkerRuntime;
+  reviewer: ResolvedReviewerConfig;
 }
 
 export interface RoutingSkip {
@@ -172,6 +175,30 @@ export function selectEligibleTasks(params: {
       continue;
     }
 
+    let reviewer: ResolvedReviewerConfig;
+    try {
+      reviewer = resolveReviewerConfig(swarm.workerDefaults, project, task.labels);
+    } catch (err) {
+      skips.push({
+        taskId: task.id,
+        reason: err instanceof Error ? err.message : String(err),
+      });
+      continue;
+    }
+
+    if (
+      reviewer.enabled &&
+      reviewer.runtime &&
+      availableAgentKinds &&
+      !availableAgentKinds.has(reviewer.runtime.kind)
+    ) {
+      skips.push({
+        taskId: task.id,
+        reason: `reviewer binary "${reviewer.runtime.kind}" is not installed on ${machineName}`,
+      });
+      continue;
+    }
+
     candidates.push({
       task,
       projectSlug,
@@ -179,6 +206,7 @@ export function selectEligibleTasks(params: {
       repoPath,
       useWorktree,
       runtime,
+      reviewer,
     });
   }
 
@@ -193,18 +221,44 @@ export function renderWorkerPrompt(
     project: string;
     boardProfile: string;
     branch: string;
+    baseBranch?: string;
     agentProfile: string;
     humanHandle: string;
+    review?: {
+      enabled: boolean;
+      reviewerProfile?: string;
+      maxRounds?: number;
+    };
   },
 ): string {
+  const completionWorkflow = vars.review?.enabled
+    ? [
+        `   - **Do NOT call \`vercel board tasks complete\`** — an automated Reviewer (\`${vars.review.reviewerProfile ?? "reviewer"}\`, up to ${vars.review.maxRounds ?? 2} review rounds) will inspect your work directly on thread \`${vars.taskId}\` first.`,
+        `   - Post a structured summary reply on thread \`${vars.taskId}\` (**Changes**, **Verification**, and branch/commit SHA) ending with the exact final line:`,
+        "     ```",
+        "     STATUS: READY_FOR_REVIEW",
+        "     ```",
+        "   - Stop cleanly and wait — if the Reviewer approves, the Dispatcher completes the task and closes your tab automatically. If changes are requested, the Dispatcher will wake you in this tab to fix them.",
+      ].join("\n")
+    : [
+        `   - Post a structured final summary reply on thread \`${vars.taskId}\` (**Changes**, **Verification**, and branch/commit SHA).`,
+        "   - Mark the task complete with a concise summary:",
+        "     ```bash",
+        `     vercel board tasks complete ${vars.taskId} "<summary + verification>"`,
+        "     ```",
+        "   - Stop cleanly — the Dispatcher will close your tab once the task is marked `completed`.",
+      ].join("\n");
+
   return template
     .replaceAll("{{TASK_ID}}", vars.taskId)
     .replaceAll("{{CHANNEL}}", vars.channel)
     .replaceAll("{{PROJECT}}", vars.project)
     .replaceAll("{{BOARD_PROFILE}}", vars.boardProfile)
     .replaceAll("{{BRANCH}}", vars.branch)
+    .replaceAll("{{BASE_BRANCH}}", vars.baseBranch ?? "main")
     .replaceAll("{{AGENT_PROFILE}}", vars.agentProfile)
-    .replaceAll("{{HUMAN_HANDLE}}", vars.humanHandle);
+    .replaceAll("{{HUMAN_HANDLE}}", vars.humanHandle)
+    .replaceAll("{{COMPLETION_WORKFLOW}}", completionWorkflow);
 }
 
 export function shortTaskId(taskId: string): string {
@@ -217,7 +271,19 @@ export function formatTabLabel(
   taskId: string,
   agentProfile: string,
   prefix?: "BLOCKED" | "FAILED",
+  tag?: string,
 ): string {
-  const base = `task-${shortTaskId(taskId)} (${agentProfile})`;
+  const mid = tag ? ` ${tag}` : "";
+  const base = `task-${shortTaskId(taskId)}${mid} (${agentProfile})`;
+  return prefix ? `[${prefix}] ${base}` : base;
+}
+
+export function formatReviewTabLabel(
+  taskId: string,
+  reviewerProfile: string,
+  round: number,
+  prefix?: "BLOCKED" | "FAILED",
+): string {
+  const base = `review-${shortTaskId(taskId)} r${round} (${reviewerProfile})`;
   return prefix ? `[${prefix}] ${base}` : base;
 }

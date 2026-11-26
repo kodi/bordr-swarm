@@ -51,6 +51,13 @@ function makeSwarm(): SwarmConfig {
           extraArgs: [],
         },
       },
+      reviewer: {
+        enabled: false,
+        agent: "codex",
+        model: "",
+        maxRounds: 2,
+        skipIfNoDiff: true,
+      },
       useWorktree: false,
       closeTabOnComplete: true,
       keepTabOnBlockedOrFailed: true,

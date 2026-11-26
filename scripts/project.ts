@@ -9,6 +9,9 @@ import {
   loadProjectsConfig,
   loadSwarmConfig,
   resolveCurrentMachineName,
+  resolveReviewerConfig,
+  type EffortLevel,
+  type ProjectReviewerOverride,
   type ProjectsConfig,
   type SwarmConfig,
 } from "../src/lib/config.ts";
@@ -81,7 +84,7 @@ function saveProjects(projectsPath: string, data: ProjectsConfig): void {
 function printUsage(): void {
   console.log("Usage:");
   console.log(
-    "  mise run project:add -- <path> [--slug <name>] [--branch <base>] [--worktree] [--no-publish]",
+    "  mise run project:add -- <path> [--slug <name>] [--branch <base>] [--worktree] [--reviewer <agent>] [--reviewer-model <model>] [--reviewer-effort <level>] [--no-review] [--no-publish]",
   );
   console.log("  mise run project:rm -- <slug> [--no-publish]");
   console.log("  mise run project:ls");
@@ -117,7 +120,20 @@ async function main(): Promise<void> {
     }
     console.log(`Projects configured on "${machineName}":`);
     for (const [slug, proj] of entries) {
-      console.log(`  - ${slug} -> ${proj.paths[machineName]} (base=${proj.baseBranch})`);
+      let revText = "reviewer=off";
+      try {
+        const rev = resolveReviewerConfig(swarm.workerDefaults, proj);
+        if (rev.enabled && rev.runtime) {
+          revText = rev.runtime.model
+            ? `reviewer=${rev.runtime.profileName}(${rev.runtime.model})`
+            : `reviewer=${rev.runtime.profileName}`;
+        }
+      } catch (err) {
+        revText = `reviewer=INVALID(${err instanceof Error ? err.message : String(err)})`;
+      }
+      console.log(
+        `  - ${slug} -> ${proj.paths[machineName]} (base=${proj.baseBranch}, ${revText})`,
+      );
     }
     return;
   }
@@ -135,6 +151,10 @@ async function main(): Promise<void> {
     let customSlug = "";
     let customBranch = "";
     let useWorktree: boolean | undefined;
+    let reviewerAgent: string | undefined;
+    let reviewerModel: string | undefined;
+    let reviewerEffort: EffortLevel | undefined;
+    let disableReview = false;
 
     for (let i = 2; i < args.length; i += 1) {
       const flag = args[i];
@@ -146,6 +166,17 @@ async function main(): Promise<void> {
         i += 1;
       } else if (flag === "--worktree") {
         useWorktree = true;
+      } else if (flag === "--reviewer" && args[i + 1]) {
+        reviewerAgent = args[i + 1]!;
+        i += 1;
+      } else if (flag === "--reviewer-model" && args[i + 1]) {
+        reviewerModel = args[i + 1]!;
+        i += 1;
+      } else if (flag === "--reviewer-effort" && args[i + 1]) {
+        reviewerEffort = args[i + 1]! as EffortLevel;
+        i += 1;
+      } else if (flag === "--no-review") {
+        disableReview = true;
       }
     }
 
@@ -159,10 +190,29 @@ async function main(): Promise<void> {
 
     const cfg = loadOrInitProjects(repoRoot, projectsPath);
     const existing = cfg.projects[slug];
+
+    let reviewer: ProjectReviewerOverride | undefined = existing?.reviewer;
+    if (disableReview) {
+      reviewer = { ...existing?.reviewer, enabled: false };
+    } else if (
+      reviewerAgent !== undefined ||
+      reviewerModel !== undefined ||
+      reviewerEffort !== undefined
+    ) {
+      reviewer = {
+        ...existing?.reviewer,
+        enabled: true,
+        ...(reviewerAgent !== undefined ? { agent: reviewerAgent } : {}),
+        ...(reviewerModel !== undefined ? { model: reviewerModel } : {}),
+        ...(reviewerEffort !== undefined ? { effort: reviewerEffort } : {}),
+      };
+    }
+
     cfg.projects[slug] = {
       defaultMachine: existing?.defaultMachine ?? machineName,
       baseBranch: customBranch || existing?.baseBranch || baseBranch,
       useWorktree: useWorktree ?? existing?.useWorktree ?? false,
+      ...(reviewer ? { reviewer } : {}),
       paths: {
         ...existing?.paths,
         [machineName]: fullPath,
@@ -170,8 +220,13 @@ async function main(): Promise<void> {
     };
 
     saveProjects(projectsPath, cfg);
+    const resolvedRev = resolveReviewerConfig(swarm.workerDefaults, cfg.projects[slug]);
+    const revSummary =
+      resolvedRev.enabled && resolvedRev.runtime
+        ? `, reviewer=${resolvedRev.runtime.profileName}${resolvedRev.runtime.model ? `(${resolvedRev.runtime.model})` : ""}`
+        : "";
     console.log(
-      `[project:add] Registered "${slug}" -> ${fullPath} (machine=${machineName}, base=${cfg.projects[slug]!.baseBranch})`,
+      `[project:add] Registered "${slug}" -> ${fullPath} (machine=${machineName}, base=${cfg.projects[slug]!.baseBranch}${revSummary})`,
     );
 
     if (!noPublish) {

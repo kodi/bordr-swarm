@@ -1,5 +1,5 @@
 import type { BoardClient } from "./board.ts";
-import type { ProjectsConfig, SwarmConfig } from "./config.ts";
+import { resolveReviewerConfig, type ProjectsConfig, type SwarmConfig } from "./config.ts";
 import {
   MachineRegistryEntrySchema,
   type MachineRegistryEntry,
@@ -33,10 +33,22 @@ export function buildMachineRegistryEntry(params: {
   const hostedProjects: MachineRegistryProject[] = [];
   for (const [slug, proj] of Object.entries(params.projects.projects)) {
     if (proj.paths[params.machineName]) {
+      let reviewerSummary: string | undefined;
+      try {
+        const rev = resolveReviewerConfig(params.swarm.workerDefaults, proj);
+        if (rev.enabled && rev.runtime) {
+          reviewerSummary = rev.runtime.model
+            ? `${rev.runtime.profileName} (${rev.runtime.model})`
+            : rev.runtime.profileName;
+        }
+      } catch {
+        // Ignore invalid reviewer override during registry advertisement
+      }
       hostedProjects.push({
         slug,
         baseBranch: proj.baseBranch,
         ...(proj.useWorktree !== undefined ? { useWorktree: proj.useWorktree } : {}),
+        ...(reviewerSummary ? { reviewer: reviewerSummary } : {}),
       });
     }
   }
@@ -66,10 +78,10 @@ export function formatRegistryCardMarkdown(entry: MachineRegistryEntry): string 
       ? entry.projects
           .map(
             (p) =>
-              `| \`${p.slug}\` | \`${p.baseBranch}\` | ${p.useWorktree ? "worktree" : "plain-tab"} |`,
+              `| \`${p.slug}\` | \`${p.baseBranch}\` | ${p.useWorktree ? "worktree" : "plain-tab"} | ${p.reviewer ? `\`${p.reviewer}\`` : "—"} |`,
           )
           .join("\n")
-      : "| *(none configured yet)* | — | — |";
+      : "| *(none configured yet)* | — | — | — |";
 
   return [
     `### Machine Registry: \`${entry.machine}\``,
@@ -78,8 +90,8 @@ export function formatRegistryCardMarkdown(entry: MachineRegistryEntry): string 
     `- **Agents:** ${entry.agents.length > 0 ? entry.agents.map((a) => `\`${a}\``).join(", ") : "*(none)*"}`,
     `- **Labels:** ${entry.labels.map((l) => `\`${l}\``).join(", ")}`,
     "",
-    "| Project | Base Branch | Mode |",
-    "| --- | --- | --- |",
+    "| Project | Base Branch | Mode | Reviewer |",
+    "| --- | --- | --- | --- |",
     projectRows,
     "",
     "```json",

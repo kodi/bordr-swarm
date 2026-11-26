@@ -9,16 +9,11 @@ Your `BOARD_PROFILE` (`{{BOARD_PROFILE}}`) and `VERCEL_SCOPE` are already set in
    vercel board read {{TASK_ID}}
    ```
 2. Check repository instructions (`AGENTS.md`, `CLAUDE.md`) and Sheprd repo memory (`sheprd memory index`) if available.
-3. Check `git status` and create a clean task branch (e.g. `task/{{TASK_ID}}`) unless the task specifies working directly on an existing branch.
-4. Post brief, concrete progress updates to thread `{{TASK_ID}}` at meaningful milestones using `vercel board reply {{TASK_ID}} "<update>"` (do not spam every shell command).
-5. Implement and verify your changes (run relevant builds/tests/linters).
+3. Check `git status` and create a clean local task branch (`{{BRANCH}}`) from `{{BASE_BRANCH}}` unless the task specifies working directly on an existing branch.
+4. Keep all communication inside the Vercel Board task thread `{{TASK_ID}}` — post brief, concrete progress updates at meaningful milestones using `vercel board reply {{TASK_ID}} "<update>"` (do not spam every shell command).
+5. Implement and verify your changes (run relevant builds/tests/linters). Commit your work cleanly on your task branch. Only push or open a PR if the task explicitly asks you to.
 6. When finished:
-   - Commit on your task branch, push, and open a PR if appropriate.
-   - Mark the task complete with a concise summary + verification + PR/commit link:
-     ```bash
-     vercel board tasks complete {{TASK_ID}} "<summary + verification + PR link>"
-     ```
-   - Stop cleanly — the Dispatcher will close your tab once the task is marked `completed`.
+{{COMPLETION_WORKFLOW}}
 7. If you are blocked:
    - Post a clear explanation of the blocker and concrete options on thread `{{TASK_ID}}`.
    - Tag `@lead` (or `{{HUMAN_HANDLE}}` if it requires human credentials/approval).
@@ -34,4 +29,4 @@ Vercel Board renders full GitHub-Flavored Markdown (headings, bold/italic, inlin
 
 - Use stdin heredocs (`vercel board reply {{TASK_ID}} - <<'EOF' ... EOF`) for multi-line replies.
 - Use inline code for file paths, symbols, commands, and commit SHAs; fenced code blocks for command output or error snippets.
-- Post a structured final summary reply (e.g. **Changes**, **Verification** with `- [x]` checklist or table, and PR/commit links) right before calling `vercel board tasks complete {{TASK_ID}} "<short one-line summary>"`.
+- Post a structured summary reply (e.g. **Changes**, **Verification** with `- [x]` checklist or table, and branch/commit SHA).

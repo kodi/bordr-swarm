@@ -58,10 +58,16 @@ sequenceDiagram
     Disp->>Board: Renew task lease (--lease 15m)
   end
 
-  alt Task succeeds
-    Herdr->>Board: vercel board tasks complete <id> "<summary + PR>"
-    Disp->>Herdr: Auto-close Herdr tab & release repo lock
-  else Worker blocked or needs approval
+  alt Task succeeds (direct or after Reviewer approval)
+    opt Reviewer enabled & local git diff exists
+      Herdr->>Board: Reply summary + STATUS: READY_FOR_REVIEW
+      Disp->>Herdr: Spawn Reviewer tab in same checkout (reviewer-<host>-<id>)
+      Herdr->>Board: Reviewer replies findings + VERDICT: APPROVE / REQUEST_CHANGES
+      Note over Disp,Herdr: On REQUEST_CHANGES (round < maxRounds), wake original implementer to fix & re-review
+    end
+    Disp->>Board: Mark task completed (or implementer completes directly if review off)
+    Disp->>Herdr: Auto-close Herdr tab(s) & release repo lock
+  else Worker blocked or review cap reached
     Herdr->>Board: vercel board tasks block <id> "<reason>"
     Disp->>Herdr: Rename tab "[BLOCKED] task-<id> (<agent>)" & park
     Herdr-->>Sheprd: Surfaces blocked badge for human inspection
@@ -96,9 +102,9 @@ Uses the hosted Vercel team board (`vercel board whoami` on every machine authen
 - Labels:
   - `machine=<name>` (or `machine=any`, `os=macos|linux`) — routes the task to a matching host dispatcher.
   - `agent=claude` (default), `agent=agy`, `agent=codex`, or `agent=pi` — selects the worker CLI profile from `workerDefaults.agents` in `config/swarm.json`.
-  - Optional overrides: `model=<model>`, `effort=low|medium|high|xhigh|max`, `kind=bug|feature|chore`.
-- Dependencies: `--needs <task_id>` to sequence cross-project or review tasks automatically.
-- Identities: `--as <name>` or `BOARD_PROFILE=<name>` env var (`lead`, `worker-<machine>-<taskId>`).
+  - Optional overrides: `model=<model>`, `effort=low|medium|high|xhigh|max`, `kind=bug|feature|chore`, and review controls (`review=skip|required`, `reviewer=<agent>`, `reviewer_model=<model>`, `reviewer_effort=<level>`).
+- Dependencies: `--needs <task_id>` to sequence cross-project tasks automatically (downstream tasks only unblock after review passes).
+- Identities: `--as <name>` or `BOARD_PROFILE=<name>` env var (`lead`, `worker-<machine>-<taskId>`, `reviewer-<machine>-<taskId>`).
 
 ### 2. Board Inspector UI (`main-machine`)
 
@@ -134,7 +140,17 @@ Runs as a **per-machine daemon** locally on each worker machine (Linux or macOS)
      - `codex`: `-c model_reasoning_effort="<effort>" -c sandbox_workspace_write.network_access=true --approve-for-me` (+ `--model <model>` when configured; network access is enabled in `workspace-write` so `vercel board` CLI calls succeed)
      - `pi`: `--thinking <effort> --approve` (+ `--model <model>` when configured, including `provider/id` patterns such as `openai-codex/...`)
    - Deliver rendered `prompts/worker-prompt.md` via `herdr agent prompt`.
-4. **Monitor & Cleanup:**
+4. **Optional Code Review Gate (Board-native, zero GitHub/PR dependency):**
+   - Configured globally per worker host in `config/swarm.json` (`workerDefaults.reviewer`, disabled by default until configured) and/or overridden per project in `config/projects.json` (`projects.<slug>.reviewer`, or via `mise run project:add -- <path> --reviewer <agent> --reviewer-model <model>`).
+   - Resolution precedence: task labels (`review=skip|required`, `reviewer=`, `reviewer_model=`, `reviewer_effort=`) → project `reviewer` override → `workerDefaults.reviewer` → base agent profile in `workerDefaults.agents`.
+   - Runs **inside the same task lease and worker slot** so `--needs` dependencies, plain-tab repo locks, and temporary worktrees stay intact end-to-end:
+     1. Implementer commits on its task branch and posts a Board thread reply ending with `STATUS: READY_FOR_REVIEW` (all discussion stays in the Vercel Board task thread).
+     2. If `skipIfNoDiff: true` (default) and no local Git changes exist (e.g. research/summary tasks), Dispatcher skips review and marks the task complete immediately.
+     3. Otherwise, Dispatcher spawns a separate **Reviewer** agent (typically a different CLI/model) in a tab inside the same workspace/worktree with `BOARD_PROFILE=reviewer-<machine>-<shortId>` and `prompts/reviewer-prompt.md` (read-only instructions).
+     4. Reviewer inspects the Board thread and `git diff <startHeadSha>..HEAD` and replies to the same Board thread ending with `VERDICT: APPROVE` or `VERDICT: REQUEST_CHANGES`.
+     5. On **`APPROVE`**: Dispatcher closes both tabs (or removes the worktree) and marks the task `completed`.
+     6. On **`REQUEST_CHANGES`**: Dispatcher closes the reviewer tab and wakes the **original implementer** in its warm tab with the review feedback for a fix commit and next review round. Once `maxRounds` (default `2`) is reached with blocking issues remaining, Dispatcher marks the task `blocked` (`awaiting_approval`), tags `@lead` + `humanHandle`, and parks `[BLOCKED]` in Sheprd.
+5. **Monitor & Cleanup:**
    - Poll Board task state + `herdr tab list` + `herdr agent list`:
    - **`completed` / `canceled`:** Close the Herdr tab (`herdr tab close <tabId>`) (or remove temporary worktree in worktree mode), stop lease renewal, free the slot and repo lock.
    - **`blocked` (Board state OR Herdr `blocked` UI state):**
