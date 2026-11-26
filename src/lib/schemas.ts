@@ -185,9 +185,17 @@ export const LeadConfigSchema = z
       .describe(
         "Directory on the main machine where `apply-main` writes rendered `CLAUDE.md` and symlinks `projects.json`.",
       ),
+    pollIntervalSeconds: z
+      .number()
+      .int()
+      .min(3)
+      .default(10)
+      .describe(
+        "Seconds between deterministic Lead Watcher checks for new #inbox messages, @lead mentions, and blocked tasks (0 LLM tokens while idle).",
+      ),
   })
   .strict()
-  .describe("Configuration for the persistent Lead triage agent on the main machine.");
+  .describe("Configuration for the event-driven Lead triage agent and Lead Watcher daemon.");
 
 export const WorkerDefaultsConfigSchema = z
   .object({
@@ -434,6 +442,64 @@ export const BoardTaskListEnvelopeSchema = z.union([
     .passthrough(),
 ]);
 
+export const BoardChannelListEnvelopeSchema = z
+  .object({
+    channels: z
+      .array(
+        z
+          .object({
+            path: z.string().min(1),
+          })
+          .passthrough(),
+      )
+      .default([]),
+    next: z.string().nullable().optional(),
+  })
+  .passthrough();
+
+export const BoardMessageSchema = z
+  .object({
+    id: z.string().min(1),
+    channel: z.string().optional(),
+    text: z.string().default(""),
+    createdAt: z.string().optional(),
+    deleted: z.boolean().optional(),
+    by: z
+      .object({
+        actor: z.string().optional(),
+        principal: z.string().optional(),
+        profile: z.string().nullable().optional(),
+      })
+      .passthrough()
+      .optional(),
+    author: z
+      .object({
+        id: z.string().optional(),
+        kind: z.string().optional(),
+        handle: z.string().optional(),
+        name: z.string().optional(),
+      })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough();
+
+export const BoardThreadSummarySchema = z
+  .object({
+    message: BoardMessageSchema,
+    replies: z.number().int().min(0).default(0),
+    last: BoardMessageSchema.nullable().optional(),
+  })
+  .passthrough();
+
+export const BoardReadChannelEnvelopeSchema = z
+  .object({
+    threads: z.array(BoardThreadSummarySchema).default([]),
+    cursor: z.string().nullable().optional(),
+    older: z.string().nullable().optional(),
+  })
+  .passthrough();
+
 // ---------------------------------------------------------------------------
 // Herdr CLI JSON schemas (verified against herdr 0.9.3)
 // ---------------------------------------------------------------------------
@@ -557,6 +623,8 @@ export type RawSwarmConfig = z.infer<typeof SwarmConfigSchema>;
 export type ProjectConfig = z.infer<typeof ProjectConfigSchema>;
 export type ProjectsConfig = z.infer<typeof ProjectsConfigSchema>;
 export type BoardTaskState = z.infer<typeof BoardTaskStateSchema>;
+export type BoardMessage = z.infer<typeof BoardMessageSchema>;
+export type BoardThreadSummary = z.infer<typeof BoardThreadSummarySchema>;
 export type HerdrAgentStatus = z.infer<typeof HerdrAgentStatusSchema>;
 export type HerdrWorkspace = z.infer<typeof HerdrWorkspaceSchema>;
 export type HerdrTab = z.infer<typeof HerdrTabSchema>;

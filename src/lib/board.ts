@@ -2,15 +2,19 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { z } from "zod";
 import {
+  BoardChannelListEnvelopeSchema,
   BoardRawLabelSchema,
+  BoardReadChannelEnvelopeSchema,
   BoardTaskListEnvelopeSchema,
   BoardTaskStateSchema,
+  type BoardMessage,
   type BoardTaskState,
+  type BoardThreadSummary,
 } from "./schemas.ts";
 
 const execFileAsync = promisify(execFile);
 
-export type { BoardTaskState };
+export type { BoardMessage, BoardTaskState, BoardThreadSummary };
 
 export interface BoardTask {
   id: string;
@@ -317,5 +321,62 @@ export class BoardClient {
   async reply(taskId: string, text: string, opts: { asProfile: string }): Promise<void> {
     const args = ["reply", taskId, text];
     await this.runJson(args, { asProfile: opts.asProfile });
+  }
+
+  async ensureChannel(channel: string, opts?: { asProfile?: string }): Promise<void> {
+    const clean = channel.replace(/^#/, "");
+    await this.runJson(["channels", "create", clean], { asProfile: opts?.asProfile });
+  }
+
+  async listChannels(prefix?: string): Promise<string[]> {
+    const args = ["channels"];
+    if (prefix) {
+      args.push(prefix.replace(/^#/, ""));
+    }
+    const data = await this.runJson(args);
+    const parsed = BoardChannelListEnvelopeSchema.parse(data);
+    return parsed.channels.map((ch) => ch.path);
+  }
+
+  async readChannel(
+    channel: string,
+    opts?: { limit?: number; after?: string },
+  ): Promise<{ threads: BoardThreadSummary[]; cursor: string | null }> {
+    const clean = channel.replace(/^#/, "");
+    const args = ["read", clean];
+    if (opts?.limit) {
+      args.push("--limit", String(opts.limit));
+    }
+    if (opts?.after) {
+      args.push("--after", opts.after);
+    }
+
+    let data: unknown;
+    try {
+      data = await this.runJson(args);
+    } catch (err) {
+      const stdout =
+        typeof err === "object" && err !== null && "stdout" in err
+          ? String((err as { stdout?: unknown }).stdout ?? "")
+          : "";
+      const stderr =
+        typeof err === "object" && err !== null && "stderr" in err
+          ? String((err as { stderr?: unknown }).stderr ?? "")
+          : "";
+      const combined = `${stdout}\n${stderr}`;
+      if (combined.includes("channel_not_found")) {
+        return { threads: [], cursor: null };
+      }
+      throw new Error(
+        `vercel board read ${clean} failed: ${combined.trim() || (err instanceof Error ? err.message : String(err))}`,
+        { cause: err },
+      );
+    }
+
+    const parsed = BoardReadChannelEnvelopeSchema.parse(data);
+    return {
+      threads: parsed.threads,
+      cursor: parsed.cursor ?? null,
+    };
   }
 }

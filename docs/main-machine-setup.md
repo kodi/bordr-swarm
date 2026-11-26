@@ -46,8 +46,9 @@ mise run doctor
 `mise run apply:main` idempotently:
 
 1. Installs and enables the Board Inspector UI background service (`systemd --user` on Linux, `launchd` on macOS) with `--allow-host` populated from `config/swarm.json`.
-2. Creates/updates `lead.workspaceDir` (default `~/swarm-hq`) with rendered `CLAUDE.md` and a symlink to `config/projects.json`.
-3. Optionally starts the Lead agent in Herdr when passed `--start-lead`.
+2. Installs and enables the deterministic **Lead Watcher** service (`bordr-lead-watcher.service` on Linux, `dev.swarm.lead-watcher` on macOS) that watches `#inbox`, `@lead` mentions, and `blocked` tasks with **0 idle LLM tokens** and wakes Lead in Herdr only when real events arrive.
+3. Creates/updates `lead.workspaceDir` (default `~/swarm-hq`) with rendered `CLAUDE.md` and a symlink to `config/projects.json`.
+4. Optionally pre-starts the Lead agent in Herdr when passed `--start-lead` (recommended on first run so you can approve Claude's one-time folder-trust prompt in Sheprd).
 
 ```bash
 # Preview changes first

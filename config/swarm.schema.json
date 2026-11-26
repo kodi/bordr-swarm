@@ -104,11 +104,18 @@
           "description": "Directory on the main machine where `apply-main` writes rendered `CLAUDE.md` and symlinks `projects.json`.",
           "type": "string",
           "minLength": 1
+        },
+        "pollIntervalSeconds": {
+          "default": 10,
+          "description": "Seconds between deterministic Lead Watcher checks for new #inbox messages, @lead mentions, and blocked tasks (0 LLM tokens while idle).",
+          "type": "integer",
+          "minimum": 3,
+          "maximum": 9007199254740991
         }
       },
       "required": ["machine"],
       "additionalProperties": false,
-      "description": "Configuration for the persistent Lead triage agent on the main machine."
+      "description": "Configuration for the event-driven Lead triage agent and Lead Watcher daemon."
     },
     "workerDefaults": {
       "type": "object",

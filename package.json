@@ -16,6 +16,7 @@
     "test": "node --test tests/*.test.ts",
     "schemas:generate": "node scripts/generate-schemas.ts",
     "dispatcher": "node src/dispatcher.ts",
+    "lead-watcher": "node src/lead-watcher.ts",
     "apply:main": "node scripts/apply-main.ts",
     "apply:worker": "node scripts/apply-worker.ts"
   },

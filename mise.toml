@@ -50,6 +50,10 @@ run = "node scripts/generate-schemas.ts"
 description = "Run the Worker Dispatcher daemon for this machine"
 run = "node src/dispatcher.ts"
 
+[tasks."lead-watcher"]
+description = "Run the deterministic 0-token Lead Watcher daemon for the main machine"
+run = "node src/lead-watcher.ts"
+
 [tasks."apply:main"]
 description = "Idempotently configure the main machine (Board Inspector UI service + Lead HQ workspace)"
 run = "node scripts/apply-main.ts"

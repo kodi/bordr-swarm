@@ -41,13 +41,13 @@ const defaultRunner: ExecRunner = async (cmd, args, opts) => {
   return { stdout: res.stdout, stderr: res.stderr };
 };
 
-export function sanitizeHerdrAgentName(prefix: string, rawId: string): string {
+export function sanitizeHerdrAgentName(prefix: string, rawId = ""): string {
   const cleanPrefix = prefix.toLowerCase().replace(/[^a-z0-9_-]/g, "");
   const cleanId = rawId
     .toLowerCase()
     .replace(/[^a-z0-9_-]/g, "-")
     .replace(/^-+|-+$/g, "");
-  const combined = `${cleanPrefix || "w"}-${cleanId || "task"}`;
+  const combined = cleanId ? `${cleanPrefix || "w"}-${cleanId}` : cleanPrefix || "w-task";
   const startsWithLetter = /^[a-z]/.test(combined) ? combined : `w-${combined}`;
   return startsWithLetter.slice(0, 32);
 }

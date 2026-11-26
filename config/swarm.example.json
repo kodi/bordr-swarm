@@ -17,7 +17,8 @@
     "model": "opus",
     "effort": "high",
     "permissionMode": "auto",
-    "workspaceDir": "~/swarm-hq"
+    "workspaceDir": "~/swarm-hq",
+    "pollIntervalSeconds": 10
   },
   "workerDefaults": {
     "defaultAgent": "claude",

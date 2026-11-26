@@ -145,6 +145,107 @@ WantedBy=default.target
 `;
 }
 
+function renderSystemdLeadWatcherUnit(params: {
+  repoRoot: string;
+  machine: string;
+  scope: string;
+  boardName: string;
+}): string {
+  const envLines = [
+    "Environment=PATH=%h/.local/share/mise/shims:%h/.local/bin:/usr/local/bin:/usr/bin:/bin",
+    `Environment=SWARM_MACHINE=${params.machine}`,
+    "Environment=NODE_NO_WARNINGS=1",
+  ];
+  if (params.scope) envLines.push(`Environment=VERCEL_SCOPE=${params.scope}`);
+  if (params.boardName) envLines.push(`Environment=VERCEL_BOARD_NAME=${params.boardName}`);
+
+  return `[Unit]
+Description=bordr-swarm Lead Watcher (0-token event router for Lead agent)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=${params.repoRoot}
+EnvironmentFile=-%h/.config/swarm/board.env
+${envLines.join("\n")}
+ExecStart=%h/.local/share/mise/shims/node ${resolve(params.repoRoot, "src/lead-watcher.ts")} --machine ${params.machine}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+`;
+}
+
+function renderLaunchdLeadWatcherPlist(params: {
+  home: string;
+  repoRoot: string;
+  machine: string;
+  vercelScope: string;
+  boardName: string;
+}): string {
+  const pathEnv = [
+    `${params.home}/.local/share/mise/shims`,
+    `${params.home}/.local/bin`,
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+  ].join(":");
+
+  const envEntries: Array<[string, string]> = [
+    ["PATH", pathEnv],
+    ["SWARM_MACHINE", params.machine],
+    ["NODE_NO_WARNINGS", "1"],
+  ];
+  if (params.vercelScope) envEntries.push(["VERCEL_SCOPE", params.vercelScope]);
+  if (params.boardName) envEntries.push(["VERCEL_BOARD_NAME", params.boardName]);
+
+  const envXml = envEntries
+    .map(([k, v]) => `    <key>${xmlEscape(k)}</key>\n    <string>${xmlEscape(v)}</string>`)
+    .join("\n");
+
+  const miseNode = resolve(params.home, ".local/share/mise/shims/node");
+  const nodeBin = existsSync(miseNode) ? miseNode : process.execPath;
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.swarm.lead-watcher</string>
+
+  <key>WorkingDirectory</key>
+  <string>${xmlEscape(params.repoRoot)}</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+${envXml}
+  </dict>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>${xmlEscape(nodeBin)}</string>
+    <string>${xmlEscape(resolve(params.repoRoot, "src/lead-watcher.ts"))}</string>
+    <string>--machine</string>
+    <string>${xmlEscape(params.machine)}</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>${xmlEscape(resolve(params.home, "Library/Logs/swarm-lead-watcher.out.log"))}</string>
+  <key>StandardErrorPath</key>
+  <string>${xmlEscape(resolve(params.home, "Library/Logs/swarm-lead-watcher.err.log"))}</string>
+</dict>
+</plist>
+`;
+}
+
 function renderLaunchdBoardUiPlist(params: {
   home: string;
   repoRoot: string;
@@ -362,10 +463,24 @@ async function main(): Promise<void> {
       flags.dryRun,
     );
 
+    const leadWatcherUnit = renderSystemdLeadWatcherUnit({
+      repoRoot,
+      machine: machineName,
+      scope: swarm.board.scope,
+      boardName: swarm.board.boardName,
+    });
+    writeFileIfChanged(
+      resolve(home, ".config/systemd/user/bordr-lead-watcher.service"),
+      leadWatcherUnit,
+      flags.dryRun,
+    );
+
     if (!flags.noReload) {
       runSystemctlUser(["daemon-reload"], flags.dryRun);
       runSystemctlUser(["enable", "--now", "vercel-board-ui.service"], flags.dryRun);
       runSystemctlUser(["restart", "vercel-board-ui.service"], flags.dryRun);
+      runSystemctlUser(["enable", "--now", "bordr-lead-watcher.service"], flags.dryRun);
+      runSystemctlUser(["restart", "bordr-lead-watcher.service"], flags.dryRun);
     }
   } else {
     const uid = typeof process.getuid === "function" ? process.getuid() : 501;
@@ -381,9 +496,21 @@ async function main(): Promise<void> {
     });
     writeFileIfChanged(plistPath, plistContent, flags.dryRun);
 
+    const leadWatcherPlistPath = resolve(home, "Library/LaunchAgents/dev.swarm.lead-watcher.plist");
+    const leadWatcherPlist = renderLaunchdLeadWatcherPlist({
+      home,
+      repoRoot,
+      machine: machineName,
+      vercelScope: swarm.board.scope,
+      boardName: swarm.board.boardName,
+    });
+    writeFileIfChanged(leadWatcherPlistPath, leadWatcherPlist, flags.dryRun);
+
     if (!flags.noReload) {
       runLaunchctl(["bootout", `gui/${uid}/dev.swarm.board-ui`], flags.dryRun, true);
       runLaunchctl(["bootstrap", `gui/${uid}`, plistPath], flags.dryRun, false);
+      runLaunchctl(["bootout", `gui/${uid}/dev.swarm.lead-watcher`], flags.dryRun, true);
+      runLaunchctl(["bootstrap", `gui/${uid}`, leadWatcherPlistPath], flags.dryRun, false);
     }
   }
 

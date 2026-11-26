@@ -13,7 +13,8 @@ flowchart LR
 
   subgraph MainMachine["Main Machine (Linux or macOS)"]
     BoardUI["Board Inspector UI\n(board inspect :4747 -> Caddy :4748)"]
-    Lead["Lead Agent (Claude Opus high)\nHerdr ~/swarm-hq\nvercel board wait"]
+    LeadWatcher["Lead Watcher (Node 24+ TS)\n0 LLM tokens · Watches #inbox,\n@lead mentions & blocked tasks"]
+    Lead["Lead Agent (Claude Opus high)\nHerdr ~/swarm-hq\nIdle until woken by event"]
   end
 
   subgraph WorkerMachine["Worker Machine(s) (macOS or Linux)"]
@@ -29,7 +30,8 @@ flowchart LR
 
   Human -->|"Post ideas / review"| BoardUI
   BoardUI <--> ControlPlane
-  Inbox -->|"wait / mentions"| Lead
+  ControlPlane -->|"Poll #inbox, @lead & blocked\n(0 LLM tokens)"| LeadWatcher
+  LeadWatcher -->|"Auto-start & wake via\nherdr agent prompt"| Lead
   Lead -->|"Create tasks + labels\n(machine=, agent=, --needs)"| Queue
   Queue <-->|"Claim · Renew every 5m\nComplete / Block"| Dispatcher
   Dispatcher -->|"Spawn plain tab + --env\nherdr agent start"| Herdr

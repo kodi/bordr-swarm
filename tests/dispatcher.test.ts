@@ -53,6 +53,7 @@ function createTestSwarmConfig(): SwarmConfig {
       effort: "high",
       permissionMode: "auto",
       workspaceDir: "~/swarm-hq",
+      pollIntervalSeconds: 10,
     },
     workerDefaults: {
       defaultAgent: "claude",
