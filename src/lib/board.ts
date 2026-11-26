@@ -55,8 +55,7 @@ export function extractJsonPayload(output: string): unknown {
   } catch {
     const objIdx = trimmed.indexOf("{");
     const arrIdx = trimmed.indexOf("[");
-    const startIdx =
-      objIdx === -1 ? arrIdx : arrIdx === -1 ? objIdx : Math.min(objIdx, arrIdx);
+    const startIdx = objIdx === -1 ? arrIdx : arrIdx === -1 ? objIdx : Math.min(objIdx, arrIdx);
     if (startIdx >= 0) {
       return JSON.parse(trimmed.slice(startIdx));
     }
@@ -250,6 +249,7 @@ export class BoardClient {
       }
       throw new Error(
         `vercel board tasks failed: ${combined.trim() || (err instanceof Error ? err.message : String(err))}`,
+        { cause: err },
       );
     }
 
@@ -282,28 +282,17 @@ export class BoardClient {
     return task;
   }
 
-  async renewTask(
-    taskId: string,
-    opts: { asProfile: string; lease: string },
-  ): Promise<void> {
+  async renewTask(taskId: string, opts: { asProfile: string; lease: string }): Promise<void> {
     const args = ["tasks", "renew", taskId, "--lease", opts.lease];
     await this.runJson(args, { asProfile: opts.asProfile });
   }
 
-  async completeTask(
-    taskId: string,
-    result: string,
-    opts: { asProfile: string },
-  ): Promise<void> {
+  async completeTask(taskId: string, result: string, opts: { asProfile: string }): Promise<void> {
     const args = ["tasks", "complete", taskId, result];
     await this.runJson(args, { asProfile: opts.asProfile });
   }
 
-  async failTask(
-    taskId: string,
-    reason: string,
-    opts: { asProfile: string },
-  ): Promise<void> {
+  async failTask(taskId: string, reason: string, opts: { asProfile: string }): Promise<void> {
     const args = ["tasks", "fail", taskId, reason];
     await this.runJson(args, { asProfile: opts.asProfile });
   }

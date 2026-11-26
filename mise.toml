@@ -19,8 +19,24 @@ description = "Check mise tools, Vercel Board auth, Herdr server, Claude CLI, an
 run = "node scripts/doctor.ts"
 
 [tasks.typecheck]
-description = "Typecheck all TypeScript files without emitting JS"
+description = "Typecheck all TypeScript files with native TypeScript 7"
 run = "npx tsc --noEmit"
+
+[tasks.lint]
+description = "Lint TypeScript files with oxlint"
+run = "npx oxlint"
+
+[tasks.fmt]
+description = "Format repository files with oxfmt"
+run = "npx oxfmt"
+
+[tasks."fmt:check"]
+description = "Check code formatting with oxfmt"
+run = "npx oxfmt --check"
+
+[tasks.check]
+description = "Run formatting check, oxlint, TypeScript 7 typecheck, and unit tests"
+run = "npm run check"
 
 [tasks.test]
 description = "Run unit tests with Node built-in test runner"

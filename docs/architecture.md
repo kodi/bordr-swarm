@@ -1,5 +1,80 @@
 # Swarm Architecture
 
+## System Overview
+
+```mermaid
+flowchart LR
+  Human["Human Operator\n(Browser / Sheprd)"]
+
+  subgraph ControlPlane["Vercel Board (Hosted Control Plane)"]
+    Inbox["#inbox\n(Raw requests & triage)"]
+    Queue["#projects/<slug>\n(Atomic task queue + leases)"]
+  end
+
+  subgraph MainMachine["Main Machine (Linux or macOS)"]
+    BoardUI["Board Inspector UI\n(board inspect :4747 -> Caddy :4748)"]
+    Lead["Lead Agent (Claude Opus high)\nHerdr ~/swarm-hq\nvercel board wait"]
+  end
+
+  subgraph WorkerMachine["Worker Machine(s) (macOS or Linux)"]
+    Dispatcher["Worker Dispatcher (Node 24+ TS)\n0 LLM tokens · Lease heartbeat\nPer-repo lock · Tab lifecycle"]
+    subgraph Herdr["Herdr Server (Local Socket)"]
+      W1["Tab: task-101 (claude)\nOpus medium · auto"]
+      W2["Tab: task-102 (agy)\nDefault model · auto"]
+      Parked["Tab: [BLOCKED] task-99\nParked for human review"]
+    end
+  end
+
+  Sheprd["Sheprd UI (Desktop / Mobile)\nLive terminals & blocked alerts"]
+
+  Human -->|"Post ideas / review"| BoardUI
+  BoardUI <--> ControlPlane
+  Inbox -->|"wait / mentions"| Lead
+  Lead -->|"Create tasks + labels\n(machine=, agent=, --needs)"| Queue
+  Queue <-->|"Claim · Renew every 5m\nComplete / Block"| Dispatcher
+  Dispatcher -->|"Spawn plain tab + --env\nherdr agent start"| Herdr
+  W1 -->|"Progress / complete / block"| Queue
+  W2 -->|"Progress / complete / block"| Queue
+  Herdr -.->|"SSH profile / live state"| Sheprd
+  Lead -.->|"SSH profile / live state"| Sheprd
+  Sheprd -->|"Approve / unblock / close"| Human
+```
+
+## Task Lifecycle
+
+```mermaid
+sequenceDiagram
+  autonumber
+  actor Human
+  participant Board as Vercel Board
+  participant Lead as Lead Agent (main-machine)
+  participant Disp as Worker Dispatcher (worker-machine)
+  participant Herdr as Herdr Worker Tab (claude / agy)
+  participant Sheprd as Sheprd UI
+
+  Human->>Board: Post request in #inbox
+  Board-->>Lead: Wake via vercel board wait
+  Lead->>Board: Create task in #projects/<slug> (labels: machine=, agent=)
+  Disp->>Board: Poll ready tasks (filter machine, OS, repo lock, agent CLI)
+  Disp->>Board: Claim task (--as worker-<host>-<id> --lease 15m)
+  Disp->>Herdr: Create plain tab (--env BOARD_PROFILE) & start claude/agy
+  Disp->>Herdr: Deliver rendered worker prompt
+
+  loop Every 5 minutes while claimed
+    Disp->>Board: Renew task lease (--lease 15m)
+  end
+
+  alt Task succeeds
+    Herdr->>Board: vercel board tasks complete <id> "<summary + PR>"
+    Disp->>Herdr: Auto-close Herdr tab & release repo lock
+  else Worker blocked or needs approval
+    Herdr->>Board: vercel board tasks block <id> "<reason>"
+    Disp->>Herdr: Rename tab "[BLOCKED] task-<id> (<agent>)" & park
+    Herdr-->>Sheprd: Surfaces blocked badge for human inspection
+    Human->>Sheprd: Resolve & close tab (frees parked slot + repo lock)
+  end
+```
+
 ## Design Goals
 
 1. **Single human cockpit:** Open the Vercel Board UI on your `main-machine` (from any tailnet/LAN device or inside Sheprd) to submit tasks, read status, and resolve escalated blockers.
@@ -17,10 +92,12 @@
 Uses the hosted Vercel team board (`vercel board whoami` on every machine authenticated with `vercel login`, with optional `VERCEL_SCOPE` / `boardName`).
 
 **Channel convention:**
+
 - `#inbox` — Raw human requests, cross-project ideas, and human ↔ Lead discussion.
 - `#projects/<slug>` — Concrete, self-contained tasks for a specific repo (e.g., `#projects/example-app`).
 
 **Task metadata:**
+
 - Labels:
   - `machine=<name>` (or `machine=any`, `os=macos|linux`) — routes the task to a matching host dispatcher.
   - `agent=claude` (default) or `agent=agy` — selects the worker CLI profile from `workerDefaults.agents` in `config/swarm.json`.
@@ -78,4 +155,4 @@ Runs as a **per-machine daemon** locally on each worker machine (Linux or macOS)
 2. **Shared repo checkouts in plain-tab mode:** The Dispatcher enforces a per-repo lock across active and parked plain-tab workers so two tasks never mutate the same working tree simultaneously. Enable `useWorktree: true` per project if you need parallel tasks on the same repository.
 3. **Host header protection on `board inspect`:** When reverse-proxying `board inspect`, pass `--allow-host <host>` for every hostname/port used by clients (handled automatically by `scripts/apply-main.ts` from `machines.<main>.allowedHosts`).
 4. **Non-interactive PATH:** `systemd --user` and macOS `launchd` do not load interactive shell profiles. Point services at `mise` shims (`~/.local/share/mise/shims`) or invoke `mise exec -- ...`.
-5. **Herdr ID scoping:** Pane/tab/workspace IDs (`w1:p1`) and agent names are unique *per Herdr server*, not globally across SSH machines.
+5. **Herdr ID scoping:** Pane/tab/workspace IDs (`w1:p1`) and agent names are unique _per Herdr server_, not globally across SSH machines.

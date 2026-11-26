@@ -80,6 +80,16 @@ Tasks created in `#projects/<slug>` support optional labels:
 
 ## Docs
 
-- [Architecture & Design](docs/architecture.md)
+- [Architecture & Design](docs/architecture.md) _(includes Mermaid topology & task-lifecycle diagrams)_
 - [Main Machine Setup Guide](docs/main-machine-setup.md)
 - [Worker Machine Setup Guide](docs/worker-machine-setup.md)
+
+## Development & Quality Checks
+
+Uses native **TypeScript 7**, **oxlint**, **oxfmt**, and **lefthook** pre-commit hooks on staged files:
+
+```bash
+npm install      # Installs dev tools & registers lefthook pre-commit hooks
+npm run check    # Runs oxfmt --check, oxlint, tsc --noEmit (TS 7), and node --test
+npm run fmt      # Auto-formats files with oxfmt
+```

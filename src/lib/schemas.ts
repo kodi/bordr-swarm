@@ -50,13 +50,10 @@ export const LabelStringSchema = z
 
 export const LeaseDurationSchema = z
   .string()
-  .refine(
-    (val) => {
-      const secs = parseDurationToSeconds(val);
-      return secs !== null && secs >= 30 && secs <= 3600;
-    },
-    'Must be a duration between "30s" and "1h" (Vercel Board lease limits), e.g. "15m".',
-  )
+  .refine((val) => {
+    const secs = parseDurationToSeconds(val);
+    return secs !== null && secs >= 30 && secs <= 3600;
+  }, 'Must be a duration between "30s" and "1h" (Vercel Board lease limits), e.g. "15m".')
   .describe(
     'Vercel Board task claim lease duration ("30s" to "1h", default "15m"). The deterministic dispatcher renews active leases automatically.',
   );
@@ -220,7 +217,7 @@ export const WorkerDefaultsConfigSchema = z
         },
       })
       .describe(
-        'Map of worker agent profile keys to CLI settings. Tasks can target any key here with `--label agent=<key>` (e.g. `agent=claude`, `agent=agy`).',
+        "Map of worker agent profile keys to CLI settings. Tasks can target any key here with `--label agent=<key>` (e.g. `agent=claude`, `agent=agy`).",
       ),
     useWorktree: z
       .boolean()
@@ -308,7 +305,7 @@ export const MachineConfigSchema = z
       .array(LabelStringSchema)
       .default([])
       .describe(
-        'Additional routing labels matched against task labels. `machine=<key>` and `os=<os>` are added automatically.',
+        "Additional routing labels matched against task labels. `machine=<key>` and `os=<os>` are added automatically.",
       ),
   })
   .strict()
@@ -322,7 +319,10 @@ export const SwarmConfigSchema = z
     workerDefaults: WorkerDefaultsConfigSchema,
     machines: z
       .record(z.string().min(1), MachineConfigSchema)
-      .refine((m) => Object.keys(m).length > 0, "At least one machine must be defined in `machines`.")
+      .refine(
+        (m) => Object.keys(m).length > 0,
+        "At least one machine must be defined in `machines`.",
+      )
       .describe(
         "Map of logical machine keys (e.g. `main-machine`, `worker-machine`, or your real hostnames) to their OS, role, capacity, and labels.",
       ),
@@ -381,7 +381,9 @@ export const ProjectConfigSchema = z
       .describe("Map of machine keys from `swarm.json` to absolute local repository paths."),
   })
   .strict()
-  .describe("Repository metadata and per-machine checkout paths for a single `#projects/<slug>` queue.");
+  .describe(
+    "Repository metadata and per-machine checkout paths for a single `#projects/<slug>` queue.",
+  );
 
 export const ProjectsConfigSchema = z
   .object({
@@ -506,18 +508,35 @@ export const HerdrAgentListResultSchema = z
 
 export const HerdrCreatedWorkspaceResultSchema = z
   .object({
-    workspace: z.object({ workspace_id: z.string().min(1), active_tab_id: z.string().optional() }).passthrough(),
-    tab: z.object({ tab_id: z.string().min(1) }).passthrough().optional(),
-    root_pane: z.object({ pane_id: z.string().min(1) }).passthrough().optional(),
-    pane: z.object({ pane_id: z.string().min(1) }).passthrough().optional(),
+    workspace: z
+      .object({ workspace_id: z.string().min(1), active_tab_id: z.string().optional() })
+      .passthrough(),
+    tab: z
+      .object({ tab_id: z.string().min(1) })
+      .passthrough()
+      .optional(),
+    root_pane: z
+      .object({ pane_id: z.string().min(1) })
+      .passthrough()
+      .optional(),
+    pane: z
+      .object({ pane_id: z.string().min(1) })
+      .passthrough()
+      .optional(),
   })
   .passthrough();
 
 export const HerdrCreatedTabResultSchema = z
   .object({
     tab: z.object({ tab_id: z.string().min(1), workspace_id: z.string().optional() }).passthrough(),
-    root_pane: z.object({ pane_id: z.string().min(1) }).passthrough().optional(),
-    pane: z.object({ pane_id: z.string().min(1) }).passthrough().optional(),
+    root_pane: z
+      .object({ pane_id: z.string().min(1) })
+      .passthrough()
+      .optional(),
+    pane: z
+      .object({ pane_id: z.string().min(1) })
+      .passthrough()
+      .optional(),
   })
   .passthrough();
 

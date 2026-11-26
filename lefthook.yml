@@ -1,0 +1,12 @@
+pre-commit:
+  parallel: true
+  jobs:
+    - name: oxfmt
+      glob: "*.{ts,mts,cts,js,mjs,cjs,json,yml,yaml,md}"
+      run: npx oxfmt --check --no-error-on-unmatched-pattern {staged_files}
+    - name: oxlint
+      glob: "*.{ts,mts,cts,js,mjs,cjs}"
+      run: npx oxlint {staged_files}
+    - name: typecheck
+      glob: "*.{ts,mts,cts}"
+      run: npx tsc --noEmit

@@ -1,6 +1,5 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { z } from "zod";
 import type { ExecRunner } from "./board.ts";
 import {
   HerdrAgentListResultSchema,
@@ -44,7 +43,10 @@ const defaultRunner: ExecRunner = async (cmd, args, opts) => {
 
 export function sanitizeHerdrAgentName(prefix: string, rawId: string): string {
   const cleanPrefix = prefix.toLowerCase().replace(/[^a-z0-9_-]/g, "");
-  const cleanId = rawId.toLowerCase().replace(/[^a-z0-9_-]/g, "-").replace(/^-+|-+$/g, "");
+  const cleanId = rawId
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, "-")
+    .replace(/^-+|-+$/g, "");
   const combined = `${cleanPrefix || "w"}-${cleanId || "task"}`;
   const startsWithLetter = /^[a-z]/.test(combined) ? combined : `w-${combined}`;
   return startsWithLetter.slice(0, 32);
@@ -82,10 +84,7 @@ export class HerdrClient {
     return subArgs;
   }
 
-  private async runJson(
-    subArgs: string[],
-    timeoutMs?: number,
-  ): Promise<Record<string, unknown>> {
+  private async runJson(subArgs: string[], timeoutMs?: number): Promise<Record<string, unknown>> {
     const { stdout } = await this.runner(this.binary, this.buildArgs(subArgs), {
       timeoutMs: timeoutMs ?? this.timeoutMs,
     });
@@ -230,9 +229,7 @@ export class HerdrClient {
     // `herdr worktree create` does not accept --env, so export env vars in the shell pane
     const envEntries = Object.entries(opts.env ?? {});
     if (envEntries.length > 0) {
-      const exportCmd = `export ${envEntries
-        .map(([k, v]) => `${k}=${shellQuote(v)}`)
-        .join(" ")}`;
+      const exportCmd = `export ${envEntries.map(([k, v]) => `${k}=${shellQuote(v)}`).join(" ")}`;
       await this.paneRun(paneId, exportCmd);
     }
 

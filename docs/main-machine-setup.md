@@ -32,11 +32,13 @@ cp config/projects.example.json config/projects.json
 ```
 
 In `config/swarm.json`:
+
 - Set `lead.machine` to your main machine's key (default `"main-machine"`, or rename it to match your host).
 - Set `machines.<name>.os` to `"linux"` or `"macos"`, plus `hostname` and `allowedHosts` (any hostname / Tailscale MagicDNS / IP:port you use to access the Board UI through a reverse proxy).
 - Set `board.humanHandle` to your handle (e.g. `"@alice"`) for escalations.
 
 Run preflight checks:
+
 ```bash
 mise run doctor
 ```
@@ -44,6 +46,7 @@ mise run doctor
 ## 3. Apply Main Machine Services
 
 `mise run apply:main` idempotently:
+
 1. Installs and enables the Board Inspector UI background service (`systemd --user` on Linux, `launchd` on macOS) with `--allow-host` populated from `config/swarm.json`.
 2. Creates/updates `lead.workspaceDir` (default `~/swarm-hq`) with rendered `CLAUDE.md` and a symlink to `config/projects.json`.
 3. Optionally starts the Lead agent in Herdr when passed `--start-lead`.
@@ -57,6 +60,7 @@ node scripts/apply-main.ts --start-lead
 ```
 
 Verify locally:
+
 ```bash
 curl -I http://127.0.0.1:4747
 ```

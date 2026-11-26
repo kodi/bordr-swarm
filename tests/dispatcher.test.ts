@@ -135,14 +135,7 @@ describe("config & worker agent selection", () => {
       model: "gemini-pro",
       effort: "high",
     });
-    assert.deepEqual(rt.cliArgs, [
-      "--model",
-      "gemini-pro",
-      "--effort",
-      "high",
-      "--mode",
-      "auto",
-    ]);
+    assert.deepEqual(rt.cliArgs, ["--model", "gemini-pro", "--effort", "high", "--mode", "auto"]);
 
     const bypassArgs = buildAgentCliArgs({
       kind: "agy",
@@ -151,11 +144,7 @@ describe("config & worker agent selection", () => {
       permissionMode: "bypassPermissions",
       extraArgs: [],
     });
-    assert.deepEqual(bypassArgs, [
-      "--effort",
-      "medium",
-      "--dangerously-skip-permissions",
-    ]);
+    assert.deepEqual(bypassArgs, ["--effort", "medium", "--dangerously-skip-permissions"]);
   });
 
   it("resolves explicit or role-based machine names cleanly", () => {
@@ -232,6 +221,12 @@ describe("config & worker agent selection", () => {
   });
 });
 
+const channelNotFoundRunner: ExecRunner = async () => {
+  const err = new Error("Command failed") as Error & { stdout?: string; stderr?: string };
+  err.stdout = JSON.stringify({ status: "error", reason: "channel_not_found" });
+  throw err;
+};
+
 describe("board & herdr helpers", () => {
   it("extracts JSON even if CLI banner precedes payload", () => {
     const parsed = extractJsonPayload('Vercel CLI 66.6.0\n{"tasks":[],"cursor":"0"}');
@@ -239,12 +234,7 @@ describe("board & herdr helpers", () => {
   });
 
   it("treats channel_not_found on empty projects/ prefix as empty task list", async () => {
-    const runner: ExecRunner = async () => {
-      const err = new Error("Command failed") as Error & { stdout?: string; stderr?: string };
-      err.stdout = JSON.stringify({ status: "error", reason: "channel_not_found" });
-      throw err;
-    };
-    const board = new BoardClient({}, runner);
+    const board = new BoardClient({}, channelNotFoundRunner);
     const tasks = await board.listTasks("projects/", { state: "all" });
     assert.deepEqual(tasks, []);
   });
@@ -311,8 +301,22 @@ describe("routing & plain-tab collision guard", () => {
 
     const tasks: BoardTask[] = [
       { id: "1", channel: "projects/repo-a", state: "ready", text: "A", labels: {}, raw: {} },
-      { id: "2", channel: "projects/repo-b", state: "ready", text: "B", labels: { agent: "agy" }, raw: {} },
-      { id: "3", channel: "projects/repo-b", state: "ready", text: "C", labels: { machine: "main-machine" }, raw: {} },
+      {
+        id: "2",
+        channel: "projects/repo-b",
+        state: "ready",
+        text: "B",
+        labels: { agent: "agy" },
+        raw: {},
+      },
+      {
+        id: "3",
+        channel: "projects/repo-b",
+        state: "ready",
+        text: "C",
+        labels: { machine: "main-machine" },
+        raw: {},
+      },
     ];
 
     const { candidates, skips } = selectEligibleTasks({
@@ -431,7 +435,10 @@ describe("SwarmDispatcher mocked lifecycle", () => {
           openTabs.set(tabId, { tab_id: tabId, workspace_id: wsId, label });
           return {
             stdout: JSON.stringify({
-              result: { tab: { tab_id: tabId, workspace_id: wsId }, root_pane: { pane_id: paneId } },
+              result: {
+                tab: { tab_id: tabId, workspace_id: wsId },
+                root_pane: { pane_id: paneId },
+              },
             }),
             stderr: "",
           };

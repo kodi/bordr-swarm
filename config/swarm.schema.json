@@ -90,28 +90,13 @@
         "effort": {
           "default": "high",
           "type": "string",
-          "enum": [
-            "",
-            "low",
-            "medium",
-            "high",
-            "xhigh",
-            "max"
-          ],
+          "enum": ["", "low", "medium", "high", "xhigh", "max"],
           "description": "Reasoning effort passed to the coding agent CLI (--effort). Use \"\" to omit the flag and rely on the CLI default."
         },
         "permissionMode": {
           "default": "auto",
           "type": "string",
-          "enum": [
-            "",
-            "auto",
-            "acceptEdits",
-            "bypassPermissions",
-            "manual",
-            "dontAsk",
-            "plan"
-          ],
+          "enum": ["", "auto", "acceptEdits", "bypassPermissions", "manual", "dontAsk", "plan"],
           "description": "Permission/approval policy for autonomous agents. Recommended: \"auto\" (maps to `--permission-mode auto` for claude and `--mode auto` for agy). \"bypassPermissions\" maps to `--dangerously-skip-permissions` on agy."
         },
         "workspaceDir": {
@@ -121,9 +106,7 @@
           "minLength": 1
         }
       },
-      "required": [
-        "machine"
-      ],
+      "required": ["machine"],
       "additionalProperties": false,
       "description": "Configuration for the persistent Lead triage agent on the main machine."
     },
@@ -175,14 +158,7 @@
               "effort": {
                 "default": "medium",
                 "type": "string",
-                "enum": [
-                  "",
-                  "low",
-                  "medium",
-                  "high",
-                  "xhigh",
-                  "max"
-                ],
+                "enum": ["", "low", "medium", "high", "xhigh", "max"],
                 "description": "Reasoning effort passed to the coding agent CLI (--effort). Use \"\" to omit the flag and rely on the CLI default."
               },
               "permissionMode": {
@@ -209,9 +185,7 @@
                 }
               }
             },
-            "required": [
-              "kind"
-            ],
+            "required": ["kind"],
             "additionalProperties": false,
             "description": "Configuration profile for a selectable worker agent CLI, routed via task label `agent=<profileKey>`."
           }
@@ -274,19 +248,12 @@
         "properties": {
           "role": {
             "type": "string",
-            "enum": [
-              "main",
-              "worker",
-              "both"
-            ],
+            "enum": ["main", "worker", "both"],
             "description": "Host role in the swarm: \"main\" runs the Board Inspector UI and Lead agent; \"worker\" runs the Worker Dispatcher daemon; \"both\" runs both on one machine."
           },
           "os": {
             "type": "string",
-            "enum": [
-              "linux",
-              "macos"
-            ],
+            "enum": ["linux", "macos"],
             "description": "Host operating system (\"linux\" uses systemd --user services; \"macos\" uses launchd LaunchAgents). Automatically adds an `os=<os>` routing label."
           },
           "hostname": {
@@ -327,21 +294,14 @@
             }
           }
         },
-        "required": [
-          "os"
-        ],
+        "required": ["os"],
         "additionalProperties": false,
         "description": "Configuration for a single physical or virtual machine in the swarm."
       },
       "description": "Map of logical machine keys (e.g. `main-machine`, `worker-machine`, or your real hostnames) to their OS, role, capacity, and labels."
     }
   },
-  "required": [
-    "board",
-    "lead",
-    "workerDefaults",
-    "machines"
-  ],
+  "required": ["board", "lead", "workerDefaults", "machines"],
   "additionalProperties": false,
   "description": "Top-level swarm configuration (copy `config/swarm.example.json` to gitignored `config/swarm.json`)."
 }

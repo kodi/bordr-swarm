@@ -26,13 +26,16 @@ cp config/projects.example.json config/projects.json
 ```
 
 In `config/swarm.json`:
+
 - Define your worker machine under `machines` with `os` (`"macos"` or `"linux"`), `hostname`, `maxWorkers` (e.g. `2`), and optional custom `labels`.
 - Customize `workerDefaults.agents` if you want to adjust default models/efforts/flags for `claude`, `agy`, or additional Herdr-supported agent CLIs.
 
 In `config/projects.json`:
+
 - Map each project slug (`#projects/<slug>`) to its local repository checkout path on each machine.
 
 Run preflight checks:
+
 ```bash
 mise run doctor
 ```

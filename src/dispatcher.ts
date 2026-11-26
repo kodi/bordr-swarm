@@ -206,7 +206,10 @@ export class SwarmDispatcher {
       return;
     }
 
-    if (this.parkedTabs.size >= this.swarm.workerDefaults.maxParkedTabs && this.swarm.workerDefaults.maxParkedTabs > 0) {
+    if (
+      this.parkedTabs.size >= this.swarm.workerDefaults.maxParkedTabs &&
+      this.swarm.workerDefaults.maxParkedTabs > 0
+    ) {
       log(
         "WARN",
         `Parked tab cap reached (${this.parkedTabs.size}/${this.swarm.workerDefaults.maxParkedTabs}); skipping new claims until blocked/failed tabs are closed in Sheprd.`,
@@ -417,7 +420,10 @@ export class SwarmDispatcher {
     // Prune parked tabs that the human already closed in Sheprd
     for (const [taskId, parked] of this.parkedTabs.entries()) {
       if (!tabsById.has(parked.tabId)) {
-        log("INFO", `Parked tab ${parked.tabId} for task #${taskId} was closed in Sheprd; freeing slot.`);
+        log(
+          "INFO",
+          `Parked tab ${parked.tabId} for task #${taskId} was closed in Sheprd; freeing slot.`,
+        );
         this.parkedTabs.delete(taskId);
       }
     }
@@ -426,7 +432,7 @@ export class SwarmDispatcher {
     const renewIntervalMs = this.swarm.board.leaseRenewIntervalSeconds * 1000;
     const idleTimeoutMs = this.swarm.workerDefaults.idleTimeoutSeconds * 1000;
 
-    for (const worker of [...this.activeWorkers.values()]) {
+    for (const worker of this.activeWorkers.values()) {
       const boardTask = tasksById.get(worker.taskId);
       const boardState = boardTask?.state ?? "unknown";
       const tabExists = tabsById.has(worker.tabId);
@@ -434,7 +440,10 @@ export class SwarmDispatcher {
 
       // 1. Completed or canceled on Board -> clean up tab/worktree and release slot
       if (boardState === "completed" || boardState === "canceled") {
-        log("INFO", `Task #${worker.taskId} is ${boardState} on Board; cleaning up worker ${worker.agentName}.`);
+        log(
+          "INFO",
+          `Task #${worker.taskId} is ${boardState} on Board; cleaning up worker ${worker.agentName}.`,
+        );
         await this.cleanupFinishedWorker(worker, tabExists);
         this.activeWorkers.delete(worker.taskId);
         continue;
@@ -442,7 +451,10 @@ export class SwarmDispatcher {
 
       // 2. Blocked on Board -> park tab in Sheprd, stop lease renewal, free active slot
       if (boardState === "blocked") {
-        log("INFO", `Task #${worker.taskId} marked blocked on Board; parking tab ${worker.tabId} in Sheprd.`);
+        log(
+          "INFO",
+          `Task #${worker.taskId} marked blocked on Board; parking tab ${worker.tabId} in Sheprd.`,
+        );
         if (tabExists) {
           await this.safeRenameTab(
             worker.tabId,
@@ -464,7 +476,10 @@ export class SwarmDispatcher {
 
       // 3. Failed on Board -> park tab as [FAILED] in Sheprd
       if (boardState === "failed") {
-        log("WARN", `Task #${worker.taskId} is failed on Board; parking tab ${worker.tabId} as [FAILED].`);
+        log(
+          "WARN",
+          `Task #${worker.taskId} is failed on Board; parking tab ${worker.tabId} as [FAILED].`,
+        );
         if (tabExists) {
           await this.safeRenameTab(
             worker.tabId,
@@ -531,7 +546,9 @@ export class SwarmDispatcher {
           const msg = snippet
             ? `Worker \`${worker.agentName}\` on \`${this.machineName}\` exited before completing/blocking the task.\n\nLast terminal output:\n\`\`\`\n${snippet}\n\`\`\``
             : `Worker \`${worker.agentName}\` on \`${this.machineName}\` closed or exited before completing/blocking the task.`;
-          await this.board.reply(worker.taskId, msg, { asProfile: worker.boardProfile }).catch(() => {});
+          await this.board
+            .reply(worker.taskId, msg, { asProfile: worker.boardProfile })
+            .catch(() => {});
           await this.board
             .failTask(worker.taskId, `Worker exited unexpectedly on ${this.machineName}`, {
               asProfile: worker.boardProfile,
@@ -545,7 +562,10 @@ export class SwarmDispatcher {
       if (!liveAgent) continue;
 
       // 6. Startup-blocked worker just became idle -> deliver initial prompt!
-      if (!worker.promptSent && (liveAgent.agent_status === "idle" || liveAgent.agent_status === "done")) {
+      if (
+        !worker.promptSent &&
+        (liveAgent.agent_status === "idle" || liveAgent.agent_status === "done")
+      ) {
         try {
           await this.herdr.promptAgent(worker.agentName, worker.promptText);
           worker.promptSent = true;
@@ -555,7 +575,10 @@ export class SwarmDispatcher {
             worker.tabId,
             formatTabLabel(worker.taskId, worker.runtime.profileName),
           );
-          log("INFO", `Delivered queued prompt to previously startup-blocked worker ${worker.agentName}.`);
+          log(
+            "INFO",
+            `Delivered queued prompt to previously startup-blocked worker ${worker.agentName}.`,
+          );
         } catch (err) {
           log(
             "WARN",
@@ -698,7 +721,10 @@ export class SwarmDispatcher {
     );
 
     if (machineCfg.maxWorkers <= 0 && !this.dryRun) {
-      log("WARN", `maxWorkers is 0 for "${this.machineName}"; dispatcher will idle without claiming tasks.`);
+      log(
+        "WARN",
+        `maxWorkers is 0 for "${this.machineName}"; dispatcher will idle without claiming tasks.`,
+      );
     }
 
     while (!this.stopping) {
@@ -769,7 +795,7 @@ const isMain =
 
 if (isMain) {
   main().catch((err) => {
-    log("ERROR", err instanceof Error ? err.stack ?? err.message : String(err));
+    log("ERROR", err instanceof Error ? (err.stack ?? err.message) : String(err));
     process.exit(1);
   });
 }

@@ -34,12 +34,7 @@ function runCommand(cmd: string, args: string[]): { ok: boolean; output: string 
   }
 }
 
-function checkVersion(
-  name: string,
-  cmd: string,
-  args: string[],
-  optional = false,
-): CheckResult {
+function checkVersion(name: string, cmd: string, args: string[], optional = false): CheckResult {
   const res = runCommand(cmd, args);
   if (!res.ok) {
     return {

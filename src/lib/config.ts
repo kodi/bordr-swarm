@@ -79,6 +79,7 @@ function readRawJson(filePath: string): unknown {
   } catch (err) {
     throw new Error(
       `Invalid JSON syntax in ${filePath}: ${err instanceof Error ? err.message : String(err)}`,
+      { cause: err },
     );
   }
 }
@@ -99,11 +100,7 @@ export function parseSwarmConfig(input: unknown, sourceLabel = "swarm.json"): Sw
   for (const [machineName, m] of Object.entries(parsed.machines)) {
     const role: MachineRole =
       m.role ??
-      (machineName === parsed.lead.machine
-        ? m.maxWorkers > 0
-          ? "both"
-          : "main"
-        : "worker");
+      (machineName === parsed.lead.machine ? (m.maxWorkers > 0 ? "both" : "main") : "worker");
 
     const labelSet = new Set(m.labels);
     labelSet.add(`machine=${machineName}`);
@@ -168,10 +165,7 @@ export function loadSwarmConfig(repoRoot = process.cwd(), configPath?: string): 
   return parseSwarmConfig(raw, resolvedPath);
 }
 
-export function loadProjectsConfig(
-  repoRoot = process.cwd(),
-  configPath?: string,
-): ProjectsConfig {
+export function loadProjectsConfig(repoRoot = process.cwd(), configPath?: string): ProjectsConfig {
   const resolvedPath =
     configPath ?? process.env.PROJECTS_CONFIG_PATH ?? resolve(repoRoot, "config/projects.json");
   const raw = readRawJson(resolvedPath);

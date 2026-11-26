@@ -5,6 +5,7 @@ Context for AI agents working in `vercel-board-herdr-agent-swarm`.
 ## Project Goal
 
 Build a reproducible, low-maintenance, multi-machine coding-agent swarm combining:
+
 1. **Vercel Board** (`vercel board`, CLI >= 66.6.0) as the shared message bus & atomic task queue (using a hosted Vercel team board, authenticated via `vercel login` on each host).
 2. **Herdr** (`herdr server` running on every machine, machines visible to each other via saved SSH profiles) as the terminal/workspace/worktree & agent process runtime.
 3. **Sheprd** as the native desktop/mobile UI to monitor active/blocked workers across all machines.
