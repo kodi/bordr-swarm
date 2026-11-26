@@ -102,16 +102,29 @@ function renderSystemdBoardUiUnit(params: {
   repoRoot: string;
   port: number;
   allowHosts: string[];
+  scope: string;
+  boardName: string;
+  boardUrl: string;
 }): string {
-  const allowArgs = params.allowHosts.flatMap((h) => ["--allow-host", h]).join(" ");
+  const extraFlags: string[] = [];
+  for (const h of params.allowHosts) {
+    extraFlags.push("--allow-host", h);
+  }
+  if (params.scope) {
+    extraFlags.push("--scope", params.scope);
+  } else if (params.boardUrl) {
+    extraFlags.push("--url", params.boardUrl);
+  }
+  if (params.boardName) {
+    extraFlags.push("--name", params.boardName);
+  }
+
   const execLine = [
     "%h/.local/share/mise/shims/board inspect",
     `--port ${params.port}`,
     "--no-open",
-    allowArgs,
-  ]
-    .filter(Boolean)
-    .join(" ");
+    ...extraFlags,
+  ].join(" ");
 
   return `[Unit]
 Description=Vercel Board Inspector UI (localhost only, optional reverse proxy)
@@ -139,6 +152,7 @@ function renderLaunchdBoardUiPlist(params: {
   allowHosts: string[];
   vercelScope: string;
   boardName: string;
+  boardUrl: string;
 }): string {
   const pathEnv = [
     `${params.home}/.local/share/mise/shims`,
@@ -166,6 +180,14 @@ function renderLaunchdBoardUiPlist(params: {
     "--no-open",
     ...params.allowHosts.flatMap((h) => ["--allow-host", h]),
   ];
+  if (params.vercelScope) {
+    args.push("--scope", params.vercelScope);
+  } else if (params.boardUrl) {
+    args.push("--url", params.boardUrl);
+  }
+  if (params.boardName) {
+    args.push("--name", params.boardName);
+  }
   const argsXml = args.map((a) => `    <string>${xmlEscape(a)}</string>`).join("\n");
 
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -200,6 +222,22 @@ ${argsXml}
 </dict>
 </plist>
 `;
+}
+
+function detectDefaultBoardUrl(): string {
+  try {
+    const out = execFileSync("vercel", ["board", "whoami", "--json"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 15_000,
+    });
+    const startIdx = out.indexOf("{");
+    if (startIdx === -1) return "";
+    const parsed = JSON.parse(out.slice(startIdx)) as { board?: unknown };
+    return typeof parsed.board === "string" ? parsed.board.trim() : "";
+  } catch {
+    return "";
+  }
 }
 
 async function ensureLeadRunning(params: {
@@ -288,6 +326,13 @@ async function main(): Promise<void> {
     ),
   ];
 
+  const resolvedBoardUrl = swarm.board.scope ? "" : detectDefaultBoardUrl();
+  if (!swarm.board.scope && !resolvedBoardUrl) {
+    console.warn(
+      "[apply:main] Warning: board.scope is empty and `vercel board whoami --json` did not return a board URL; `board inspect` may need --scope or --url.",
+    );
+  }
+
   console.log(
     `[apply:main] Configuring main machine "${machineName}" (os=${machineCfg.os}, hostname=${machineCfg.hostname}, viewerPort=${swarm.board.viewerPort})`,
   );
@@ -307,6 +352,9 @@ async function main(): Promise<void> {
       repoRoot,
       port: swarm.board.viewerPort,
       allowHosts,
+      scope: swarm.board.scope,
+      boardName: swarm.board.boardName,
+      boardUrl: resolvedBoardUrl,
     });
     writeFileIfChanged(
       resolve(home, ".config/systemd/user/vercel-board-ui.service"),
@@ -317,6 +365,7 @@ async function main(): Promise<void> {
     if (!flags.noReload) {
       runSystemctlUser(["daemon-reload"], flags.dryRun);
       runSystemctlUser(["enable", "--now", "vercel-board-ui.service"], flags.dryRun);
+      runSystemctlUser(["restart", "vercel-board-ui.service"], flags.dryRun);
     }
   } else {
     const uid = typeof process.getuid === "function" ? process.getuid() : 501;
@@ -328,6 +377,7 @@ async function main(): Promise<void> {
       allowHosts,
       vercelScope: swarm.board.scope,
       boardName: swarm.board.boardName,
+      boardUrl: resolvedBoardUrl,
     });
     writeFileIfChanged(plistPath, plistContent, flags.dryRun);
 

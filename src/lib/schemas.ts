@@ -118,7 +118,7 @@ export const BoardConfigSchema = z
       .min(1)
       .default("@owner")
       .describe(
-        'Human operator mention handle injected into Lead and Worker prompts for escalations (e.g. "@alice").',
+        'Human operator mention handle injected into Lead and Worker prompts for escalations (e.g. "@alice"). Find yours via `vercel board whoami --json` (field `handle`).',
       ),
     viewerPort: z
       .number()

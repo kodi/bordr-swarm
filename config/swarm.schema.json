@@ -34,7 +34,7 @@
         },
         "humanHandle": {
           "default": "@owner",
-          "description": "Human operator mention handle injected into Lead and Worker prompts for escalations (e.g. \"@alice\").",
+          "description": "Human operator mention handle injected into Lead and Worker prompts for escalations (e.g. \"@alice\"). Find yours via `vercel board whoami --json` (field `handle`).",
           "type": "string",
           "minLength": 1
         },
