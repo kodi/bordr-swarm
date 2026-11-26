@@ -220,9 +220,9 @@ npm run schemas:generate # Regenerate JSON Schemas from Zod definitions
 │   ├── worker-prompt.md        # Ephemeral worker prompt template
 │   └── reviewer-prompt.md      # Read-only code reviewer prompt template
 ├── src/
-│   ├── dispatcher.ts           # Per-machine Worker Dispatcher daemon (0 idle tokens)
+│   ├── dispatcher.ts           # Per-machine Worker Dispatcher daemon (thin imperative shell)
 │   ├── lead-watcher.ts         # Event-driven Lead Watcher & #swarm/registry sync (0 idle tokens)
-│   └── lib/                    # Typed wrappers: config, schemas, host-env, board, herdr, registry, routing
+│   └── lib/                    # Pure FSMs (session-fsm, task-fsm), effects, review, config, schemas, board, herdr, registry, routing
 ├── scripts/                    # bootstrap, init, apply, apply-main, apply-worker, stop, doctor, project, status, logs, update
 ├── infra/                      # Optional systemd, launchd, and Caddy reference templates
 └── tests/                      # Fast Node built-in unit tests (dispatcher, lead-watcher, registry)
