@@ -1,4 +1,4 @@
-# Reproducible toolchain & task runner for vercel-board-herdr-agent-swarm
+# Reproducible toolchain & task runner for bordr-swarm
 # Usage:
 #   mise trust && mise install
 #   mise run doctor

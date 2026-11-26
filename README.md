@@ -1,4 +1,4 @@
-# vercel-board-herdr-agent-swarm
+# bordr-swarm
 
 Declarative ("terraformable") setup, documentation, prompts, and TypeScript/Node tooling for running a multi-machine AI coding agent swarm coordinated through **Vercel Board**, executed in **Herdr**, and monitored in **Sheprd**.
 
@@ -16,8 +16,8 @@ Everything is driven by [`mise`](https://mise.jdx.dev/) + native TypeScript on N
 
 ```bash
 # 1. Clone this repo on your main machine and/or worker machine(s)
-git clone <repo-url> ~/vercel-board-herdr-agent-swarm
-cd ~/vercel-board-herdr-agent-swarm
+git clone https://github.com/kodi/bordr-swarm.git ~/bordr-swarm
+cd ~/bordr-swarm
 
 # 2. Install mise tools (node, vercel CLI, @vercel/board) and agent skills
 ./scripts/bootstrap.sh

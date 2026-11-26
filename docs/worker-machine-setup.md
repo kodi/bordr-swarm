@@ -5,8 +5,8 @@ A **worker machine** (macOS or Linux) runs **Herdr**, optional **Sheprd**, and t
 ## 1. Install Tools & Auth
 
 ```bash
-git clone <repo-url> ~/projects/vercel-board-herdr-agent-swarm
-cd ~/projects/vercel-board-herdr-agent-swarm
+git clone https://github.com/kodi/bordr-swarm.git ~/projects/bordr-swarm
+cd ~/projects/bordr-swarm
 
 # Install mise-managed Node, Vercel CLI, @vercel/board, and the vercel/board agent skill
 ./scripts/bootstrap.sh

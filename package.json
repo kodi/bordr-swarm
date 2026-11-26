@@ -1,5 +1,5 @@
 {
-  "name": "vercel-board-herdr-agent-swarm",
+  "name": "bordr-swarm",
   "version": "0.1.0",
   "private": true,
   "description": "Reproducible setup and TypeScript orchestration for a Vercel Board + Herdr + Sheprd agent swarm",

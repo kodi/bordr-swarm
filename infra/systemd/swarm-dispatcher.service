@@ -5,12 +5,12 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/vercel-board-herdr-agent-swarm
+WorkingDirectory=%h/bordr-swarm
 Environment=PATH=%h/.local/share/mise/shims:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 Environment=SWARM_MACHINE=worker-machine
 Environment=NODE_NO_WARNINGS=1
 # Note: `mise run apply:worker` renders this unit automatically from config/swarm.json
-ExecStart=%h/.local/share/mise/shims/node %h/vercel-board-herdr-agent-swarm/src/dispatcher.ts
+ExecStart=%h/.local/share/mise/shims/node %h/bordr-swarm/src/dispatcher.ts
 Restart=on-failure
 RestartSec=5
 

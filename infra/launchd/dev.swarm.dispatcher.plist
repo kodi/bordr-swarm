@@ -7,7 +7,7 @@
 
   <!-- Note: `mise run apply:worker` renders and installs this plist automatically from config/swarm.json -->
   <key>WorkingDirectory</key>
-  <string>/Users/YOU/projects/vercel-board-herdr-agent-swarm</string>
+  <string>/Users/YOU/projects/bordr-swarm</string>
 
   <key>EnvironmentVariables</key>
   <dict>
@@ -22,7 +22,7 @@
   <key>ProgramArguments</key>
   <array>
     <string>/Users/YOU/.local/share/mise/shims/node</string>
-    <string>/Users/YOU/projects/vercel-board-herdr-agent-swarm/src/dispatcher.ts</string>
+    <string>/Users/YOU/projects/bordr-swarm/src/dispatcher.ts</string>
   </array>
 
   <key>RunAtLoad</key>

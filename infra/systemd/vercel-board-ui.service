@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/vercel-board-herdr-agent-swarm
+WorkingDirectory=%h/bordr-swarm
 # Set VERCEL_SCOPE / VERCEL_BOARD_NAME in ~/.config/swarm/board.env if overriding defaults
 EnvironmentFile=-%h/.config/swarm/board.env
 Environment=PATH=%h/.local/share/mise/shims:%h/.local/bin:/usr/local/bin:/usr/bin:/bin

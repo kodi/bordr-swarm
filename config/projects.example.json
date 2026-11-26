@@ -10,13 +10,13 @@
         "main-machine": "/home/agent/projects/example-app"
       }
     },
-    "vercel-board-herdr-agent-swarm": {
+    "bordr-swarm": {
       "defaultMachine": "worker-machine",
       "baseBranch": "main",
       "useWorktree": false,
       "paths": {
-        "worker-machine": "/Users/you/projects/vercel-board-herdr-agent-swarm",
-        "main-machine": "/home/agent/projects/vercel-board-herdr-agent-swarm"
+        "worker-machine": "/Users/you/projects/bordr-swarm",
+        "main-machine": "/home/agent/projects/bordr-swarm"
       }
     }
   }

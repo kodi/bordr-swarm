@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Idempotent machine bootstrap for vercel-board-herdr-agent-swarm.
+# Idempotent machine bootstrap for bordr-swarm.
 # Works on Linux (main or worker machine) and macOS (main or worker machine).
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -13,9 +13,12 @@ if ! command -v mise >/dev/null 2>&1; then
   export PATH="$HOME/.local/bin:$PATH"
 fi
 
-echo "[bootstrap] Trusting and installing mise tools (node, vercel)..."
+echo "[bootstrap] Trusting and installing mise tools (node, vercel, @vercel/board)..."
 mise trust "$REPO_ROOT/mise.toml"
 mise install
+
+echo "[bootstrap] Installing npm dependencies (zod, TypeScript 7, oxlint, oxfmt, lefthook)..."
+mise exec -- npm install
 
 echo "[bootstrap] Installing vercel/board agent skill..."
 mise exec -- npx -y skills add vercel/board

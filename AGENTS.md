@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Context for AI agents working in `vercel-board-herdr-agent-swarm`.
+Context for AI agents working in `bordr-swarm`.
 
 ## Project Goal
 

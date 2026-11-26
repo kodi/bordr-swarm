@@ -7,8 +7,8 @@ Machine names, OS (`"linux"` or `"macos"`), hostnames, and reverse-proxy `allowe
 ## 1. Install Tools & Auth
 
 ```bash
-git clone <repo-url> ~/vercel-board-herdr-agent-swarm
-cd ~/vercel-board-herdr-agent-swarm
+git clone https://github.com/kodi/bordr-swarm.git ~/bordr-swarm
+cd ~/bordr-swarm
 
 # Install mise-managed Node, Vercel CLI, @vercel/board, and the vercel/board agent skill
 ./scripts/bootstrap.sh
