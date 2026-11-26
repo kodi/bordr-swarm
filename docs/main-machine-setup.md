@@ -60,7 +60,8 @@ node scripts/apply-main.ts --start-lead
 Verify locally:
 
 ```bash
-curl -I http://127.0.0.1:4747
+curl -sS -o /dev/null -w "%{http_code}\n" http://127.0.0.1:4747
+# Expected: 200
 ```
 
 ## 4. Optional: Expose Board UI Over Tailscale / Private Network

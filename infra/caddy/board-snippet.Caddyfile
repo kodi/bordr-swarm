@@ -3,7 +3,5 @@
 # Make sure the client-facing hostnames/ports are listed under `allowedHosts` in config/swarm.json.
 
 :4748 {
-	reverse_proxy 127.0.0.1:4747 {
-		header_up Host 127.0.0.1:4747
-	}
+	reverse_proxy 127.0.0.1:4747
 }
