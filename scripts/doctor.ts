@@ -17,6 +17,14 @@ interface CheckResult {
   detail: string;
 }
 
+function firstMeaningfulLine(text: string): string {
+  const lines = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !/^Vercel CLI\s+\d/i.test(line));
+  return lines[0] ?? text.split("\n")[0]?.trim() ?? "";
+}
+
 function runCommand(cmd: string, args: string[]): { ok: boolean; output: string } {
   try {
     const out = execFileSync(cmd, args, {
@@ -26,11 +34,12 @@ function runCommand(cmd: string, args: string[]): { ok: boolean; output: string 
     });
     return { ok: true, output: out.trim() };
   } catch (err) {
-    const message =
-      err instanceof Error
-        ? ((err as { stderr?: string; stdout?: string }).stderr || err.message).trim()
-        : String(err);
-    return { ok: false, output: message };
+    const e = err as { stderr?: string; stdout?: string; message?: string };
+    const combined = [e.stderr, e.stdout, e.message]
+      .filter((s): s is string => typeof s === "string" && s.trim().length > 0)
+      .join("\n")
+      .trim();
+    return { ok: false, output: combined || String(err) };
   }
 }
 
@@ -40,10 +49,10 @@ function checkVersion(name: string, cmd: string, args: string[], optional = fals
     return {
       name,
       status: optional ? "warn" : "fail",
-      detail: `${optional ? "optional — " : ""}not found or failed (${res.output.split("\n")[0]})`,
+      detail: `${optional ? "optional — " : ""}not found or failed (${firstMeaningfulLine(res.output)})`,
     };
   }
-  return { name, status: "ok", detail: res.output.split("\n")[0]?.trim() || "installed" };
+  return { name, status: "ok", detail: firstMeaningfulLine(res.output) || "installed" };
 }
 
 const repoRoot = process.cwd();
@@ -133,12 +142,17 @@ results.push(
     ? {
         name: "vercel board whoami",
         status: "ok",
-        detail: boardWhoami.output.split("\n").slice(0, 2).join(" | "),
+        detail: boardWhoami.output
+          .split("\n")
+          .map((l) => l.trim())
+          .filter((l) => l.length > 0 && !/^Vercel CLI\s+\d/i.test(l))
+          .slice(0, 2)
+          .join(" | "),
       }
     : {
         name: "vercel board whoami",
         status: "warn",
-        detail: boardWhoami.output.split("\n")[0] ?? "not authenticated",
+        detail: `${firstMeaningfulLine(boardWhoami.output) || "not authenticated"} (run: mise exec -- vercel login)`,
       },
 );
 

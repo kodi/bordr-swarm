@@ -14,12 +14,10 @@ cd ~/bordr-swarm
 ./scripts/bootstrap.sh
 
 # Authenticate Vercel CLI (one-time)
-vercel login
-vercel board whoami
+mise exec -- vercel login
 
-# Verify Claude Code and Herdr server
-claude --version
-herdr status server
+# Verify all tools, Board auth, Herdr server, and configs in one command
+mise run doctor
 ```
 
 > **Linux security tip:** Run agent services under a dedicated unprivileged user (e.g. `agent` or `work`, with `loginctl enable-linger <user>` so `systemd --user` services persist across reboots). Never grant that user `sudo` or `docker` group membership.

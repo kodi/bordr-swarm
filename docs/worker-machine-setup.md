@@ -12,8 +12,10 @@ cd ~/projects/bordr-swarm
 ./scripts/bootstrap.sh
 
 # Authenticate Vercel CLI (one-time)
-vercel login
-vercel board whoami
+mise exec -- vercel login
+
+# Verify all tools, Board auth, Herdr server, and configs in one command
+mise run doctor
 ```
 
 > **PATH note:** If an older `vercel` binary exists in npm/pnpm global bins, make sure `mise` shims come first in `PATH` (`~/.local/share/mise/shims`) and confirm `vercel --version` is `>= 66.6.0`.
