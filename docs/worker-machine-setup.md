@@ -79,6 +79,19 @@ vercel board tasks create projects/example-app "Write integration tests" --label
 vercel board tasks create projects/example-app "Audit auth flow" --label agent=pi --label effort=high
 ```
 
+### Discovering valid `agent=` / `model=` / `effort=` values
+
+Run `mise run agents` on a worker to see, per agent profile, whether the CLI is installed on that host, its swarm default model/effort, the effort values accepted as labels, and the exact model IDs usable in `model=` / `reviewer_model=` labels, plus an example label line:
+
+```bash
+mise run agents                    # all agents (model lists truncated to 25; --all-models for everything)
+mise run agents -- --agent codex   # one profile
+mise run agents -- --json          # machine-readable (full model lists), e.g. for the Lead
+mise run agents -- --static        # skip CLI discovery
+```
+
+Model lists are **dynamic** where the CLI exposes one (`pi --list-models` → `provider/model` IDs, `codex debug models`, `agy models`) and fall back to a curated **static** list, with a note, when the CLI is missing, fails, or has no list command (`claude`, whose aliases `opus`/`sonnet`/`haiku`/`fable` and full model names are listed).
+
 ## 5. Monitoring in Sheprd
 
 - Add your main machine and worker machines as saved SSH profiles in Herdr/Sheprd so all agents appear in one sidebar.
