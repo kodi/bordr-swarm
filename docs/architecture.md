@@ -2,46 +2,36 @@
 
 ## System Overview
 
+Main and worker machines communicate **exclusively through Vercel Board** — no direct host-to-host RPC or shared fleet config is required:
+
 ```mermaid
-flowchart LR
-  Human["Human Operator\n(Browser / Sheprd)"]
+flowchart TD
+  You(["You\nBrowser / Phone"])
 
-  subgraph ControlPlane["Vercel Board (Hosted Control Plane)"]
-    Inbox["#inbox\n(Raw requests & triage)"]
-    Registry["#swarm/registry\n(Auto-published machine & repo cards)"]
-    Queue["#projects/<slug>\n(Atomic task queue + leases)"]
+  subgraph Main["Main Machine (Hub)"]
+    UI["Board UI\n:4747 / Tailscale HTTPS"]
+    Watcher["Lead Watcher (0 tokens)\nPolls Board · Syncs registry"]
+    Lead["Lead Agent (Claude Opus)\nPlans & assigns tasks"]
+    Watcher -->|"wakes"| Lead
   end
 
-  subgraph MainMachine["Main Machine (Linux or macOS)"]
-    BoardUI["Board Inspector UI\n(board inspect :4747 -> Tailscale HTTPS :4748)"]
-    LeadWatcher["Lead Watcher (Node 24+ TS)\n0 LLM tokens · Watches #inbox,\n@lead mentions & blocked tasks\nSyncs #swarm/registry"]
-    Lead["Lead Agent (Claude Opus high)\nHerdr ~/swarm-hq\nIdle until woken by event"]
+  Board[("Vercel Board (Shared Bus)\n#inbox · #projects/* · #swarm/registry")]
+
+  subgraph Worker["Worker Machine(s) (macOS / Linux)"]
+    Disp["Worker Dispatcher (0 tokens)\nClaims · 5m leases · Repo lock"]
+    Tab["Herdr Agent Tab\nclaude · agy · codex · pi"]
+    Disp -->|"spawns & auto-closes"| Tab
   end
 
-  subgraph WorkerMachine["Worker Machine(s) (macOS or Linux)"]
-    Dispatcher["Worker Dispatcher (Node 24+ TS)\n0 LLM tokens · Lease heartbeat\nPer-repo lock · Tab lifecycle"]
-    subgraph Herdr["Herdr Server (Local Socket)"]
-      W1["Tab: task-101 (claude)\nOpus medium · auto"]
-      W2["Tab: task-102 (agy)\nDefault model · auto"]
-      Parked["Tab: [BLOCKED] task-99\nParked for human review"]
-    end
-  end
+  Sheprd(["Sheprd (Desktop & Mobile)\nLive view & [BLOCKED] tabs"])
 
-  Sheprd["Sheprd UI (Desktop / Mobile)\nLive terminals & blocked alerts"]
-
-  Human -->|"Post ideas / review"| BoardUI
-  BoardUI <--> ControlPlane
-  ControlPlane -->|"Poll #inbox, @lead, blocked &\n#swarm/registry (0 LLM tokens)"| LeadWatcher
-  LeadWatcher -->|"Auto-start & wake via\nherdr agent prompt"| Lead
-  Lead -->|"Create tasks + labels\n(machine=, agent=, --needs)"| Queue
-  Dispatcher -->|"Publish machine + repo slugs"| Registry
-  Queue <-->|"Claim · Renew every 5m\nComplete / Block"| Dispatcher
-  Dispatcher -->|"Spawn plain tab + --env\nherdr agent start"| Herdr
-  W1 -->|"Progress / complete / block"| Queue
-  W2 -->|"Progress / complete / block"| Queue
-  Herdr -.->|"SSH profile / live state"| Sheprd
-  Lead -.->|"SSH profile / live state"| Sheprd
-  Sheprd -->|"Approve / unblock / close"| Human
+  You -->|"1. Post in #inbox"| UI
+  UI <--> Board
+  Watcher <-->|"2. Poll & sync"| Board
+  Lead -->|"3. Create tasks"| Board
+  Board <-->|"4. Registry · Claim & renew"| Disp
+  Tab -->|"5. Reply · Complete / Block"| Board
+  Tab -.->|"6. Parked if blocked"| Sheprd
 ```
 
 ## Task Lifecycle
@@ -53,7 +43,7 @@ sequenceDiagram
   participant Board as Vercel Board
   participant Lead as Lead Agent (main-machine)
   participant Disp as Worker Dispatcher (worker-machine)
-  participant Herdr as Herdr Worker Tab (claude / agy)
+  participant Herdr as Herdr Worker Tab (claude / agy / codex / pi)
   participant Sheprd as Sheprd UI
 
   Human->>Board: Post request in #inbox
@@ -61,7 +51,7 @@ sequenceDiagram
   Lead->>Board: Create task in #projects/<slug> (labels: machine=, agent=)
   Disp->>Board: Poll ready tasks (filter machine, OS, repo lock, agent CLI)
   Disp->>Board: Claim task (--as worker-<host>-<id> --lease 15m)
-  Disp->>Herdr: Create plain tab (--env BOARD_PROFILE) & start claude/agy
+  Disp->>Herdr: Create plain tab (--env BOARD_PROFILE) & start agent CLI
   Disp->>Herdr: Deliver rendered worker prompt
 
   loop Every 5 minutes while claimed

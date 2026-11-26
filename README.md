@@ -34,47 +34,41 @@ Most DIY agent swarms fail in the same four ways: polling loops burn tokens over
 
 ## Architecture at a Glance
 
+Main and worker machines **never talk directly to each other** — **Vercel Board** is the shared async bus in the middle, so hosts can come and go with zero SSH wiring or shared config files:
+
 ```mermaid
-flowchart LR
-  Human["Human Operator\n(Browser / Sheprd)"]
+flowchart TD
+  You(["You\nBrowser / Phone"])
 
-  subgraph ControlPlane["Vercel Board (Hosted Control Plane)"]
-    Inbox["#inbox\n(Requests & triage)"]
-    Registry["#swarm/registry\n(Auto-published host & repo cards)"]
-    Queue["#projects/<slug>\n(Atomic task queue + leases)"]
+  subgraph Main["Main Machine (Hub)"]
+    UI["Board UI\n:4747 / Tailscale HTTPS"]
+    Watcher["Lead Watcher (0 tokens)\nPolls Board · Syncs registry"]
+    Lead["Lead Agent (Claude Opus)\nPlans & assigns tasks"]
+    Watcher -->|"wakes"| Lead
   end
 
-  subgraph MainHost["Main Machine (or role: both)"]
-    BoardUI["Board Inspector UI\nlocalhost:4747 / Tailscale HTTPS"]
-    LeadWatcher["Lead Watcher (0 tokens)\nPolls events · Syncs #swarm/registry"]
-    Lead["Lead Agent (Claude Opus high)\nHerdr ~/swarm-hq · Wakes on demand"]
+  Board[("Vercel Board (Shared Bus)\n#inbox · #projects/* · #swarm/registry")]
+
+  subgraph Worker["Worker Machine(s) (macOS / Linux)"]
+    Disp["Worker Dispatcher (0 tokens)\nClaims · 5m leases · Repo lock"]
+    Tab["Herdr Agent Tab\nclaude · agy · codex · pi"]
+    Disp -->|"spawns & auto-closes"| Tab
   end
 
-  subgraph WorkerHost["Worker Machine(s) (macOS / Linux)"]
-    Dispatcher["Worker Dispatcher (0 tokens)\nClaim · 5m Lease Heartbeat · Repo Lock"]
-    subgraph Herdr["Herdr Server"]
-      W1["Tab: task-a1b2 (claude)"]
-      W2["Tab: task-c3d4 (agy)"]
-      Parked["Tab: [BLOCKED] task-e5f6"]
-    end
-  end
+  Sheprd(["Sheprd (Desktop & Mobile)\nLive view & [BLOCKED] tabs"])
 
-  Sheprd["Sheprd UI (Desktop / Mobile)\nException dashboard & live takeover"]
-
-  Human -->|"Post ideas / review"| BoardUI
-  BoardUI <--> ControlPlane
-  ControlPlane -->|"Events & registry"| LeadWatcher
-  LeadWatcher -->|"herdr agent prompt"| Lead
-  Lead -->|"Create tasks + labels + --needs"| Queue
-  Dispatcher -->|"Auto-publish capabilities & repos"| Registry
-  Queue <-->|"Claim · Renew · Complete / Block"| Dispatcher
-  Dispatcher -->|"Spawn tab · Auto-close on done"| Herdr
-  W1 -->|"Reply & complete"| Queue
-  W2 -->|"Reply & complete"| Queue
-  Herdr -.->|"Live status"| Sheprd
-  Lead -.->|"Live status"| Sheprd
-  Sheprd -->|"Approve / unblock / close"| Human
+  You -->|"1. Post in #inbox"| UI
+  UI <--> Board
+  Watcher <-->|"2. Poll & sync"| Board
+  Lead -->|"3. Create tasks"| Board
+  Board <-->|"4. Registry · Claim & renew"| Disp
+  Tab -->|"5. Reply · Complete / Block"| Board
+  Tab -.->|"6. Parked if blocked"| Sheprd
 ```
+
+- **Main machine (hub):** Serves the Board Inspector UI and runs the 0-token **Lead Watcher**, which syncs `#swarm/registry` and wakes **Lead** only when a new `#inbox` post, `@lead` mention, or blocker arrives.
+- **Worker machine(s):** Each host runs its own 0-token **Worker Dispatcher** that announces local repo slugs to `#swarm/registry`, atomically claims matching tasks, renews `15m` leases every `5m`, spawns an ephemeral **Herdr** tab (`claude`, `agy`, `codex`, or `pi`), and auto-closes it when done.
+- **Single-machine (`role: both`) vs. fleet:** On one machine, both halves run side by side locally. Add more workers anytime with `mise run init` + `mise run project:add` — Lead discovers them automatically.
 
 ---
 
