@@ -181,6 +181,36 @@ describe("lead event detection & deduplication", () => {
   });
 });
 
+const mockInboxBoardRunner: ExecRunner = async (_cmd, args) => {
+  if (args[1] === "read" && args[2] === "inbox") {
+    return {
+      stdout: JSON.stringify({
+        threads: [
+          {
+            message: {
+              id: "msg_inbox_1",
+              text: "Build status badge",
+              by: { profile: null },
+              author: { handle: "owner" },
+            },
+            replies: 0,
+            last: null,
+          },
+        ],
+        cursor: "c1",
+      }),
+      stderr: "",
+    };
+  }
+  if (args[1] === "channels") {
+    return { stdout: JSON.stringify({ channels: [] }), stderr: "" };
+  }
+  if (args[1] === "tasks") {
+    return { stdout: JSON.stringify({ tasks: [] }), stderr: "" };
+  }
+  return { stdout: JSON.stringify({ ok: true }), stderr: "" };
+};
+
 describe("LeadWatcher daemon mocked wake flow", () => {
   it("queues events while Lead is blocked/busy and wakes Lead once idle without spending tokens when quiet", async () => {
     const tmp = mkdtempSync(join(tmpdir(), "lead-watcher-test-"));
@@ -188,36 +218,6 @@ describe("LeadWatcher daemon mocked wake flow", () => {
       const statePath = join(tmp, "state.json");
       let leadStatus: "blocked" | "idle" = "blocked";
       const prompted: string[] = [];
-
-      const boardRunner: ExecRunner = async (_cmd, args) => {
-        if (args[1] === "read" && args[2] === "inbox") {
-          return {
-            stdout: JSON.stringify({
-              threads: [
-                {
-                  message: {
-                    id: "msg_inbox_1",
-                    text: "Build status badge",
-                    by: { profile: null },
-                    author: { handle: "owner" },
-                  },
-                  replies: 0,
-                  last: null,
-                },
-              ],
-              cursor: "c1",
-            }),
-            stderr: "",
-          };
-        }
-        if (args[1] === "channels") {
-          return { stdout: JSON.stringify({ channels: [] }), stderr: "" };
-        }
-        if (args[1] === "tasks") {
-          return { stdout: JSON.stringify({ tasks: [] }), stderr: "" };
-        }
-        return { stdout: JSON.stringify({ ok: true }), stderr: "" };
-      };
 
       const herdrRunner: ExecRunner = async (_cmd, args) => {
         if (args[0] === "agent" && args[1] === "get") {
@@ -243,7 +243,7 @@ describe("LeadWatcher daemon mocked wake flow", () => {
 
       const watcher = new LeadWatcher({
         swarm: makeSwarm(),
-        board: new BoardClient({}, boardRunner),
+        board: new BoardClient({}, mockInboxBoardRunner),
         herdr: new HerdrClient({ target: "local" }, herdrRunner),
         statePath,
         leadWorkspaceDir: tmp,

@@ -55,12 +55,20 @@ description = "Run the deterministic 0-token Lead Watcher daemon for the main ma
 run = "node src/lead-watcher.ts"
 
 [tasks."apply:main"]
-description = "Idempotently configure the main machine (Board Inspector UI service + Lead HQ workspace)"
+description = "Idempotently configure the main machine (Board UI, Lead Watcher, Lead HQ, and Lead agent)"
 run = "node scripts/apply-main.ts"
 
 [tasks."apply:worker"]
 description = "Idempotently install/reload the Worker Dispatcher service (launchd on macOS, systemd on Linux)"
 run = "node scripts/apply-worker.ts"
+
+[tasks.status]
+description = "Show status of swarm background services, Board UI health, and live Herdr agents"
+run = "node scripts/status.ts"
+
+[tasks.logs]
+description = "Show recent logs for swarm services (pass lead-watcher, ui, or dispatcher; add -f to follow)"
+run = "node scripts/logs.ts"
 
 [tasks.install-skills]
 description = "Install the official vercel/board skill for coding agents"

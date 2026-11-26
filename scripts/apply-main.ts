@@ -29,7 +29,7 @@ interface MainApplyFlags {
 function parseFlags(argv: string[]): MainApplyFlags {
   let dryRun = false;
   let noReload = false;
-  let startLead = false;
+  let startLead = true;
   let machine: string | undefined;
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -37,6 +37,7 @@ function parseFlags(argv: string[]): MainApplyFlags {
     if (arg === "--dry-run") dryRun = true;
     else if (arg === "--no-reload") noReload = true;
     else if (arg === "--start-lead") startLead = true;
+    else if (arg === "--no-start-lead") startLead = false;
     else if (arg === "--machine" && argv[i + 1]) {
       machine = argv[i + 1];
       i += 1;

@@ -18,7 +18,9 @@
     "dispatcher": "node src/dispatcher.ts",
     "lead-watcher": "node src/lead-watcher.ts",
     "apply:main": "node scripts/apply-main.ts",
-    "apply:worker": "node scripts/apply-worker.ts"
+    "apply:worker": "node scripts/apply-worker.ts",
+    "status": "node scripts/status.ts",
+    "logs": "node scripts/logs.ts"
   },
   "dependencies": {
     "zod": "^4.6.7"

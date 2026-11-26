@@ -52,17 +52,17 @@ mise run doctor
 
 ```bash
 # Preview changes first
-node scripts/apply-main.ts --dry-run --start-lead
+mise run apply:main -- --dry-run
 
-# Apply and start Board UI + Lead agent
-node scripts/apply-main.ts --start-lead
-```
+# Apply everything (Board UI + Lead Watcher + Lead agent)
+mise run apply:main
 
-Verify locally:
+# Check service status, Board UI health, and live Herdr agents
+mise run status
 
-```bash
-curl -sS -o /dev/null -w "%{http_code}\n" http://127.0.0.1:4747
-# Expected: 200
+# View logs (lead-watcher or ui; add -f to follow)
+mise run logs lead-watcher
+mise run logs ui
 ```
 
 ## 4. Optional: Expose Board UI Over Tailscale / Private Network
