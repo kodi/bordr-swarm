@@ -22,6 +22,10 @@ run = "node scripts/init.ts"
 description = "Role-aware idempotent setup for this machine (main, worker, or both)"
 run = "node scripts/apply.ts"
 
+[tasks.stop]
+description = "Stop and remove swarm background services on this machine (pass --reset to also wipe local config/state)"
+run = "node scripts/stop.ts"
+
 [tasks.doctor]
 description = "Check mise tools, Vercel Board auth, Herdr server, Claude CLI, and local config"
 run = "node scripts/doctor.ts"

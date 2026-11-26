@@ -44,6 +44,7 @@ mise run logs -- -f    # Tail service logs (pass lead-watcher, ui, or dispatcher
 mise run doctor        # Full preflight check with 1-line fix hints
 mise run project:ls    # List repos registered on this host (add/rm via project:add / project:rm)
 mise run apply         # Idempotently re-apply services for this machine's role
+mise run stop          # Stop & unload all swarm services on this machine (add -- --reset for clean slate)
 mise run update        # Pull latest code, update changed deps, reload services, print status
 ```
 
