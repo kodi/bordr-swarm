@@ -4,6 +4,7 @@
     "example-app": {
       "defaultMachine": "worker-machine",
       "baseBranch": "main",
+      "repo": "your-org/example-app",
       "useWorktree": false,
       "reviewer": {
         "enabled": true,
@@ -19,6 +20,7 @@
     "bordr-swarm": {
       "defaultMachine": "worker-machine",
       "baseBranch": "main",
+      "repo": "kodi/bordr-swarm",
       "useWorktree": false,
       "paths": {
         "worker-machine": "/Users/you/projects/bordr-swarm",

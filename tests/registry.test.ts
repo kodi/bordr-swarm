@@ -6,6 +6,8 @@ import {
   buildMachineRegistryEntry,
   formatRegistryCardMarkdown,
   mergeRegistryIntoLeadCatalog,
+  normalizeGitHubRepo,
+  parseGitHubRepoFromRemoteUrl,
   parseRegistryCardMarkdown,
   publishMachineRegistry,
 } from "../src/lib/registry.ts";
@@ -255,5 +257,85 @@ describe("swarm registry channel (#swarm/registry)", () => {
     });
     assert.equal(res3.action, "updated");
     assert.ok(calls.some((c) => c.startsWith("edit:")));
+  });
+
+  it("parses GitHub owner/repo slugs from HTTPS, SSH, and ssh:// remote URLs", () => {
+    assert.equal(
+      parseGitHubRepoFromRemoteUrl("https://github.com/kodi/bordr-swarm.git"),
+      "kodi/bordr-swarm",
+    );
+    assert.equal(
+      parseGitHubRepoFromRemoteUrl("https://github.com/kodi/bordr-swarm/"),
+      "kodi/bordr-swarm",
+    );
+    assert.equal(
+      parseGitHubRepoFromRemoteUrl("https://token@github.com/my-org/my.repo.git"),
+      "my-org/my.repo",
+    );
+    assert.equal(
+      parseGitHubRepoFromRemoteUrl("git@github.com:kodi/bordr-swarm.git"),
+      "kodi/bordr-swarm",
+    );
+    assert.equal(
+      parseGitHubRepoFromRemoteUrl("ssh://git@github.com:22/kodi/bordr-swarm.git"),
+      "kodi/bordr-swarm",
+    );
+    assert.equal(
+      parseGitHubRepoFromRemoteUrl("git://github.com/kodi/bordr-swarm.git"),
+      "kodi/bordr-swarm",
+    );
+    assert.equal(
+      parseGitHubRepoFromRemoteUrl("https://gitlab.com/kodi/bordr-swarm.git"),
+      undefined,
+    );
+    assert.equal(parseGitHubRepoFromRemoteUrl("git@gitlab.com:kodi/bordr-swarm.git"), undefined);
+    assert.equal(parseGitHubRepoFromRemoteUrl("/local/path/repo"), undefined);
+    assert.equal(parseGitHubRepoFromRemoteUrl("https://github.com/kodi/repo/extra"), undefined);
+
+    assert.equal(normalizeGitHubRepo("kodi/bordr-swarm"), "kodi/bordr-swarm");
+    assert.equal(normalizeGitHubRepo("git@github.com:kodi/bordr-swarm.git"), "kodi/bordr-swarm");
+    assert.equal(normalizeGitHubRepo("not-a-repo"), undefined);
+  });
+
+  it("advertises configured and lazily detected GitHub repos into the Lead catalog", () => {
+    const swarm = makeSwarm();
+    const entry = buildMachineRegistryEntry({
+      swarm,
+      projects: {
+        projects: {
+          "repo-configured": {
+            defaultMachine: "worker-machine",
+            baseBranch: "main",
+            repo: "acme/configured-app",
+            paths: { "worker-machine": "/Users/a/configured" },
+          },
+          "repo-autodetected": {
+            defaultMachine: "worker-machine",
+            baseBranch: "main",
+            paths: { "worker-machine": "/Users/a/autodetected" },
+          },
+          "repo-local-only": {
+            defaultMachine: "worker-machine",
+            baseBranch: "main",
+            paths: { "worker-machine": "/Users/a/local-only" },
+          },
+        },
+      },
+      machineName: "worker-machine",
+      availableAgentKinds: new Set(["claude"]),
+      detectRepo: (repoPath) =>
+        repoPath.endsWith("/autodetected") ? "acme/auto-detected" : undefined,
+      nowIso: "2026-11-26T12:00:00.000Z",
+    });
+
+    const md = formatRegistryCardMarkdown(entry);
+    assert.ok(md.includes("`acme/configured-app`"));
+    assert.ok(md.includes("`acme/auto-detected`"));
+    assert.deepEqual(parseRegistryCardMarkdown(md), entry);
+
+    const catalog = mergeRegistryIntoLeadCatalog({ entries: [entry] });
+    assert.equal(catalog.projects["repo-configured"]?.repo, "acme/configured-app");
+    assert.equal(catalog.projects["repo-autodetected"]?.repo, "acme/auto-detected");
+    assert.equal(catalog.projects["repo-local-only"]?.repo, undefined);
   });
 });

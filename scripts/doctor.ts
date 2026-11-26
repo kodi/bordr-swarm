@@ -272,6 +272,35 @@ if (tailscale.ok) {
   });
 }
 
+// Optional GitHub CLI check on main/both hosts (lets Lead inspect repos read-only when clarifying tasks)
+if (currentRole === "main" || currentRole === "both") {
+  const ghVersion = runQuickCommand("gh", ["--version"]);
+  if (!ghVersion.ok) {
+    results.push({
+      name: "gh (optional)",
+      status: "warn",
+      detail:
+        "optional — install `gh` and run `gh auth login` so Lead can inspect GitHub repos read-only when clarifying ambiguous requests",
+    });
+  } else {
+    const ghAuth = runQuickCommand("gh", ["auth", "status"]);
+    results.push(
+      ghAuth.ok
+        ? {
+            name: "gh (optional)",
+            status: "ok",
+            detail: `${firstMeaningfulLine(ghVersion.output) || "installed"} (authenticated for Lead read-only repo inspection)`,
+          }
+        : {
+            name: "gh (optional)",
+            status: "warn",
+            detail:
+              "optional — installed but not authenticated (run: gh auth login so Lead can inspect private GitHub repos read-only)",
+          },
+    );
+  }
+}
+
 const icons: Record<CheckStatus, string> = {
   ok: "[OK]  ",
   warn: "[WARN]",

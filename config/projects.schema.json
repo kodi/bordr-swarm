@@ -28,6 +28,11 @@
             "type": "string",
             "minLength": 1
           },
+          "repo": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9_.-]+\\/[a-zA-Z0-9_.-]+$",
+            "description": "Optional GitHub repository in \"owner/repo\" format (auto-detected from `origin` remote and advertised in `#swarm/registry` so Lead can inspect it read-only via `gh` when clarifying ambiguous requests)."
+          },
           "useWorktree": {
             "description": "Optional per-project override for `workerDefaults.useWorktree`. Set `true` to allow multiple concurrent workers on this single repo via Git worktrees.",
             "type": "boolean"

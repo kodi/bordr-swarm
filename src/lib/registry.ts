@@ -1,17 +1,92 @@
+import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import type { BoardClient } from "./board.ts";
 import { resolveReviewerConfig, type ProjectsConfig, type SwarmConfig } from "./config.ts";
 import {
+  GitHubRepoSchema,
   MachineRegistryEntrySchema,
   type MachineRegistryEntry,
   type MachineRegistryProject,
   type MergedLeadProjectsCatalog,
 } from "./schemas.ts";
 
+/**
+ * Extracts a normalized GitHub "owner/repo" slug from common Git remote URLs
+ * (HTTPS, SCP-style SSH, ssh://, git://). Returns undefined for non-GitHub remotes.
+ */
+export function parseGitHubRepoFromRemoteUrl(remoteUrl: string): string | undefined {
+  const trimmed = remoteUrl.trim();
+  if (!trimmed) return undefined;
+
+  let pathPart: string | undefined;
+
+  // SCP-style SSH: git@github.com:owner/repo(.git)
+  const scpMatch = /^(?:[^@\s/]+@)?github\.com:(.+)$/i.exec(trimmed);
+  if (scpMatch?.[1]) {
+    pathPart = scpMatch[1];
+  } else {
+    try {
+      const parsed = new URL(trimmed);
+      if (parsed.hostname.toLowerCase() === "github.com") {
+        pathPart = parsed.pathname.replace(/^\/+/, "");
+      }
+    } catch {
+      return undefined;
+    }
+  }
+
+  if (!pathPart) return undefined;
+  const cleaned = pathPart.replace(/\/+$/, "").replace(/\.git$/i, "");
+  const segments = cleaned.split("/");
+  if (segments.length !== 2) return undefined;
+  const [owner, repo] = segments;
+  if (!owner || !repo || owner === "." || owner === ".." || repo === "." || repo === "..") {
+    return undefined;
+  }
+
+  const candidate = `${owner}/${repo}`;
+  return GitHubRepoSchema.safeParse(candidate).success ? candidate : undefined;
+}
+
+/**
+ * Normalizes either a GitHub "owner/repo" slug or a GitHub remote URL into "owner/repo".
+ */
+export function normalizeGitHubRepo(input: string): string | undefined {
+  const trimmed = input.trim();
+  if (!trimmed) return undefined;
+  if (GitHubRepoSchema.safeParse(trimmed).success) {
+    const [owner, repo] = trimmed.split("/");
+    if (owner && repo && owner !== "." && owner !== ".." && repo !== "." && repo !== "..") {
+      return trimmed.replace(/\.git$/i, "");
+    }
+  }
+  return parseGitHubRepoFromRemoteUrl(trimmed);
+}
+
+/**
+ * Detects a GitHub "owner/repo" from `git remote get-url origin` in a local checkout.
+ */
+export function detectGitHubRepo(repoPath: string): string | undefined {
+  if (!repoPath || !existsSync(repoPath)) return undefined;
+  try {
+    const remoteUrl = execFileSync("git", ["remote", "get-url", "origin"], {
+      cwd: repoPath,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 5_000,
+    }).trim();
+    return parseGitHubRepoFromRemoteUrl(remoteUrl);
+  } catch {
+    return undefined;
+  }
+}
+
 export function buildMachineRegistryEntry(params: {
   swarm: SwarmConfig;
   projects: ProjectsConfig;
   machineName: string;
   availableAgentKinds: Set<string>;
+  detectRepo?: (repoPath: string) => string | undefined;
   nowIso?: string;
 }): MachineRegistryEntry {
   const machine = params.swarm.machines[params.machineName];
@@ -30,9 +105,11 @@ export function buildMachineRegistryEntry(params: {
     installedProfiles.add(kind);
   }
 
+  const repoDetector = params.detectRepo ?? detectGitHubRepo;
   const hostedProjects: MachineRegistryProject[] = [];
   for (const [slug, proj] of Object.entries(params.projects.projects)) {
-    if (proj.paths[params.machineName]) {
+    const localPath = proj.paths[params.machineName];
+    if (localPath) {
       let reviewerSummary: string | undefined;
       try {
         const rev = resolveReviewerConfig(params.swarm.workerDefaults, proj);
@@ -44,9 +121,11 @@ export function buildMachineRegistryEntry(params: {
       } catch {
         // Ignore invalid reviewer override during registry advertisement
       }
+      const repo = proj.repo ?? repoDetector(localPath);
       hostedProjects.push({
         slug,
         baseBranch: proj.baseBranch,
+        ...(repo ? { repo } : {}),
         ...(proj.useWorktree !== undefined ? { useWorktree: proj.useWorktree } : {}),
         ...(reviewerSummary ? { reviewer: reviewerSummary } : {}),
       });
@@ -78,10 +157,10 @@ export function formatRegistryCardMarkdown(entry: MachineRegistryEntry): string 
       ? entry.projects
           .map(
             (p) =>
-              `| \`${p.slug}\` | \`${p.baseBranch}\` | ${p.useWorktree ? "worktree" : "plain-tab"} | ${p.reviewer ? `\`${p.reviewer}\`` : "—"} |`,
+              `| \`${p.slug}\` | ${p.repo ? `\`${p.repo}\`` : "—"} | \`${p.baseBranch}\` | ${p.useWorktree ? "worktree" : "plain-tab"} | ${p.reviewer ? `\`${p.reviewer}\`` : "—"} |`,
           )
           .join("\n")
-      : "| *(none configured yet)* | — | — | — |";
+      : "| *(none configured yet)* | — | — | — | — |";
 
   return [
     `### Machine Registry: \`${entry.machine}\``,
@@ -90,8 +169,8 @@ export function formatRegistryCardMarkdown(entry: MachineRegistryEntry): string 
     `- **Agents:** ${entry.agents.length > 0 ? entry.agents.map((a) => `\`${a}\``).join(", ") : "*(none)*"}`,
     `- **Labels:** ${entry.labels.map((l) => `\`${l}\``).join(", ")}`,
     "",
-    "| Project | Base Branch | Mode | Reviewer |",
-    "| --- | --- | --- | --- |",
+    "| Project | Repo | Base Branch | Mode | Reviewer |",
+    "| --- | --- | --- | --- | --- |",
     projectRows,
     "",
     "```json",
@@ -175,6 +254,7 @@ export function mergeRegistryIntoLeadCatalog(params: {
   const machines: MergedLeadProjectsCatalog["machines"] = {};
   const projectMachines = new Map<string, Set<string>>();
   const projectBaseBranch = new Map<string, string>();
+  const projectRepo = new Map<string, string>();
   const localDefaultMachine = new Map<string, string>();
 
   // Seed from local projects.json if present (fallback when workers haven't published yet)
@@ -186,6 +266,9 @@ export function mergeRegistryIntoLeadCatalog(params: {
       }
       projectMachines.set(slug, set);
       projectBaseBranch.set(slug, proj.baseBranch);
+      if (proj.repo) {
+        projectRepo.set(slug, proj.repo);
+      }
       if (proj.defaultMachine && proj.defaultMachine !== "any") {
         localDefaultMachine.set(slug, proj.defaultMachine);
       }
@@ -208,6 +291,9 @@ export function mergeRegistryIntoLeadCatalog(params: {
       set.add(entry.machine);
       projectMachines.set(proj.slug, set);
       projectBaseBranch.set(proj.slug, proj.baseBranch);
+      if (proj.repo) {
+        projectRepo.set(proj.slug, proj.repo);
+      }
     }
   }
 
@@ -220,11 +306,13 @@ export function mergeRegistryIntoLeadCatalog(params: {
         : hosts.length > 1
           ? "any"
           : (localDefaultMachine.get(slug) ?? "any");
+    const repo = projectRepo.get(slug);
 
     projects[slug] = {
       defaultMachine,
       machines: hosts,
       baseBranch: projectBaseBranch.get(slug) ?? "main",
+      ...(repo ? { repo } : {}),
     };
   }
 

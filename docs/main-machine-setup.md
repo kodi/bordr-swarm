@@ -66,3 +66,9 @@ On a headless/remote main host, the cleanest way to expose it privately over HTT
    ```
 
 _(If you prefer Caddy instead of `tailscale serve`, configure TLS on your private network and see [infra/caddy/board-snippet.Caddyfile](../infra/caddy/board-snippet.Caddyfile). Never expose `board inspect` to the public internet, since anyone reaching it acts with your Vercel Board credentials.)_
+
+## 4. Optional: Enable Read-Only GitHub Inspection for Lead (`gh`)
+
+Worker machines automatically advertise each project's GitHub `owner/repo` in `#swarm/registry` (auto-detected from `origin` or set via `mise run project:add -- <path> --repo <owner/name>`), which Lead Watcher syncs into `~/swarm-hq/projects.json`.
+
+If you install and authenticate the GitHub CLI on the main machine (`gh auth login`), Lead can run read-only `gh` commands on demand to inspect `README.md`, `AGENTS.md`, or repository files when an `#inbox` request is ambiguous—without cloning worker repos onto the main host. If `gh` is not installed, Lead falls back to outcome-level tickets cleanly.

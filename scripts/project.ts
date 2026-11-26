@@ -15,7 +15,12 @@ import {
   type ProjectsConfig,
   type SwarmConfig,
 } from "../src/lib/config.ts";
-import { buildMachineRegistryEntry, publishMachineRegistry } from "../src/lib/registry.ts";
+import {
+  buildMachineRegistryEntry,
+  detectGitHubRepo,
+  normalizeGitHubRepo,
+  publishMachineRegistry,
+} from "../src/lib/registry.ts";
 
 function expandHome(inputPath: string): string {
   if (inputPath === "~") return homedir();
@@ -84,7 +89,7 @@ function saveProjects(projectsPath: string, data: ProjectsConfig): void {
 function printUsage(): void {
   console.log("Usage:");
   console.log(
-    "  mise run project:add -- <path> [--slug <name>] [--branch <base>] [--worktree] [--reviewer <agent>] [--reviewer-model <model>] [--reviewer-effort <level>] [--no-review] [--no-publish]",
+    "  mise run project:add -- <path> [--slug <name>] [--branch <base>] [--repo <owner/name>] [--worktree] [--reviewer <agent>] [--reviewer-model <model>] [--reviewer-effort <level>] [--no-review] [--no-publish]",
   );
   console.log("  mise run project:rm -- <slug> [--no-publish]");
   console.log("  mise run project:ls");
@@ -131,9 +136,10 @@ async function main(): Promise<void> {
       } catch (err) {
         revText = `reviewer=INVALID(${err instanceof Error ? err.message : String(err)})`;
       }
-      console.log(
-        `  - ${slug} -> ${proj.paths[machineName]} (base=${proj.baseBranch}, ${revText})`,
-      );
+      const localPath = proj.paths[machineName]!;
+      const repo = proj.repo ?? detectGitHubRepo(localPath);
+      const repoText = repo ? `, repo=${repo}` : "";
+      console.log(`  - ${slug} -> ${localPath} (base=${proj.baseBranch}${repoText}, ${revText})`);
     }
     return;
   }
@@ -150,6 +156,7 @@ async function main(): Promise<void> {
 
     let customSlug = "";
     let customBranch = "";
+    let customRepo = "";
     let useWorktree: boolean | undefined;
     let reviewerAgent: string | undefined;
     let reviewerModel: string | undefined;
@@ -163,6 +170,9 @@ async function main(): Promise<void> {
         i += 1;
       } else if (flag === "--branch" && args[i + 1]) {
         customBranch = args[i + 1]!;
+        i += 1;
+      } else if (flag === "--repo" && args[i + 1]) {
+        customRepo = args[i + 1]!;
         i += 1;
       } else if (flag === "--worktree") {
         useWorktree = true;
@@ -188,8 +198,19 @@ async function main(): Promise<void> {
     const slug = (customSlug || basename(fullPath)).replace(/[^a-zA-Z0-9._-]/g, "-");
     const baseBranch = customBranch || detectGitBaseBranch(fullPath);
 
+    let normalizedCustomRepo: string | undefined;
+    if (customRepo) {
+      normalizedCustomRepo = normalizeGitHubRepo(customRepo);
+      if (!normalizedCustomRepo) {
+        throw new Error(
+          `Invalid --repo "${customRepo}". Expected GitHub "owner/repo" or GitHub remote URL.`,
+        );
+      }
+    }
+
     const cfg = loadOrInitProjects(repoRoot, projectsPath);
     const existing = cfg.projects[slug];
+    const repo = normalizedCustomRepo ?? existing?.repo ?? detectGitHubRepo(fullPath);
 
     let reviewer: ProjectReviewerOverride | undefined = existing?.reviewer;
     if (disableReview) {
@@ -211,6 +232,7 @@ async function main(): Promise<void> {
     cfg.projects[slug] = {
       defaultMachine: existing?.defaultMachine ?? machineName,
       baseBranch: customBranch || existing?.baseBranch || baseBranch,
+      ...(repo ? { repo } : {}),
       useWorktree: useWorktree ?? existing?.useWorktree ?? false,
       ...(reviewer ? { reviewer } : {}),
       paths: {
@@ -221,12 +243,13 @@ async function main(): Promise<void> {
 
     saveProjects(projectsPath, cfg);
     const resolvedRev = resolveReviewerConfig(swarm.workerDefaults, cfg.projects[slug]);
+    const repoSummary = repo ? `, repo=${repo}` : "";
     const revSummary =
       resolvedRev.enabled && resolvedRev.runtime
         ? `, reviewer=${resolvedRev.runtime.profileName}${resolvedRev.runtime.model ? `(${resolvedRev.runtime.model})` : ""}`
         : "";
     console.log(
-      `[project:add] Registered "${slug}" -> ${fullPath} (machine=${machineName}, base=${cfg.projects[slug]!.baseBranch}${revSummary})`,
+      `[project:add] Registered "${slug}" -> ${fullPath} (machine=${machineName}, base=${cfg.projects[slug]!.baseBranch}${repoSummary}${revSummary})`,
     );
 
     if (!noPublish) {

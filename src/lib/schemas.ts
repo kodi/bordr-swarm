@@ -488,6 +488,16 @@ export const SwarmConfigSchema = z
     "Top-level swarm configuration (generate with `mise run init` or copy `config/swarm.example.json` to gitignored `config/swarm.json`).",
   );
 
+export const GitHubRepoSchema = z
+  .string()
+  .regex(
+    /^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/,
+    'Must be a GitHub repository in "owner/repo" format (e.g. "kodi/bordr-swarm").',
+  )
+  .describe(
+    'Optional GitHub repository in "owner/repo" format (auto-detected from `origin` remote and advertised in `#swarm/registry` so Lead can inspect it read-only via `gh` when clarifying ambiguous requests).',
+  );
+
 export const ProjectConfigSchema = z
   .object({
     defaultMachine: z
@@ -502,6 +512,7 @@ export const ProjectConfigSchema = z
       .min(1)
       .default("main")
       .describe("Default Git base branch used when creating task branches or worktrees."),
+    repo: GitHubRepoSchema.optional(),
     useWorktree: z
       .boolean()
       .optional()
@@ -645,6 +656,7 @@ export const MachineRegistryProjectSchema = z
   .object({
     slug: z.string().min(1).describe("Project slug matching `#projects/<slug>`."),
     baseBranch: z.string().min(1).default("main").describe("Default base branch for this repo."),
+    repo: GitHubRepoSchema.optional(),
     useWorktree: z
       .boolean()
       .optional()
@@ -700,6 +712,7 @@ export const MergedLeadProjectsCatalogSchema = z
         defaultMachine: z.string(),
         machines: z.array(z.string()),
         baseBranch: z.string(),
+        repo: GitHubRepoSchema.optional(),
       }),
     ),
   })
