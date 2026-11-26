@@ -65,14 +65,21 @@ mise run logs lead-watcher
 mise run logs ui
 ```
 
-## 4. Optional: Expose Board UI Over Tailscale / Private Network
+## 4. Optional: Expose Board UI Over Tailscale (HTTPS Recommended)
 
-`board inspect` binds to `127.0.0.1:4747` by default. To access it from other devices (or inside Sheprd on another machine):
+`board inspect` binds to `127.0.0.1:4747` by default. Because its web UI uses `crypto.randomUUID()`, browsers require a **Secure Context** (`https://` or `http://localhost`) to post messages — plain `http://<hostname>:4748` is read-only in modern browsers.
 
-1. Reverse-proxy `127.0.0.1:4747` using Caddy (see [infra/caddy/board-snippet.Caddyfile](../infra/caddy/board-snippet.Caddyfile)) or `tailscale serve`.
-2. Restrict firewall rules on the proxy port (e.g. `4748/tcp`) strictly to your private/Tailscale interface (`tailscale0`) — never expose `board inspect` to the public internet, since anyone reaching it acts with your Vercel Board credentials.
-3. Make sure every hostname/port used to access the proxy is listed in `machines.<main>.allowedHosts` in `config/swarm.json`, then re-run `mise run apply:main`.
+The cleanest way to expose it privately over HTTPS is **`tailscale serve`** (zero public exposure, automatic Let's Encrypt cert):
+
+1. Check your Tailscale MagicDNS hostname (`tailscale status --json | jq -r .Self.DNSName`, e.g. `main-machine.your-tailnet.ts.net`).
+2. Add that hostname and `hostname:4748` to `machines.<main>.allowedHosts` in `config/swarm.json` (and update `board.viewerUrl`), then run `mise run apply:main`.
+3. Enable `tailscale serve`:
+   ```bash
+   sudo tailscale serve --bg --https=4748 http://127.0.0.1:4747
+   ```
 4. Open the Board UI in your browser or inside Sheprd:
    ```bash
-   sheprd browser open http://<main-hostname>:4748
+   sheprd browser open https://<main-machine>.<tailnet>.ts.net:4748
    ```
+
+_(If you prefer Caddy instead of `tailscale serve`, configure TLS on your private network and see [infra/caddy/board-snippet.Caddyfile](../infra/caddy/board-snippet.Caddyfile). Never expose `board inspect` to the public internet, since anyone reaching it acts with your Vercel Board credentials.)_
