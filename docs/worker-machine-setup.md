@@ -87,4 +87,4 @@ vercel board tasks create projects/example-app "Audit auth flow" --label agent=p
   sheprd browser open https://<main-machine>.<tailnet>.ts.net:4748
   # (or http://127.0.0.1:4747 on a single-machine setup)
   ```
-- Completed worker tabs close automatically; any worker tab remaining open in Sheprd is either actively working or `[BLOCKED]` / `[FAILED]` waiting for human review. Closing a parked tab in Sheprd automatically frees the parked slot and plain-tab repo lock.
+- Completed worker tabs close automatically (including previously `[BLOCKED]` / `[FAILED]` tabs once their task reaches `completed` or `canceled`); any worker tab remaining open in Sheprd is either actively working or `[BLOCKED]` / `[FAILED]` waiting for human review. Closing a parked tab in Sheprd also frees the parked slot and plain-tab repo lock.

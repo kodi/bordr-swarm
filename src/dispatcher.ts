@@ -13,6 +13,7 @@ import {
   type SwarmConfig,
 } from "./lib/config.ts";
 import {
+  applyParkedTabOutcome,
   applyTaskStepOutcome,
   buildBoardEnv,
   type EffectExecutorDeps,
@@ -42,6 +43,7 @@ import { createManagedSession, type SessionHandle } from "./lib/session-fsm.ts";
 import {
   getImplHandle,
   getReviewerHandle,
+  stepParkedTab,
   stepTask,
   type ActiveTask,
   type ThreadSignal,
@@ -604,21 +606,31 @@ export class SwarmDispatcher {
     const agentsByPaneId = new Map<string, HerdrAgent>();
     for (const agent of agents) agentsByPaneId.set(agent.pane_id, agent);
 
-    // Prune parked tabs closed manually by the human in Sheprd
-    for (const [taskId, parked] of this.parkedTabs.entries()) {
-      if (!tabsById.has(parked.tabId)) {
-        log(
-          "INFO",
-          `Parked tab ${parked.tabId} for task #${taskId} was closed in Sheprd; freeing slot.`,
-        );
-        this.parkedTabs.delete(taskId);
-      }
-    }
-
     const nowMs = Date.now();
     const leaseRenewIntervalMs = this.swarm.board.leaseRenewIntervalSeconds * 1000;
     const idleTimeoutMs = this.swarm.workerDefaults.idleTimeoutSeconds * 1000;
     const deps = this.getEffectDeps();
+
+    // Reconcile parked tabs (auto-close completed/canceled, unpark resumed, prune manually closed)
+    for (const [taskId, parked] of this.parkedTabs.entries()) {
+      const boardTask = tasksById.get(taskId);
+      const implHandle = getImplHandle(parked.task.phase);
+      const revHandle = getReviewerHandle(parked.task.phase);
+      const parkedPaneId =
+        revHandle && parked.tabId === revHandle.tabId ? revHandle.paneId : implHandle.paneId;
+
+      const outcome = stepParkedTab(parked, {
+        boardState: boardTask?.state ?? "unknown",
+        boardAssignee: boardTask?.assignee,
+        parkedTabExists: tabsById.has(parked.tabId),
+        implTabExists: tabsById.has(implHandle.tabId),
+        reviewerTabExists: revHandle ? tabsById.has(revHandle.tabId) : false,
+        parkedAgentAlive: agentsByPaneId.has(parkedPaneId),
+        nowMs,
+      });
+
+      await applyParkedTabOutcome(deps, parked, outcome, nowMs);
+    }
 
     for (const task of this.activeWorkers.values()) {
       const boardTask = tasksById.get(task.ctx.taskId);

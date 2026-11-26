@@ -7,7 +7,13 @@ import {
   type ManagedSession,
   type SessionHandle,
 } from "../src/lib/session-fsm.ts";
-import { stepTask, type ActiveTask, type TaskObservation } from "../src/lib/task-fsm.ts";
+import {
+  stepParkedTab,
+  stepTask,
+  type ActiveTask,
+  type ParkedTab,
+  type TaskObservation,
+} from "../src/lib/task-fsm.ts";
 
 const claudeRuntime: ResolvedWorkerRuntime = {
   profileName: "claude",
@@ -333,5 +339,159 @@ describe("task-fsm (pure outer implement -> review -> fix state table)", () => {
         (e) => e.type === "rename_tab" && e.tabId === "w1:t1" && e.label.startsWith("[FAILED]"),
       ),
     );
+  });
+});
+
+function makeParkedTab(overrides: Partial<ParkedTab> = {}): ParkedTab {
+  const task = overrides.task ?? makeTask();
+  return {
+    taskId: task.ctx.taskId,
+    projectSlug: task.ctx.projectSlug,
+    useWorktree: task.ctx.useWorktree,
+    workspaceId: task.ctx.workspaceId,
+    tabId: "w1:t1",
+    reason: "blocked",
+    parkedAtMs: 20_000,
+    task,
+    ...overrides,
+  };
+}
+
+describe("stepParkedTab (parked [BLOCKED]/[FAILED] reconciliation)", () => {
+  it("auto-closes parked tab and cleans up workspace when Board task becomes completed or canceled", () => {
+    const parked = makeParkedTab();
+
+    const completed = stepParkedTab(parked, {
+      boardState: "completed",
+      parkedTabExists: true,
+      implTabExists: true,
+      reviewerTabExists: false,
+      parkedAgentAlive: true,
+      nowMs: 30_000,
+    });
+    assert.equal(completed.status, "remove");
+    assert.equal(completed.reason, "board_terminal");
+    assert.ok(
+      completed.effects.some(
+        (e) => e.type === "cleanup_workspace" && e.tabId === "w1:t1" && e.tabExists === true,
+      ),
+    );
+
+    const canceled = stepParkedTab(makeParkedTab({ reason: "failed", useWorktree: true }), {
+      boardState: "canceled",
+      parkedTabExists: false,
+      implTabExists: false,
+      reviewerTabExists: false,
+      parkedAgentAlive: false,
+      nowMs: 30_000,
+    });
+    assert.equal(canceled.status, "remove");
+    assert.equal(canceled.reason, "board_terminal");
+    assert.ok(
+      canceled.effects.some(
+        (e) => e.type === "cleanup_workspace" && e.useWorktree === true && e.workspaceId === "w1",
+      ),
+    );
+  });
+
+  it("removes parked entry when manually closed in Sheprd while still blocked", () => {
+    const outcome = stepParkedTab(makeParkedTab(), {
+      boardState: "blocked",
+      parkedTabExists: false,
+      implTabExists: false,
+      reviewerTabExists: false,
+      parkedAgentAlive: false,
+      nowMs: 30_000,
+    });
+    assert.equal(outcome.status, "remove");
+    assert.equal(outcome.reason, "tab_closed");
+    assert.deepEqual(outcome.effects, []);
+  });
+
+  it("unparks and renames tab back when blocked task returns to claimed with live agent", () => {
+    const parked = makeParkedTab();
+    const outcome = stepParkedTab(parked, {
+      boardState: "claimed",
+      boardAssignee: "worker-host-1",
+      parkedTabExists: true,
+      implTabExists: true,
+      reviewerTabExists: false,
+      parkedAgentAlive: true,
+      nowMs: 30_000,
+    });
+    assert.equal(outcome.status, "unpark");
+    assert.equal(outcome.restored.phase.kind, "implementing");
+    if (outcome.restored.phase.kind === "implementing") {
+      assert.equal(outcome.restored.phase.impl.lifecycle.kind, "running");
+    }
+    assert.deepEqual(outcome.effects, [
+      { type: "rename_tab", tabId: "w1:t1", label: "task-1 (claude)" },
+    ]);
+  });
+
+  it("keeps tab parked when claimed by another worker, agent died, or reason is failed", () => {
+    const claimedByOther = stepParkedTab(makeParkedTab(), {
+      boardState: "claimed",
+      boardAssignee: "worker-other-host-1",
+      parkedTabExists: true,
+      implTabExists: true,
+      reviewerTabExists: false,
+      parkedAgentAlive: true,
+      nowMs: 30_000,
+    });
+    assert.equal(claimedByOther.status, "keep");
+
+    const deadAgent = stepParkedTab(makeParkedTab(), {
+      boardState: "claimed",
+      boardAssignee: "worker-host-1",
+      parkedTabExists: true,
+      implTabExists: true,
+      reviewerTabExists: false,
+      parkedAgentAlive: false,
+      nowMs: 30_000,
+    });
+    assert.equal(deadAgent.status, "keep");
+
+    const failedParked = stepParkedTab(makeParkedTab({ reason: "failed" }), {
+      boardState: "claimed",
+      boardAssignee: "worker-host-1",
+      parkedTabExists: true,
+      implTabExists: true,
+      reviewerTabExists: false,
+      parkedAgentAlive: true,
+      nowMs: 30_000,
+    });
+    assert.equal(failedParked.status, "keep");
+  });
+
+  it("closes both reviewer and implementer tabs when a parked reviewer task completes", () => {
+    const implHandle = makeHandle();
+    const revHandle = makeHandle({
+      boardProfile: "reviewer-host-1",
+      runtime: codexRuntime,
+      tabId: "w1:t2",
+      paneId: "w1:p2",
+      agentName: "r1-1",
+    });
+    const revTask = makeTask({
+      kind: "reviewing",
+      round: 1,
+      impl: implHandle,
+      reviewer: createManagedSession(revHandle, { promptText: "Review", blockedOnStartup: false }),
+    });
+    const parked = makeParkedTab({ task: revTask, tabId: "w1:t2" });
+
+    const outcome = stepParkedTab(parked, {
+      boardState: "completed",
+      parkedTabExists: true,
+      implTabExists: true,
+      reviewerTabExists: true,
+      parkedAgentAlive: true,
+      nowMs: 40_000,
+    });
+    assert.equal(outcome.status, "remove");
+    assert.equal(outcome.reason, "board_terminal");
+    assert.ok(outcome.effects.some((e) => e.type === "close_tab" && e.tabId === "w1:t2"));
+    assert.ok(outcome.effects.some((e) => e.type === "cleanup_workspace" && e.tabId === "w1:t1"));
   });
 });

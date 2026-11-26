@@ -126,6 +126,32 @@ export type TaskStepOutcome =
   | { status: "park"; parkTabId: string; reason: "blocked" | "failed"; effects: TaskEffect[] }
   | { status: "remove"; effects: TaskEffect[] };
 
+export interface ParkedTab {
+  taskId: string;
+  projectSlug: string;
+  useWorktree: boolean;
+  workspaceId: string;
+  tabId: string;
+  reason: "blocked" | "failed";
+  parkedAtMs: number;
+  task: ActiveTask;
+}
+
+export interface ParkedTabObservation {
+  boardState: BoardTaskState;
+  boardAssignee?: string;
+  parkedTabExists: boolean;
+  implTabExists: boolean;
+  reviewerTabExists: boolean;
+  parkedAgentAlive: boolean;
+  nowMs: number;
+}
+
+export type ParkedTabStepOutcome =
+  | { status: "keep"; effects: TaskEffect[] }
+  | { status: "unpark"; restored: ActiveTask; effects: TaskEffect[] }
+  | { status: "remove"; reason: "tab_closed" | "board_terminal"; effects: TaskEffect[] };
+
 export function getImplHandle(phase: TaskPhase): SessionHandle {
   return phase.kind === "reviewing" ? phase.impl : phase.impl.handle;
 }
@@ -573,4 +599,112 @@ export function stepTask(task: ActiveTask, obs: TaskObservation): TaskStepOutcom
     default:
       return assertNever(phase);
   }
+}
+
+/**
+ * Pure, deterministic reconciliation for a parked ([BLOCKED] / [FAILED]) tab.
+ * - Auto-closes and frees the slot/repo lock when the Board task reaches completed/canceled.
+ * - Removes the parked entry if the human manually closed the tab in Sheprd.
+ * - Restores a blocked tab back to active tracking if the task returns to claimed with the
+ *   same live agent session still running in that tab.
+ */
+export function stepParkedTab(parked: ParkedTab, obs: ParkedTabObservation): ParkedTabStepOutcome {
+  const { ctx } = parked.task;
+  const implHandle = getImplHandle(parked.task.phase);
+  const reviewerHandle = getReviewerHandle(parked.task.phase);
+
+  if (obs.boardState === "completed" || obs.boardState === "canceled") {
+    const effects: TaskEffect[] = [];
+    if (reviewerHandle && obs.reviewerTabExists) {
+      effects.push({
+        type: "close_tab",
+        tabId: reviewerHandle.tabId,
+        taskId: ctx.taskId,
+        reason: `task ${obs.boardState}`,
+      });
+    }
+    if (
+      parked.tabId !== implHandle.tabId &&
+      parked.tabId !== reviewerHandle?.tabId &&
+      obs.parkedTabExists
+    ) {
+      effects.push({
+        type: "close_tab",
+        tabId: parked.tabId,
+        taskId: ctx.taskId,
+        reason: `task ${obs.boardState}`,
+      });
+    }
+    effects.push({
+      type: "cleanup_workspace",
+      taskId: ctx.taskId,
+      workspaceId: parked.workspaceId,
+      tabId: implHandle.tabId,
+      useWorktree: parked.useWorktree,
+      tabExists: obs.implTabExists,
+    });
+    return { status: "remove", reason: "board_terminal", effects };
+  }
+
+  if (!obs.parkedTabExists) {
+    return { status: "remove", reason: "tab_closed", effects: [] };
+  }
+
+  if (parked.reason === "blocked" && obs.boardState === "claimed" && obs.parkedAgentAlive) {
+    const ownedByOther =
+      obs.boardAssignee !== undefined &&
+      obs.boardAssignee !== "" &&
+      obs.boardAssignee !== ctx.boardProfile;
+
+    if (!ownedByOther) {
+      let restoredPhase: TaskPhase;
+      let normalLabel: string;
+
+      if (
+        parked.task.phase.kind === "reviewing" &&
+        parked.tabId === parked.task.phase.reviewer.handle.tabId
+      ) {
+        const revPhase = parked.task.phase;
+        restoredPhase = {
+          kind: "reviewing",
+          round: revPhase.round,
+          impl: revPhase.impl,
+          reviewer: {
+            handle: revPhase.reviewer.handle,
+            lifecycle: { kind: "running" },
+          },
+        };
+        normalLabel = formatReviewTabLabel(
+          ctx.taskId,
+          revPhase.reviewer.handle.runtime.profileName,
+          revPhase.round,
+        );
+      } else if (parked.task.phase.kind === "fixing") {
+        restoredPhase = {
+          kind: "fixing",
+          round: parked.task.phase.round,
+          impl: { handle: implHandle, lifecycle: { kind: "running" } },
+        };
+        normalLabel = getImplTabLabel(ctx, restoredPhase);
+      } else {
+        restoredPhase = {
+          kind: "implementing",
+          impl: { handle: implHandle, lifecycle: { kind: "running" } },
+        };
+        normalLabel = getImplTabLabel(ctx, restoredPhase);
+      }
+
+      const restored: ActiveTask = {
+        ...parked.task,
+        phase: restoredPhase,
+      };
+      return {
+        status: "unpark",
+        restored,
+        effects: [{ type: "rename_tab", tabId: parked.tabId, label: normalLabel }],
+      };
+    }
+  }
+
+  return { status: "keep", effects: [] };
 }

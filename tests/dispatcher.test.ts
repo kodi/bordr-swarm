@@ -700,4 +700,196 @@ describe("SwarmDispatcher mocked lifecycle", () => {
       rmSync(tmpBase, { recursive: true, force: true });
     }
   });
+
+  it("auto-closes a parked [BLOCKED] tab when unblocked and completed, and unparks when resumed as claimed", async () => {
+    const tmpBase = mkdtempSync(join(tmpdir(), "swarm-unblock-test-"));
+    const repoA = join(tmpBase, "repo-a");
+    const repoB = join(tmpBase, "repo-b");
+    mkdirSync(repoA);
+    mkdirSync(repoB);
+
+    try {
+      const swarm = createTestSwarmConfig();
+      const projects: ProjectsConfig = {
+        projects: {
+          "repo-a": {
+            defaultMachine: "worker-machine",
+            baseBranch: "main",
+            useWorktree: false,
+            paths: { "worker-machine": repoA },
+          },
+          "repo-b": {
+            defaultMachine: "worker-machine",
+            baseBranch: "main",
+            useWorktree: false,
+            paths: { "worker-machine": repoB },
+          },
+        },
+      };
+
+      const boardTasks: Record<string, BoardTask> = {
+        "201": {
+          id: "201",
+          channel: "projects/repo-a",
+          state: "ready",
+          text: "Task that blocks then completes directly",
+          labels: {},
+          raw: {},
+        },
+        "202": {
+          id: "202",
+          channel: "projects/repo-a",
+          state: "ready",
+          text: "Queued follow-up on repo-a",
+          labels: {},
+          raw: {},
+        },
+        "203": {
+          id: "203",
+          channel: "projects/repo-b",
+          state: "ready",
+          text: "Task that blocks, resumes claimed, then completes",
+          labels: {},
+          raw: {},
+        },
+      };
+
+      const boardRunner: ExecRunner = async (_cmd, args) => {
+        if (args[1] === "tasks" && args[2] === "claim") {
+          const id = args[3]!;
+          const asIdx = args.indexOf("--as");
+          const task = boardTasks[id]!;
+          task.state = "claimed";
+          if (asIdx >= 0 && args[asIdx + 1]) task.assignee = args[asIdx + 1];
+          return { stdout: JSON.stringify(task), stderr: "" };
+        }
+        if (args[1] === "tasks" && args[2] === "projects/") {
+          return { stdout: JSON.stringify({ tasks: Object.values(boardTasks) }), stderr: "" };
+        }
+        return { stdout: JSON.stringify({ ok: true }), stderr: "" };
+      };
+
+      let nextTabSeq = 1;
+      const openTabs = new Map<string, { tab_id: string; workspace_id: string; label: string }>();
+      const liveAgents = new Map<string, { pane_id: string; agent_status: string; name: string }>();
+
+      const herdrRunner: ExecRunner = async (_cmd, args) => {
+        const [group, sub] = args;
+        if (group === "workspace" && sub === "list") {
+          return {
+            stdout: JSON.stringify({
+              result: {
+                workspaces: [
+                  { workspace_id: "w1", label: "repo-a" },
+                  { workspace_id: "w2", label: "repo-b" },
+                ],
+              },
+            }),
+            stderr: "",
+          };
+        }
+        if (group === "tab" && sub === "create") {
+          const wsIdx = args.indexOf("--workspace");
+          const labelIdx = args.indexOf("--label");
+          const wsId = args[wsIdx + 1]!;
+          const label = args[labelIdx + 1]!;
+          const seq = nextTabSeq++;
+          const tabId = `${wsId}:t${seq}`;
+          const paneId = `${wsId}:p${seq}`;
+          openTabs.set(tabId, { tab_id: tabId, workspace_id: wsId, label });
+          return {
+            stdout: JSON.stringify({
+              result: {
+                tab: { tab_id: tabId, workspace_id: wsId },
+                root_pane: { pane_id: paneId },
+              },
+            }),
+            stderr: "",
+          };
+        }
+        if (group === "tab" && sub === "list") {
+          return {
+            stdout: JSON.stringify({ result: { tabs: [...openTabs.values()] } }),
+            stderr: "",
+          };
+        }
+        if (group === "tab" && sub === "close") {
+          openTabs.delete(args[2]!);
+          return { stdout: JSON.stringify({ result: { ok: true } }), stderr: "" };
+        }
+        if (group === "tab" && sub === "rename") {
+          const tab = openTabs.get(args[2]!);
+          if (tab) tab.label = args[3]!;
+          return { stdout: JSON.stringify({ result: { ok: true } }), stderr: "" };
+        }
+        if (group === "agent" && sub === "start") {
+          const name = args[2]!;
+          const paneIdx = args.indexOf("--pane");
+          const paneId = args[paneIdx + 1]!;
+          liveAgents.set(paneId, { pane_id: paneId, agent_status: "working", name });
+          return { stdout: JSON.stringify({ result: { ok: true } }), stderr: "" };
+        }
+        if (group === "agent" && sub === "list") {
+          return {
+            stdout: JSON.stringify({ result: { agents: [...liveAgents.values()] } }),
+            stderr: "",
+          };
+        }
+        return { stdout: JSON.stringify({ result: { ok: true } }), stderr: "" };
+      };
+
+      const dispatcher = new SwarmDispatcher({
+        repoRoot: tmpBase,
+        swarm,
+        projects,
+        machineName: "worker-machine",
+        board: new BoardClient({ scope: "test-team" }, boardRunner),
+        herdr: new HerdrClient({ target: "local" }, herdrRunner),
+        promptTemplate: "Work on {{TASK_ID}}",
+        availableAgentKinds: new Set(["claude"]),
+        dryRun: false,
+      });
+
+      // Tick 1: claims #201 (repo-a) and #203 (repo-b); #202 waits for repo-a lock
+      await dispatcher.tick();
+      assert.ok(dispatcher.activeWorkers.has("201"));
+      assert.ok(dispatcher.activeWorkers.has("203"));
+      assert.ok(!dispatcher.activeWorkers.has("202"));
+
+      // Tick 2: both #201 and #203 become blocked -> parked as [BLOCKED]
+      boardTasks["201"]!.state = "blocked";
+      boardTasks["203"]!.state = "blocked";
+      await dispatcher.tick();
+      assert.equal(dispatcher.activeWorkers.size, 0);
+      assert.equal(dispatcher.parkedTabs.size, 2);
+      assert.equal(openTabs.get("w1:t1")?.label, "[BLOCKED] task-201 (claude)");
+      assert.equal(openTabs.get("w2:t2")?.label, "[BLOCKED] task-203 (claude)");
+      assert.ok(!dispatcher.activeWorkers.has("202"), "repo-a still locked while #201 is parked");
+
+      // Tick 3: human unblocks #201 and it completes directly; human unblocks #203 and it resumes claimed
+      boardTasks["201"]!.state = "completed";
+      boardTasks["203"]!.state = "claimed";
+      await dispatcher.tick();
+
+      assert.ok(!openTabs.has("w1:t1"), "parked #201 tab should auto-close once completed");
+      assert.ok(!dispatcher.parkedTabs.has("201"), "#201 should be removed from parkedTabs");
+      assert.ok(dispatcher.activeWorkers.has("202"), "#202 on repo-a should now be claimed");
+
+      assert.ok(!dispatcher.parkedTabs.has("203"), "#203 should be unparked");
+      assert.ok(dispatcher.activeWorkers.has("203"), "#203 should be restored to activeWorkers");
+      assert.equal(
+        openTabs.get("w2:t2")?.label,
+        "task-203 (claude)",
+        "[BLOCKED] prefix should be removed on resume",
+      );
+
+      // Tick 4: #203 finishes -> closes cleanly
+      boardTasks["203"]!.state = "completed";
+      await dispatcher.tick();
+      assert.ok(!openTabs.has("w2:t2"), "resumed #203 tab should auto-close on completion");
+      assert.ok(!dispatcher.activeWorkers.has("203"));
+    } finally {
+      rmSync(tmpBase, { recursive: true, force: true });
+    }
+  });
 });

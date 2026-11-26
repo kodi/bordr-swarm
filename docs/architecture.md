@@ -156,7 +156,7 @@ Runs as a **per-machine daemon** locally on each worker machine (Linux or macOS)
    - **`blocked` (Board state OR Herdr `blocked` UI state):**
      - **Keep the tab open** and rename it `[BLOCKED] task-<taskId> (<agent>)` so Sheprd highlights it.
      - Post a short note on the Board thread pointing to `<machine> / <project> / tab`.
-     - If Board task is `blocked`, park the tab (subject to `maxParkedTabs` cap) and free the active compute slot. Closing the tab manually in Sheprd automatically frees the parked slot and repo lock.
+     - If Board task is `blocked`, park the tab (subject to `maxParkedTabs` cap) and free the active compute slot. If the task is later unblocked and resumed (`claimed`) in that tab, the dispatcher restores it to active tracking and removes the `[BLOCKED]` prefix; once it reaches `completed`/`canceled` (or is closed manually in Sheprd), the dispatcher auto-closes the tab and frees the parked slot and repo lock.
    - **`failed` / unexpected exit:** Keep tab open as `[FAILED] task-<taskId> (<agent>)`, post tail of `herdr pane read` to the Board thread, fail the task if still claimed, stop lease renewal, free the slot.
 
 ---

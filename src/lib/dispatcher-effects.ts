@@ -12,19 +12,13 @@ import {
 import {
   getImplHandle,
   type ActiveTask,
+  type ParkedTab,
+  type ParkedTabStepOutcome,
   type TaskEffect,
   type TaskStepOutcome,
 } from "./task-fsm.ts";
 
-export interface ParkedTab {
-  taskId: string;
-  projectSlug: string;
-  useWorktree: boolean;
-  workspaceId: string;
-  tabId: string;
-  reason: "blocked" | "failed";
-  parkedAtMs: number;
-}
+export type { ParkedTab };
 
 export type LogFn = (level: "INFO" | "WARN" | "ERROR", message: string) => void;
 
@@ -77,6 +71,7 @@ function parkTaskTab(
     tabId,
     reason,
     parkedAtMs: nowMs,
+    task,
   });
 }
 
@@ -552,5 +547,48 @@ export async function applyTaskStepOutcome(
 
   for (const effect of outcome.effects) {
     await executeSingleEffect(deps, previousTask, effect, nowMs);
+  }
+}
+
+/**
+ * Applies the pure parked-tab FSM transition to parkedTabs/activeWorkers and runs emitted effects.
+ */
+export async function applyParkedTabOutcome(
+  deps: EffectExecutorDeps,
+  parked: ParkedTab,
+  outcome: ParkedTabStepOutcome,
+  nowMs: number,
+): Promise<void> {
+  switch (outcome.status) {
+    case "keep":
+      break;
+    case "unpark":
+      deps.parkedTabs.delete(parked.taskId);
+      deps.activeWorkers.set(parked.taskId, outcome.restored);
+      deps.log(
+        "INFO",
+        `Parked tab ${parked.tabId} for task #${parked.taskId} resumed as claimed; restoring to active workers.`,
+      );
+      break;
+    case "remove":
+      deps.parkedTabs.delete(parked.taskId);
+      if (outcome.reason === "tab_closed") {
+        deps.log(
+          "INFO",
+          `Parked tab ${parked.tabId} for task #${parked.taskId} was closed in Sheprd; freeing slot.`,
+        );
+      } else {
+        deps.log(
+          "INFO",
+          `Parked task #${parked.taskId} reached terminal Board state; cleaning up tab ${parked.tabId} and freeing slot.`,
+        );
+      }
+      break;
+    default:
+      assertNever(outcome);
+  }
+
+  for (const effect of outcome.effects) {
+    await executeSingleEffect(deps, parked.task, effect, nowMs);
   }
 }
