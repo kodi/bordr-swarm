@@ -165,6 +165,54 @@ function runLaunchctl(args: string[], dryRun: boolean, allowFail = false): void 
   }
 }
 
+function isLaunchdLoaded(uid: number, label: string): boolean {
+  try {
+    execFileSync("launchctl", ["print", `gui/${uid}/${label}`], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function reloadLaunchdService(params: {
+  uid: number;
+  label: string;
+  plistPath: string;
+  changed: boolean;
+  dryRun: boolean;
+}): void {
+  const { uid, label, plistPath, changed, dryRun } = params;
+  const serviceTarget = `gui/${uid}/${label}`;
+
+  if (dryRun) {
+    console.log(`[dry-run] Would reload launchd service ${serviceTarget} (${plistPath})`);
+    return;
+  }
+
+  const loaded = isLaunchdLoaded(uid, label);
+  if (loaded && !changed) {
+    runLaunchctl(["kickstart", "-k", serviceTarget], false, false);
+    console.log(`[apply:worker] Restarted ${label} via launchctl kickstart.`);
+    return;
+  }
+
+  if (loaded) {
+    runLaunchctl(["bootout", serviceTarget], false, true);
+    // launchctl bootout tears down asynchronously; wait briefly before bootstrap to avoid EIO (5)
+    for (let i = 0; i < 25; i += 1) {
+      if (!isLaunchdLoaded(uid, label)) break;
+      sleepSync(200);
+    }
+  }
+
+  runLaunchctl(["bootstrap", `gui/${uid}`, plistPath], false, false);
+  console.log(`[apply:worker] Loaded ${label} via launchctl bootstrap.`);
+}
+
 function runSystemctlUser(args: string[], dryRun: boolean, allowFail = false): void {
   const uid = typeof process.getuid === "function" ? process.getuid() : 1000;
   const env: NodeJS.ProcessEnv = {
@@ -257,8 +305,7 @@ function main(): void {
     }
 
     if (!flags.noLoad) {
-      runLaunchctl(["bootout", `gui/${uid}/${label}`], flags.dryRun, true);
-      runLaunchctl(["bootstrap", `gui/${uid}`, plistPath], flags.dryRun, false);
+      reloadLaunchdService({ uid, label, plistPath, changed, dryRun: flags.dryRun });
     }
 
     console.log("[apply:worker] Logs:");

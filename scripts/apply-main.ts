@@ -93,10 +93,51 @@ function runLaunchctl(args: string[], dryRun: boolean, allowFail = false): void 
     return;
   }
   try {
-    execFileSync("launchctl", args, { stdio: "inherit" });
+    execFileSync("launchctl", args, { stdio: allowFail ? "ignore" : "inherit" });
   } catch (err) {
     if (!allowFail) throw err;
   }
+}
+
+function isLaunchdLoaded(uid: number, label: string): boolean {
+  try {
+    execFileSync("launchctl", ["print", `gui/${uid}/${label}`], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function reloadLaunchdService(params: {
+  uid: number;
+  label: string;
+  plistPath: string;
+  changed: boolean;
+  dryRun: boolean;
+}): void {
+  const { uid, label, plistPath, changed, dryRun } = params;
+  const serviceTarget = `gui/${uid}/${label}`;
+  if (dryRun) {
+    console.log(`[dry-run] Would reload launchd service ${serviceTarget}`);
+    return;
+  }
+  const loaded = isLaunchdLoaded(uid, label);
+  if (loaded && !changed) {
+    runLaunchctl(["kickstart", "-k", serviceTarget], false, false);
+    return;
+  }
+  if (loaded) {
+    runLaunchctl(["bootout", serviceTarget], false, true);
+    for (let i = 0; i < 25; i += 1) {
+      if (!isLaunchdLoaded(uid, label)) break;
+      sleepSync(200);
+    }
+  }
+  runLaunchctl(["bootstrap", `gui/${uid}`, plistPath], false, false);
 }
 
 function renderSystemdBoardUiUnit(params: {
@@ -499,7 +540,7 @@ async function main(): Promise<void> {
       boardName: swarm.board.boardName,
       boardUrl: resolvedBoardUrl,
     });
-    writeFileIfChanged(plistPath, plistContent, flags.dryRun);
+    const uiPlistChanged = writeFileIfChanged(plistPath, plistContent, flags.dryRun);
 
     const leadWatcherPlistPath = resolve(home, "Library/LaunchAgents/dev.swarm.lead-watcher.plist");
     const leadWatcherPlist = renderLaunchdLeadWatcherPlist({
@@ -509,13 +550,27 @@ async function main(): Promise<void> {
       vercelScope: swarm.board.scope,
       boardName: swarm.board.boardName,
     });
-    writeFileIfChanged(leadWatcherPlistPath, leadWatcherPlist, flags.dryRun);
+    const watcherPlistChanged = writeFileIfChanged(
+      leadWatcherPlistPath,
+      leadWatcherPlist,
+      flags.dryRun,
+    );
 
     if (!flags.noReload) {
-      runLaunchctl(["bootout", `gui/${uid}/dev.swarm.board-ui`], flags.dryRun, true);
-      runLaunchctl(["bootstrap", `gui/${uid}`, plistPath], flags.dryRun, false);
-      runLaunchctl(["bootout", `gui/${uid}/dev.swarm.lead-watcher`], flags.dryRun, true);
-      runLaunchctl(["bootstrap", `gui/${uid}`, leadWatcherPlistPath], flags.dryRun, false);
+      reloadLaunchdService({
+        uid,
+        label: "dev.swarm.board-ui",
+        plistPath,
+        changed: uiPlistChanged,
+        dryRun: flags.dryRun,
+      });
+      reloadLaunchdService({
+        uid,
+        label: "dev.swarm.lead-watcher",
+        plistPath: leadWatcherPlistPath,
+        changed: watcherPlistChanged,
+        dryRun: flags.dryRun,
+      });
     }
   }
 
