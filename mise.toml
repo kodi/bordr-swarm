@@ -70,6 +70,10 @@ run = "node scripts/status.ts"
 description = "Show recent logs for swarm services (pass lead-watcher, ui, or dispatcher; add -f to follow)"
 run = "node scripts/logs.ts"
 
+[tasks.update]
+description = "Pull latest changes, update deps/tools if needed, reload this machine's services, and print status"
+run = "node scripts/update.ts"
+
 [tasks.install-skills]
 description = "Install the official vercel/board skill for coding agents"
 run = "npx -y skills add vercel/board"

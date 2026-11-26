@@ -20,7 +20,8 @@
     "apply:main": "node scripts/apply-main.ts",
     "apply:worker": "node scripts/apply-worker.ts",
     "status": "node scripts/status.ts",
-    "logs": "node scripts/logs.ts"
+    "logs": "node scripts/logs.ts",
+    "update": "node scripts/update.ts"
   },
   "dependencies": {
     "zod": "^4.6.7"

@@ -23,6 +23,8 @@ interface MainApplyFlags {
   dryRun: boolean;
   noReload: boolean;
   startLead: boolean;
+  restartWatcher: boolean;
+  restartLead: boolean;
   machine?: string;
 }
 
@@ -30,6 +32,8 @@ function parseFlags(argv: string[]): MainApplyFlags {
   let dryRun = false;
   let noReload = false;
   let startLead = true;
+  let restartWatcher = false;
+  let restartLead = false;
   let machine: string | undefined;
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -38,6 +42,8 @@ function parseFlags(argv: string[]): MainApplyFlags {
     else if (arg === "--no-reload") noReload = true;
     else if (arg === "--start-lead") startLead = true;
     else if (arg === "--no-start-lead") startLead = false;
+    else if (arg === "--restart-watcher") restartWatcher = true;
+    else if (arg === "--restart-lead") restartLead = true;
     else if (arg === "--machine" && argv[i + 1]) {
       machine = argv[i + 1];
       i += 1;
@@ -45,7 +51,7 @@ function parseFlags(argv: string[]): MainApplyFlags {
       machine = arg.slice("--machine=".length);
     }
   }
-  return { dryRun, noReload, startLead, machine };
+  return { dryRun, noReload, startLead, restartWatcher, restartLead, machine };
 }
 
 function xmlEscape(value: string): string {
@@ -389,6 +395,7 @@ async function ensureLeadRunning(params: {
   vercelScope: string;
   boardName: string;
   leadArgs: string[];
+  restartLead: boolean;
   dryRun: boolean;
 }): Promise<void> {
   if (params.dryRun) {
@@ -401,10 +408,17 @@ async function ensureLeadRunning(params: {
   const herdr = new HerdrClient({ target: "local" });
   const existingLead = await herdr.getAgent("lead");
   if (existingLead) {
-    console.log(
-      `[apply:main] Lead agent "lead" is already running in pane ${existingLead.pane_id} (status=${existingLead.agent_status}).`,
-    );
-    return;
+    if (params.restartLead && existingLead.tab_id) {
+      console.log(
+        `[apply:main] Closing existing Lead tab ${existingLead.tab_id} to reload CLAUDE.md...`,
+      );
+      await herdr.closeTab(existingLead.tab_id);
+    } else {
+      console.log(
+        `[apply:main] Lead agent "lead" is already running in pane ${existingLead.pane_id} (status=${existingLead.agent_status}).`,
+      );
+      return;
+    }
   }
 
   const env: Record<string, string> = {
@@ -524,7 +538,7 @@ async function main(): Promise<void> {
         runSystemctlUser(["restart", "vercel-board-ui.service"], flags.dryRun);
       }
       runSystemctlUser(["enable", "--now", "bordr-lead-watcher.service"], flags.dryRun);
-      if (watcherUnitChanged) {
+      if (watcherUnitChanged || flags.restartWatcher) {
         runSystemctlUser(["restart", "bordr-lead-watcher.service"], flags.dryRun);
       }
     }
@@ -628,6 +642,7 @@ async function main(): Promise<void> {
       vercelScope: swarm.board.scope,
       boardName: swarm.board.boardName,
       leadArgs,
+      restartLead: flags.restartLead,
       dryRun: flags.dryRun,
     });
   } else {

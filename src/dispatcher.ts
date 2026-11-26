@@ -274,6 +274,14 @@ export class SwarmDispatcher {
     }
   }
 
+  private getPromptTemplate(): string {
+    const promptPath = resolve(this.repoRoot, "prompts/worker-prompt.md");
+    if (existsSync(promptPath)) {
+      return readFileSync(promptPath, "utf8");
+    }
+    return this.promptTemplate;
+  }
+
   private async claimAndSpawn(candidate: CandidateTask): Promise<boolean> {
     const { task, projectSlug, project, repoPath, useWorktree, runtime } = candidate;
     const shortId = shortTaskId(task.id);
@@ -325,7 +333,7 @@ export class SwarmDispatcher {
             env,
           });
 
-      const promptText = renderWorkerPrompt(this.promptTemplate, {
+      const promptText = renderWorkerPrompt(this.getPromptTemplate(), {
         taskId: task.id,
         channel: task.channel,
         project: projectSlug,

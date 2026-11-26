@@ -31,8 +31,13 @@ cp config/projects.example.json config/projects.json
 mise run doctor
 
 # 5. Configure services for the host's role:
-mise run apply:main    # On your main machine (Board UI + Lead HQ; add --start-lead to launch Lead)
+mise run apply:main    # On your main machine (Board UI + Lead Watcher + Lead agent)
 mise run apply:worker  # On your worker machine(s) (launchd on macOS, systemd --user on Linux)
+
+# 6. Check status, tail logs, or self-update any machine later:
+mise run status
+mise run logs -- -f
+mise run update        # Pulls latest code, installs changed deps, reloads this host's services
 ```
 
 ## Task Routing Labels
