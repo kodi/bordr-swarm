@@ -22,6 +22,7 @@
     "status": "node scripts/status.ts",
     "logs": "node scripts/logs.ts",
     "update": "node scripts/update.ts",
+    "ui:update": "node scripts/ui-update.ts",
     "project:add": "node scripts/project.ts add",
     "project:rm": "node scripts/project.ts rm",
     "project:ls": "node scripts/project.ts ls",

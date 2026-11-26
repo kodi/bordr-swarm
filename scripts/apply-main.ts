@@ -13,6 +13,7 @@ interface MainApplyFlags {
   startLead: boolean;
   restartWatcher: boolean;
   restartLead: boolean;
+  restartUi: boolean;
   machine?: string;
 }
 
@@ -22,6 +23,7 @@ function parseFlags(argv: string[]): MainApplyFlags {
   let startLead = true;
   let restartWatcher = false;
   let restartLead = false;
+  let restartUi = false;
   let machine: string | undefined;
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -32,6 +34,7 @@ function parseFlags(argv: string[]): MainApplyFlags {
     else if (arg === "--no-start-lead") startLead = false;
     else if (arg === "--restart-watcher") restartWatcher = true;
     else if (arg === "--restart-lead") restartLead = true;
+    else if (arg === "--restart-ui") restartUi = true;
     else if (arg === "--machine" && argv[i + 1]) {
       machine = argv[i + 1];
       i += 1;
@@ -39,7 +42,7 @@ function parseFlags(argv: string[]): MainApplyFlags {
       machine = arg.slice("--machine=".length);
     }
   }
-  return { dryRun, noReload, startLead, restartWatcher, restartLead, machine };
+  return { dryRun, noReload, startLead, restartWatcher, restartLead, restartUi, machine };
 }
 
 function xmlEscape(value: string): string {
@@ -531,7 +534,7 @@ async function main(): Promise<void> {
     if (!flags.noReload) {
       runSystemctlUser(["daemon-reload"], flags.dryRun);
       runSystemctlUser(["enable", "--now", "vercel-board-ui.service"], flags.dryRun);
-      if (uiUnitChanged) {
+      if (uiUnitChanged || flags.restartUi) {
         runSystemctlUser(["restart", "vercel-board-ui.service"], flags.dryRun);
       }
       runSystemctlUser(["enable", "--now", "bordr-lead-watcher.service"], flags.dryRun);

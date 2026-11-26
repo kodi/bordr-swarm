@@ -86,6 +86,10 @@ run = "node scripts/logs.ts"
 description = "Pull latest changes, update deps/tools if needed, reload this machine's services, and print status"
 run = "node scripts/update.ts"
 
+[tasks."ui:update"]
+description = "Upgrade @vercel/board & Vercel CLI via mise and restart the Board UI service (pass -- --restart-only to skip upgrade)"
+run = "node scripts/ui-update.ts"
+
 [tasks."project:add"]
 description = "Register a local repo on this worker machine and publish to #swarm/registry"
 run = "node scripts/project.ts add"

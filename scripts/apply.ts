@@ -99,7 +99,8 @@ function main(): void {
             a !== "--start-lead" &&
             a !== "--no-start-lead" &&
             a !== "--restart-watcher" &&
-            a !== "--restart-lead",
+            a !== "--restart-lead" &&
+            a !== "--restart-ui",
         ),
       ],
       { cwd: repoRoot, stdio: "inherit" },

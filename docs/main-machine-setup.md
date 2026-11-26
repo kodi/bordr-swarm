@@ -40,6 +40,10 @@ mise run status
 # View logs (lead-watcher or ui; add -f to follow)
 mise run logs lead-watcher
 mise run logs ui
+
+# Upgrade @vercel/board & Vercel CLI and restart the Board UI service on demand
+mise run ui:update
+mise run ui:update -- --restart-only
 ```
 
 `mise run apply` (via `apply:main`) idempotently:
