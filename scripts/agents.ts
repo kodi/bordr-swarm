@@ -44,9 +44,12 @@ export function parseAgentsCliArgs(argv: string[]): AgentsCliOptions {
       opts.agent = argv[i + 1]!;
       i += 1;
     } else if (flag.startsWith("--agent=")) opts.agent = flag.slice("--agent=".length);
-    else if (flag.startsWith("--timeout=")) {
-      const secs = Number(flag.slice("--timeout=".length));
-      if (!Number.isFinite(secs) || secs <= 0) throw new Error(`Invalid ${flag}`);
+    else if (flag === "--timeout" || flag.startsWith("--timeout=")) {
+      const raw = flag === "--timeout" ? argv[++i] : flag.slice("--timeout=".length);
+      const secs = Number(raw);
+      if (raw === undefined || !Number.isFinite(secs) || secs <= 0) {
+        throw new Error(`Invalid --timeout value "${raw ?? ""}" (expected seconds > 0)`);
+      }
       opts.timeoutMs = secs * 1000;
     } else if (!flag.startsWith("-") && !opts.agent) opts.agent = flag;
     else throw new Error(`Unknown argument "${flag}". Run with --help for usage.`);
@@ -54,7 +57,8 @@ export function parseAgentsCliArgs(argv: string[]): AgentsCliOptions {
   return opts;
 }
 
-const HELP = `Usage: mise run agents [-- [agent] [options]]
+const HELP = `Usage: mise run agents [agent] [options]
+       (or directly: node scripts/agents.ts [agent] [options])
 
 List supported worker agents, install status, default model/effort, accepted
 model IDs for model=/reviewer_model= labels, and example label lines.
@@ -64,8 +68,14 @@ Options:
   --json              Machine-readable JSON output (always includes every model)
   --static            Skip dynamic CLI discovery; show curated static lists only
   --all-models        Do not truncate model lists in text output (default: ${DEFAULT_MAX_MODELS})
-  --timeout=<secs>    Per-CLI discovery timeout (default 20)
+  --timeout <secs>    Per-CLI discovery timeout in seconds (default 20)
   -h, --help          Show this help
+
+Examples:
+  mise run agents --all-models
+  mise run agents --agent pi --all-models
+  mise run agents codex --static
+  mise run agents --json
 
 Color is used when stdout is a TTY; NO_COLOR disables it, FORCE_COLOR (≠0) forces it.
 `;

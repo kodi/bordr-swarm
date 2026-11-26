@@ -478,7 +478,7 @@ export function formatAgentCatalog(
     }
     if (shown.length < a.models.models.length) {
       lines.push(
-        `     ${c("dim", `… ${a.models.models.length - shown.length} more (use --all-models or --json for the full list)`)}`,
+        `     ${c("dim", `… ${a.models.models.length - shown.length} more (run \`mise run agents --agent ${a.profile} --all-models\` for the full list)`)}`,
       );
     }
     lines.push(

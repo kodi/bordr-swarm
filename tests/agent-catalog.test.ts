@@ -145,7 +145,10 @@ describe("buildAgentCatalog", () => {
     assert.doesNotMatch(text, ANSI_RE);
     assert.match(formatAgentCatalog(catalog, { maxModels: 1, color: true }), ANSI_RE);
     assert.match(text, /dynamic, via `pi --list-models`/);
-    assert.match(text, /… 2 more/);
+    assert.match(
+      text,
+      /… 2 more \(run `mise run agents --agent pi --all-models` for the full list\)/,
+    );
   });
 
   it("falls back when a CLI returns unparseable or empty output", () => {
@@ -220,6 +223,9 @@ describe("parseAgentsCliArgs", () => {
     assert.equal(opts.timeoutMs, 5000);
     assert.equal(parseAgentsCliArgs(["codex"]).agent, "codex");
     assert.equal(parseAgentsCliArgs(["--all-models"]).maxModels, 0);
+    assert.equal(parseAgentsCliArgs(["--timeout", "7"]).timeoutMs, 7000);
+    assert.throws(() => parseAgentsCliArgs(["--timeout"]), /Invalid --timeout/);
+    assert.throws(() => parseAgentsCliArgs(["--timeout=abc"]), /Invalid --timeout/);
     assert.throws(() => parseAgentsCliArgs(["--bogus"]), /Unknown argument/);
   });
 });

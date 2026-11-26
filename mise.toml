@@ -103,8 +103,24 @@ description = "Show or configure worker-default and per-project code reviewer (a
 run = "node scripts/reviewer.ts"
 
 [tasks.agents]
-description = "List worker agents (claude, agy, codex, pi): installed?, default model/effort, accepted model IDs (dynamic or static), and example labels (--json, --static, --agent <name>)"
-run = "node scripts/agents.ts"
+description = "List worker agents (claude, agy, codex, pi): installed?, default model/effort, accepted model IDs (dynamic or static), and example labels (mise run agents --help for flags)"
+usage = '''
+arg "[name]" help="Same as --agent <name>"
+flag "-a --agent <name>" help="Only show one agent profile (claude, agy, codex, pi, or custom)"
+flag "--json" help="Machine-readable JSON output (always includes every model)"
+flag "--static" help="Skip dynamic CLI discovery; show curated static lists only"
+flag "--all-models" help="Do not truncate model lists in text output"
+flag "--timeout <secs>" help="Per-CLI discovery timeout in seconds (default 20)"
+'''
+run = '''
+node scripts/agents.ts \
+  ${usage_name:+"$usage_name"} \
+  ${usage_agent:+--agent="$usage_agent"} \
+  ${usage_json:+--json} \
+  ${usage_static:+--static} \
+  ${usage_all_models:+--all-models} \
+  ${usage_timeout:+--timeout="$usage_timeout"}
+'''
 
 [tasks.install-skills]
 description = "Install the official vercel/board skill for coding agents"
