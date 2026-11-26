@@ -26,6 +26,10 @@ run = "npx tsc --noEmit"
 description = "Run unit tests with Node built-in test runner"
 run = "node --test tests/*.test.ts"
 
+[tasks."schemas:generate"]
+description = "Regenerate config/swarm.schema.json and config/projects.schema.json from Zod schemas"
+run = "node scripts/generate-schemas.ts"
+
 [tasks.dispatcher]
 description = "Run the Worker Dispatcher daemon for this machine"
 run = "node src/dispatcher.ts"

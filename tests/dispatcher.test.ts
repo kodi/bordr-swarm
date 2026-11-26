@@ -13,12 +13,19 @@ import {
 } from "../src/lib/board.ts";
 import {
   buildAgentCliArgs,
+  loadProjectsConfig,
+  loadSwarmConfig,
+  parseProjectsConfig,
+  parseSwarmConfig,
   resolveCurrentMachineName,
   resolveWorkerRuntime,
+  validateSwarmAndProjects,
   type ProjectsConfig,
   type SwarmConfig,
 } from "../src/lib/config.ts";
 import { HerdrClient, sanitizeHerdrAgentName } from "../src/lib/herdr.ts";
+import { SwarmConfigSchema } from "../src/lib/schemas.ts";
+import { z } from "zod";
 import {
   extractProjectSlug,
   formatTabLabel,
@@ -156,6 +163,72 @@ describe("config & worker agent selection", () => {
     assert.equal(resolveCurrentMachineName(swarm, "worker-machine"), "worker-machine");
     assert.equal(resolveCurrentMachineName(swarm, undefined, "main"), "main-machine");
     assert.equal(resolveCurrentMachineName(swarm, undefined, "worker"), "worker-machine");
+  });
+
+  it("validates example configs cleanly and rejects invalid Zod inputs early", () => {
+    const swarm = loadSwarmConfig(process.cwd(), "config/swarm.example.json");
+    const projects = loadProjectsConfig(process.cwd(), "config/projects.example.json");
+    assert.deepEqual(validateSwarmAndProjects(swarm, projects), []);
+
+    // Reject unknown typo key (.strict())
+    assert.throws(
+      () =>
+        parseSwarmConfig({
+          ...swarm,
+          extraTypoKey: true,
+        }),
+      /Unrecognized key/i,
+    );
+
+    // Reject invalid leaseRenewIntervalSeconds >= leaseDuration
+    assert.throws(
+      () =>
+        parseSwarmConfig({
+          ...swarm,
+          board: {
+            ...swarm.board,
+            leaseDuration: "5m",
+            leaseRenewIntervalSeconds: 300,
+          },
+        }),
+      /must be less than leaseDuration/i,
+    );
+
+    // Reject lead.machine referencing nonexistent machine
+    assert.throws(
+      () =>
+        parseSwarmConfig({
+          ...swarm,
+          lead: {
+            ...swarm.lead,
+            machine: "ghost-machine",
+          },
+        }),
+      /does not exist in machines/i,
+    );
+
+    // Reject project with empty paths
+    assert.throws(
+      () =>
+        parseProjectsConfig({
+          projects: {
+            "empty-repo": {
+              defaultMachine: "worker-machine",
+              baseBranch: "main",
+              paths: {},
+            },
+          },
+        }),
+      /at least one machine checkout path/i,
+    );
+
+    // Verify JSON Schema export preserves rich agent-facing descriptions
+    const jsonSchema = z.toJSONSchema(SwarmConfigSchema, { io: "input" }) as {
+      description?: string;
+      properties?: Record<string, { description?: string }>;
+    };
+    assert.ok(jsonSchema.description && jsonSchema.description.length > 20);
+    assert.ok(jsonSchema.properties?.workerDefaults?.description?.includes("agent"));
   });
 });
 

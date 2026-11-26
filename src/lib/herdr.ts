@@ -1,41 +1,24 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { z } from "zod";
 import type { ExecRunner } from "./board.ts";
+import {
+  HerdrAgentListResultSchema,
+  HerdrAgentSchema,
+  HerdrCreatedTabResultSchema,
+  HerdrCreatedWorkspaceResultSchema,
+  HerdrEnvelopeSchema,
+  HerdrTabListResultSchema,
+  HerdrWorkspaceListResultSchema,
+  type HerdrAgent,
+  type HerdrAgentStatus,
+  type HerdrTab,
+  type HerdrWorkspace,
+} from "./schemas.ts";
 
 const execFileAsync = promisify(execFile);
 
-export type HerdrAgentStatus = "idle" | "working" | "blocked" | "done" | "unknown";
-
-export interface HerdrWorkspace {
-  workspace_id: string;
-  label: string;
-  active_tab_id?: string;
-  agent_status?: HerdrAgentStatus;
-  focused?: boolean;
-  pane_count?: number;
-  tab_count?: number;
-}
-
-export interface HerdrTab {
-  tab_id: string;
-  workspace_id: string;
-  label: string;
-  agent_status?: HerdrAgentStatus;
-  focused?: boolean;
-  pane_count?: number;
-}
-
-export interface HerdrAgent {
-  agent?: string;
-  agent_status: HerdrAgentStatus;
-  pane_id: string;
-  tab_id?: string;
-  workspace_id?: string;
-  cwd?: string;
-  foreground_cwd?: string;
-  terminal_title?: string;
-  name?: string;
-}
+export type { HerdrAgent, HerdrAgentStatus, HerdrTab, HerdrWorkspace };
 
 export interface SpawnedPaneResult {
   workspaceId: string;
@@ -70,12 +53,9 @@ export function sanitizeHerdrAgentName(prefix: string, rawId: string): string {
 function parseEnvelope(stdout: string): Record<string, unknown> {
   const trimmed = stdout.trim();
   if (!trimmed) return {};
-  const parsed = JSON.parse(trimmed) as Record<string, unknown>;
-  const result = parsed.result;
-  if (typeof result === "object" && result !== null && !Array.isArray(result)) {
-    return result as Record<string, unknown>;
-  }
-  return parsed;
+  const raw: unknown = JSON.parse(trimmed);
+  const env = HerdrEnvelopeSchema.parse(raw);
+  return env.result ?? env;
 }
 
 function shellQuote(value: string): string {
@@ -121,7 +101,7 @@ export class HerdrClient {
 
   async listWorkspaces(): Promise<HerdrWorkspace[]> {
     const res = await this.runJson(["workspace", "list"]);
-    return Array.isArray(res.workspaces) ? (res.workspaces as HerdrWorkspace[]) : [];
+    return HerdrWorkspaceListResultSchema.parse(res).workspaces;
   }
 
   async createWorkspace(opts: {
@@ -137,15 +117,11 @@ export class HerdrClient {
     if (!opts.focus) {
       args.push("--no-focus");
     }
-    const res = await this.runJson(args);
-    const workspace = (res.workspace ?? {}) as Record<string, unknown>;
-    const tab = (res.tab ?? {}) as Record<string, unknown>;
-    const rootPane = (res.root_pane ?? res.pane ?? {}) as Record<string, unknown>;
-
-    const workspaceId = String(workspace.workspace_id ?? "");
-    const tabId = String(tab.tab_id ?? workspace.active_tab_id ?? "");
-    const paneId = String(rootPane.pane_id ?? "");
-    if (!workspaceId || !tabId || !paneId) {
+    const res = HerdrCreatedWorkspaceResultSchema.parse(await this.runJson(args));
+    const workspaceId = res.workspace.workspace_id;
+    const tabId = res.tab?.tab_id ?? res.workspace.active_tab_id ?? "";
+    const paneId = res.root_pane?.pane_id ?? res.pane?.pane_id ?? "";
+    if (!tabId || !paneId) {
       throw new Error(`herdr workspace create returned incomplete IDs: ${JSON.stringify(res)}`);
     }
     return { workspaceId, tabId, paneId };
@@ -157,7 +133,7 @@ export class HerdrClient {
       args.push("--workspace", workspaceId);
     }
     const res = await this.runJson(args);
-    return Array.isArray(res.tabs) ? (res.tabs as HerdrTab[]) : [];
+    return HerdrTabListResultSchema.parse(res).tabs;
   }
 
   async createTab(opts: {
@@ -183,15 +159,12 @@ export class HerdrClient {
     if (!opts.focus) {
       args.push("--no-focus");
     }
-    const res = await this.runJson(args);
-    const tab = (res.tab ?? {}) as Record<string, unknown>;
-    const rootPane = (res.root_pane ?? res.pane ?? {}) as Record<string, unknown>;
-
-    const tabId = String(tab.tab_id ?? "");
-    const paneId = String(rootPane.pane_id ?? "");
-    const workspaceId = String(tab.workspace_id ?? opts.workspaceId);
-    if (!tabId || !paneId) {
-      throw new Error(`herdr tab create returned incomplete IDs: ${JSON.stringify(res)}`);
+    const res = HerdrCreatedTabResultSchema.parse(await this.runJson(args));
+    const tabId = res.tab.tab_id;
+    const paneId = res.root_pane?.pane_id ?? res.pane?.pane_id ?? "";
+    const workspaceId = res.tab.workspace_id ?? opts.workspaceId;
+    if (!paneId) {
+      throw new Error(`herdr tab create returned incomplete pane ID: ${JSON.stringify(res)}`);
     }
     return { workspaceId, tabId, paneId };
   }
@@ -246,15 +219,11 @@ export class HerdrClient {
     if (opts.base) {
       args.push("--base", opts.base);
     }
-    const res = await this.runJson(args);
-    const workspace = (res.workspace ?? {}) as Record<string, unknown>;
-    const tab = (res.tab ?? {}) as Record<string, unknown>;
-    const rootPane = (res.root_pane ?? res.pane ?? {}) as Record<string, unknown>;
-
-    const workspaceId = String(workspace.workspace_id ?? "");
-    const tabId = String(tab.tab_id ?? workspace.active_tab_id ?? "");
-    const paneId = String(rootPane.pane_id ?? "");
-    if (!workspaceId || !tabId || !paneId) {
+    const res = HerdrCreatedWorkspaceResultSchema.parse(await this.runJson(args));
+    const workspaceId = res.workspace.workspace_id;
+    const tabId = res.tab?.tab_id ?? res.workspace.active_tab_id ?? "";
+    const paneId = res.root_pane?.pane_id ?? res.pane?.pane_id ?? "";
+    if (!tabId || !paneId) {
       throw new Error(`herdr worktree create returned incomplete IDs: ${JSON.stringify(res)}`);
     }
 
@@ -308,31 +277,15 @@ export class HerdrClient {
 
   async listAgents(): Promise<HerdrAgent[]> {
     const res = await this.runJson(["agent", "list"]);
-    return Array.isArray(res.agents) ? (res.agents as HerdrAgent[]) : [];
+    return HerdrAgentListResultSchema.parse(res).agents;
   }
 
   async getAgent(target: string): Promise<HerdrAgent | null> {
     try {
       const res = await this.runJson(["agent", "get", target]);
-      const agent = (res.agent ?? res) as Record<string, unknown>;
-      if (typeof agent.pane_id === "string" || typeof agent.agent_status === "string") {
-        return {
-          agent: typeof agent.agent === "string" ? agent.agent : undefined,
-          agent_status: (typeof agent.agent_status === "string"
-            ? agent.agent_status
-            : "unknown") as HerdrAgentStatus,
-          pane_id: String(agent.pane_id ?? ""),
-          tab_id: typeof agent.tab_id === "string" ? agent.tab_id : undefined,
-          workspace_id: typeof agent.workspace_id === "string" ? agent.workspace_id : undefined,
-          cwd: typeof agent.cwd === "string" ? agent.cwd : undefined,
-          foreground_cwd:
-            typeof agent.foreground_cwd === "string" ? agent.foreground_cwd : undefined,
-          terminal_title:
-            typeof agent.terminal_title === "string" ? agent.terminal_title : undefined,
-          name: typeof agent.name === "string" ? agent.name : undefined,
-        };
-      }
-      return null;
+      const candidate = res.agent ?? res;
+      const parsed = HerdrAgentSchema.safeParse(candidate);
+      return parsed.success ? parsed.data : null;
     } catch {
       return null;
     }
@@ -370,7 +323,6 @@ export class HerdrClient {
           ? `${err.message} ${(err as { stderr?: string }).stderr ?? ""}`
           : String(err);
       if (msg.includes("agent_not_ready")) {
-        // Per Herdr docs: agent was launched and name registered, but hit a prompt/blocked UI on startup
         return { started: true, blockedOnStartup: true, errorDetail: msg.trim() };
       }
       throw err;

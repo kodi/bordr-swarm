@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Swarm Projects Configuration",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "description": "Optional JSON Schema path for editor validation.",
+      "type": "string"
+    },
+    "projects": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[a-zA-Z0-9._-]+$"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "defaultMachine": {
+            "default": "any",
+            "description": "Machine key from `swarm.json` that claims tasks for this project when no `machine=<name>` label is specified, or \"any\".",
+            "type": "string",
+            "minLength": 1
+          },
+          "baseBranch": {
+            "default": "main",
+            "description": "Default Git base branch used when creating task branches or worktrees.",
+            "type": "string",
+            "minLength": 1
+          },
+          "useWorktree": {
+            "description": "Optional per-project override for `workerDefaults.useWorktree`. Set `true` to allow multiple concurrent workers on this single repo via Git worktrees.",
+            "type": "boolean"
+          },
+          "paths": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string",
+              "minLength": 1
+            },
+            "additionalProperties": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "Map of machine keys from `swarm.json` to absolute local repository paths."
+          }
+        },
+        "required": [
+          "paths"
+        ],
+        "additionalProperties": false,
+        "description": "Repository metadata and per-machine checkout paths for a single `#projects/<slug>` queue."
+      },
+      "description": "Registry mapping project slugs (matching `#projects/<slug>` Vercel Board channels) to local paths and defaults."
+    }
+  },
+  "required": [
+    "projects"
+  ],
+  "additionalProperties": false,
+  "description": "Cross-project registry (copy `config/projects.example.json` to gitignored `config/projects.json`)."
+}

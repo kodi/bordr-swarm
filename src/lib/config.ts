@@ -1,50 +1,30 @@
 import { existsSync, readFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { resolve } from "node:path";
+import { z } from "zod";
+import {
+  ProjectsConfigSchema,
+  SwarmConfigSchema,
+  type BoardConfig,
+  type LeadConfig,
+  type MachineOs,
+  type MachineRole,
+  type ProjectConfig,
+  type ProjectsConfig,
+  type WorkerAgentProfile,
+  type WorkerDefaultsConfig,
+} from "./schemas.ts";
 
-export type MachineOs = "linux" | "macos";
-export type MachineRole = "main" | "worker" | "both";
-
-export interface BoardConfig {
-  scope: string;
-  boardName: string;
-  inboxChannel: string;
-  projectChannelPrefix: string;
-  humanHandle: string;
-  viewerPort: number;
-  viewerUrl: string;
-  leaseDuration: string;
-  leaseRenewIntervalSeconds: number;
-}
-
-export interface LeadConfig {
-  machine: string;
-  boardProfile: string;
-  model: string;
-  effort: string;
-  permissionMode: string;
-  workspaceDir: string;
-}
-
-export interface WorkerAgentProfile {
-  kind: string;
-  model: string;
-  effort: string;
-  permissionMode: string;
-  extraArgs: string[];
-}
-
-export interface WorkerDefaultsConfig {
-  defaultAgent: string;
-  agents: Record<string, WorkerAgentProfile>;
-  useWorktree: boolean;
-  closeTabOnComplete: boolean;
-  keepTabOnBlockedOrFailed: boolean;
-  maxParkedTabs: number;
-  pollIntervalSeconds: number;
-  idleTimeoutSeconds: number;
-  claimWaitSeconds: number;
-}
+export type {
+  BoardConfig,
+  LeadConfig,
+  MachineOs,
+  MachineRole,
+  ProjectConfig,
+  ProjectsConfig,
+  WorkerAgentProfile,
+  WorkerDefaultsConfig,
+};
 
 export interface MachineConfig {
   role: MachineRole;
@@ -61,17 +41,6 @@ export interface SwarmConfig {
   lead: LeadConfig;
   workerDefaults: WorkerDefaultsConfig;
   machines: Record<string, MachineConfig>;
-}
-
-export interface ProjectConfig {
-  defaultMachine: string;
-  baseBranch: string;
-  useWorktree?: boolean;
-  paths: Record<string, string>;
-}
-
-export interface ProjectsConfig {
-  projects: Record<string, ProjectConfig>;
 }
 
 export interface ResolvedWorkerRuntime {
@@ -100,186 +69,103 @@ const BUILTIN_AGENT_PROFILES: Record<string, WorkerAgentProfile> = {
   },
 };
 
-function readJsonFile(filePath: string): Record<string, unknown> {
+function readRawJson(filePath: string): unknown {
   if (!existsSync(filePath)) {
     throw new Error(`Config file not found: ${filePath}`);
   }
   const raw = readFileSync(filePath, "utf8");
-  const parsed: unknown = JSON.parse(raw);
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    throw new Error(`Expected JSON object in ${filePath}`);
+  try {
+    return JSON.parse(raw);
+  } catch (err) {
+    throw new Error(
+      `Invalid JSON syntax in ${filePath}: ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
-  return parsed as Record<string, unknown>;
-}
-
-function asString(value: unknown, fallback = ""): string {
-  return typeof value === "string" ? value : fallback;
-}
-
-function asNumber(value: unknown, fallback: number): number {
-  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
-}
-
-function asBoolean(value: unknown, fallback: boolean): boolean {
-  return typeof value === "boolean" ? value : fallback;
-}
-
-function asStringArray(value: unknown, fallback: string[] = []): string[] {
-  if (!Array.isArray(value)) return fallback;
-  return value.filter((item): item is string => typeof item === "string");
-}
-
-function parseMachineOs(rawOs: unknown, labels: string[]): MachineOs {
-  const explicit = asString(rawOs, "").toLowerCase();
-  if (explicit === "macos" || explicit === "darwin") return "macos";
-  if (explicit === "linux") return "linux";
-  if (labels.some((l) => l.toLowerCase() === "os=macos")) return "macos";
-  return "linux";
-}
-
-function parseMachineRole(
-  rawRole: unknown,
-  machineName: string,
-  leadMachine: string,
-  maxWorkers: number,
-): MachineRole {
-  const explicit = asString(rawRole, "").toLowerCase();
-  if (explicit === "main" || explicit === "worker" || explicit === "both") {
-    return explicit;
-  }
-  if (machineName === leadMachine) {
-    return maxWorkers > 0 ? "both" : "main";
-  }
-  return "worker";
-}
-
-function parseAgentProfile(
-  name: string,
-  raw: unknown,
-  fallbackKind?: string,
-): WorkerAgentProfile {
-  const obj =
-    typeof raw === "object" && raw !== null && !Array.isArray(raw)
-      ? (raw as Record<string, unknown>)
-      : {};
-  const builtin = BUILTIN_AGENT_PROFILES[name];
-  return {
-    kind: asString(obj.kind, fallbackKind ?? builtin?.kind ?? name),
-    model: asString(obj.model, builtin?.model ?? ""),
-    effort: asString(obj.effort, builtin?.effort ?? ""),
-    permissionMode: asString(obj.permissionMode, builtin?.permissionMode ?? "auto"),
-    extraArgs: asStringArray(obj.extraArgs, builtin?.extraArgs ?? []),
-  };
 }
 
 export function currentPlatformOs(): MachineOs {
   return process.platform === "darwin" ? "macos" : "linux";
 }
 
-export function loadSwarmConfig(repoRoot = process.cwd(), configPath?: string): SwarmConfig {
-  const resolvedPath =
-    configPath ?? process.env.SWARM_CONFIG_PATH ?? resolve(repoRoot, "config/swarm.json");
-  const raw = readJsonFile(resolvedPath);
-
-  const rawBoard = (raw.board ?? {}) as Record<string, unknown>;
-  const rawLead = (raw.lead ?? {}) as Record<string, unknown>;
-  const rawWorker = (raw.workerDefaults ?? {}) as Record<string, unknown>;
-  const rawMachines = (raw.machines ?? {}) as Record<string, unknown>;
-
-  const agents: Record<string, WorkerAgentProfile> = {};
-  const rawAgents = rawWorker.agents;
-  if (typeof rawAgents === "object" && rawAgents !== null && !Array.isArray(rawAgents)) {
-    for (const [key, value] of Object.entries(rawAgents as Record<string, unknown>)) {
-      agents[key] = parseAgentProfile(key, value);
-    }
+export function parseSwarmConfig(input: unknown, sourceLabel = "swarm.json"): SwarmConfig {
+  const result = SwarmConfigSchema.safeParse(input);
+  if (!result.success) {
+    throw new Error(`Invalid ${sourceLabel}:\n${z.prettifyError(result.error)}`);
   }
 
-  // Backward compatibility if a config only defines top-level workerDefaults.kind/model/effort
-  if (Object.keys(agents).length === 0) {
-    const legacyKind = asString(rawWorker.kind, "claude");
-    agents[legacyKind] = {
-      kind: legacyKind,
-      model: asString(rawWorker.model, legacyKind === "claude" ? "opus" : ""),
-      effort: asString(rawWorker.effort, "medium"),
-      permissionMode: asString(rawWorker.permissionMode, "auto"),
-      extraArgs: asStringArray(rawWorker.extraArgs, []),
-    };
-  }
-
-  const defaultAgent = asString(
-    rawWorker.defaultAgent,
-    agents.claude ? "claude" : (Object.keys(agents)[0] ?? "claude"),
-  );
-
-  const machineNames = Object.keys(rawMachines);
-  const leadMachine = asString(rawLead.machine, machineNames[0] ?? "main-machine");
-
+  const parsed = result.data;
   const machines: Record<string, MachineConfig> = {};
-  for (const [machineName, value] of Object.entries(rawMachines)) {
-    if (typeof value !== "object" || value === null || Array.isArray(value)) continue;
-    const m = value as Record<string, unknown>;
-    const rawLabels = asStringArray(m.labels, []);
-    const os = parseMachineOs(m.os, rawLabels);
-    const maxWorkers = Math.max(0, Math.floor(asNumber(m.maxWorkers, 0)));
-    const role = parseMachineRole(m.role, machineName, leadMachine, maxWorkers);
-    const machineHostname = asString(m.hostname, machineName);
-    const allowedHosts = asStringArray(m.allowedHosts, []);
 
-    const labelSet = new Set(rawLabels);
+  for (const [machineName, m] of Object.entries(parsed.machines)) {
+    const role: MachineRole =
+      m.role ??
+      (machineName === parsed.lead.machine
+        ? m.maxWorkers > 0
+          ? "both"
+          : "main"
+        : "worker");
+
+    const labelSet = new Set(m.labels);
     labelSet.add(`machine=${machineName}`);
-    labelSet.add(`os=${os}`);
+    labelSet.add(`os=${m.os}`);
 
     machines[machineName] = {
       role,
-      os,
-      hostname: machineHostname,
-      allowedHosts,
-      herdrTarget: asString(m.herdrTarget, "local"),
-      maxWorkers,
+      os: m.os,
+      hostname: m.hostname ?? machineName,
+      allowedHosts: m.allowedHosts,
+      herdrTarget: m.herdrTarget,
+      maxWorkers: m.maxWorkers,
       labels: [...labelSet],
     };
   }
 
-  if (Object.keys(machines).length === 0) {
-    throw new Error(`No machines defined in ${resolvedPath}`);
-  }
-
-  const rawPrefix = asString(rawBoard.projectChannelPrefix, "projects/");
-  const normalizedPrefix = rawPrefix.endsWith("/") ? rawPrefix : `${rawPrefix}/`;
-
   return {
     board: {
-      scope: asString(process.env.VERCEL_SCOPE || rawBoard.scope, ""),
-      boardName: asString(process.env.VERCEL_BOARD_NAME || rawBoard.boardName, ""),
-      inboxChannel: asString(rawBoard.inboxChannel, "inbox"),
-      projectChannelPrefix: normalizedPrefix,
-      humanHandle: asString(rawBoard.humanHandle, "@owner"),
-      viewerPort: Math.max(1, Math.floor(asNumber(rawBoard.viewerPort, 4747))),
-      viewerUrl: asString(rawBoard.viewerUrl, "http://main-machine:4748"),
-      leaseDuration: asString(rawBoard.leaseDuration, "15m"),
-      leaseRenewIntervalSeconds: Math.max(30, asNumber(rawBoard.leaseRenewIntervalSeconds, 300)),
+      ...parsed.board,
+      scope: (process.env.VERCEL_SCOPE || parsed.board.scope).trim(),
+      boardName: (process.env.VERCEL_BOARD_NAME || parsed.board.boardName).trim(),
     },
-    lead: {
-      machine: leadMachine,
-      boardProfile: asString(rawLead.boardProfile, "lead"),
-      model: asString(rawLead.model, "opus"),
-      effort: asString(rawLead.effort, "high"),
-      permissionMode: asString(rawLead.permissionMode, "auto"),
-      workspaceDir: asString(rawLead.workspaceDir, "~/swarm-hq"),
-    },
-    workerDefaults: {
-      defaultAgent,
-      agents,
-      useWorktree: asBoolean(rawWorker.useWorktree, false),
-      closeTabOnComplete: asBoolean(rawWorker.closeTabOnComplete, true),
-      keepTabOnBlockedOrFailed: asBoolean(rawWorker.keepTabOnBlockedOrFailed, true),
-      maxParkedTabs: Math.max(0, Math.floor(asNumber(rawWorker.maxParkedTabs, 4))),
-      pollIntervalSeconds: Math.max(3, asNumber(rawWorker.pollIntervalSeconds, 15)),
-      idleTimeoutSeconds: Math.max(5, asNumber(rawWorker.idleTimeoutSeconds, 30)),
-      claimWaitSeconds: Math.max(5, asNumber(rawWorker.claimWaitSeconds, 30)),
-    },
+    lead: parsed.lead,
+    workerDefaults: parsed.workerDefaults,
     machines,
   };
+}
+
+export function parseProjectsConfig(input: unknown, sourceLabel = "projects.json"): ProjectsConfig {
+  const result = ProjectsConfigSchema.safeParse(input);
+  if (!result.success) {
+    throw new Error(`Invalid ${sourceLabel}:\n${z.prettifyError(result.error)}`);
+  }
+  return result.data;
+}
+
+export function validateSwarmAndProjects(swarm: SwarmConfig, projects: ProjectsConfig): string[] {
+  const warnings: string[] = [];
+  const knownMachines = new Set(Object.keys(swarm.machines));
+
+  for (const [slug, project] of Object.entries(projects.projects)) {
+    if (project.defaultMachine !== "any" && !knownMachines.has(project.defaultMachine)) {
+      warnings.push(
+        `Project "${slug}" sets defaultMachine="${project.defaultMachine}" which is not defined in swarm.json machines.`,
+      );
+    }
+    for (const machineKey of Object.keys(project.paths)) {
+      if (!knownMachines.has(machineKey)) {
+        warnings.push(
+          `Project "${slug}" defines a path for unknown machine "${machineKey}" not in swarm.json.`,
+        );
+      }
+    }
+  }
+  return warnings;
+}
+
+export function loadSwarmConfig(repoRoot = process.cwd(), configPath?: string): SwarmConfig {
+  const resolvedPath =
+    configPath ?? process.env.SWARM_CONFIG_PATH ?? resolve(repoRoot, "config/swarm.json");
+  const raw = readRawJson(resolvedPath);
+  return parseSwarmConfig(raw, resolvedPath);
 }
 
 export function loadProjectsConfig(
@@ -288,30 +174,8 @@ export function loadProjectsConfig(
 ): ProjectsConfig {
   const resolvedPath =
     configPath ?? process.env.PROJECTS_CONFIG_PATH ?? resolve(repoRoot, "config/projects.json");
-  const raw = readJsonFile(resolvedPath);
-  const rawProjects = (raw.projects ?? {}) as Record<string, unknown>;
-
-  const projects: Record<string, ProjectConfig> = {};
-  for (const [slug, value] of Object.entries(rawProjects)) {
-    if (typeof value !== "object" || value === null || Array.isArray(value)) continue;
-    const p = value as Record<string, unknown>;
-    const paths: Record<string, string> = {};
-    if (typeof p.paths === "object" && p.paths !== null && !Array.isArray(p.paths)) {
-      for (const [machine, pathVal] of Object.entries(p.paths as Record<string, unknown>)) {
-        if (typeof pathVal === "string" && pathVal.trim().length > 0) {
-          paths[machine] = pathVal;
-        }
-      }
-    }
-    projects[slug] = {
-      defaultMachine: asString(p.defaultMachine, "any"),
-      baseBranch: asString(p.baseBranch, "main"),
-      useWorktree: typeof p.useWorktree === "boolean" ? p.useWorktree : undefined,
-      paths,
-    };
-  }
-
-  return { projects };
+  const raw = readRawJson(resolvedPath);
+  return parseProjectsConfig(raw, resolvedPath);
 }
 
 export function resolveCurrentMachineName(
@@ -410,7 +274,7 @@ export function buildAgentCliArgs(profile: WorkerAgentProfile): string[] {
       const mode = profile.permissionMode;
       if (mode === "bypassPermissions") {
         args.push("--dangerously-skip-permissions");
-      } else if (mode === "acceptEdits" || mode === "accept-edits") {
+      } else if (mode === "acceptEdits") {
         args.push("--mode", "accept-edits");
       } else if (mode === "auto" || mode === "plan") {
         args.push("--mode", mode);
@@ -449,10 +313,16 @@ export function resolveWorkerRuntime(
     );
   }
 
+  const labelEffort = taskLabels.effort?.trim();
+  const effectiveEffort =
+    labelEffort && ["low", "medium", "high", "xhigh", "max"].includes(labelEffort)
+      ? (labelEffort as WorkerAgentProfile["effort"])
+      : baseProfile.effort;
+
   const effectiveProfile: WorkerAgentProfile = {
     kind: baseProfile.kind,
     model: taskLabels.model?.trim() || baseProfile.model,
-    effort: taskLabels.effort?.trim() || baseProfile.effort,
+    effort: effectiveEffort,
     permissionMode: baseProfile.permissionMode,
     extraArgs: [...baseProfile.extraArgs],
   };

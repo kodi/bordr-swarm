@@ -1,17 +1,16 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { z } from "zod";
+import {
+  BoardRawLabelSchema,
+  BoardTaskListEnvelopeSchema,
+  BoardTaskStateSchema,
+  type BoardTaskState,
+} from "./schemas.ts";
 
 const execFileAsync = promisify(execFile);
 
-export type BoardTaskState =
-  | "waiting"
-  | "ready"
-  | "claimed"
-  | "blocked"
-  | "completed"
-  | "failed"
-  | "canceled"
-  | "unknown";
+export type { BoardTaskState };
 
 export interface BoardTask {
   id: string;
@@ -54,7 +53,6 @@ export function extractJsonPayload(output: string): unknown {
   try {
     return JSON.parse(trimmed);
   } catch {
-    // Strip any non-JSON header lines (e.g. CLI banners) before the first { or [
     const objIdx = trimmed.indexOf("{");
     const arrIdx = trimmed.indexOf("[");
     const startIdx =
@@ -70,8 +68,9 @@ export function normalizeLabels(rawLabels: unknown): Record<string, string> {
   const out: Record<string, string> = {};
   if (!rawLabels) return out;
 
-  if (Array.isArray(rawLabels)) {
-    for (const entry of rawLabels) {
+  const arrResult = z.array(BoardRawLabelSchema).safeParse(rawLabels);
+  if (arrResult.success) {
+    for (const entry of arrResult.data) {
       if (typeof entry === "string") {
         const eqIdx = entry.indexOf("=");
         if (eqIdx > 0) {
@@ -79,18 +78,18 @@ export function normalizeLabels(rawLabels: unknown): Record<string, string> {
         } else if (entry.trim()) {
           out[entry.trim()] = "true";
         }
-      } else if (typeof entry === "object" && entry !== null) {
-        const rec = entry as Record<string, unknown>;
-        const k = typeof rec.key === "string" ? rec.key : typeof rec.name === "string" ? rec.name : "";
-        const v = typeof rec.value === "string" ? rec.value : "true";
+      } else {
+        const k = entry.key ?? entry.name ?? "";
+        const v = entry.value !== undefined ? String(entry.value) : "true";
         if (k) out[k] = v;
       }
     }
     return out;
   }
 
-  if (typeof rawLabels === "object") {
-    for (const [k, v] of Object.entries(rawLabels as Record<string, unknown>)) {
+  const recordResult = z.record(z.string(), z.unknown()).safeParse(rawLabels);
+  if (recordResult.success) {
+    for (const [k, v] of Object.entries(recordResult.data)) {
       if (typeof v === "string") {
         out[k] = v;
       } else if (typeof v === "number" || typeof v === "boolean") {
@@ -104,44 +103,26 @@ export function normalizeLabels(rawLabels: unknown): Record<string, string> {
   return out;
 }
 
-const VALID_STATES = new Set<BoardTaskState>([
-  "waiting",
-  "ready",
-  "claimed",
-  "blocked",
-  "completed",
-  "failed",
-  "canceled",
-]);
-
 function normalizeState(value: unknown): BoardTaskState {
-  if (typeof value === "string") {
-    const lower = value.toLowerCase() as BoardTaskState;
-    if (VALID_STATES.has(lower)) return lower;
-  }
-  return "unknown";
+  if (typeof value !== "string") return "unknown";
+  const parsed = BoardTaskStateSchema.safeParse(value.toLowerCase());
+  return parsed.success ? parsed.data : "unknown";
 }
 
+const RecordSchema = z.record(z.string(), z.unknown());
+
 export function normalizeBoardTask(raw: unknown): BoardTask | null {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
-  const obj = raw as Record<string, unknown>;
+  const objRes = RecordSchema.safeParse(raw);
+  if (!objRes.success) return null;
+  const obj = objRes.data;
 
-  // Some responses wrap the task object under `.task` or `.message`
-  const taskObj =
-    typeof obj.task === "object" && obj.task !== null && !Array.isArray(obj.task)
-      ? (obj.task as Record<string, unknown>)
-      : obj;
-  const rootObj =
-    typeof taskObj.root === "object" && taskObj.root !== null && !Array.isArray(taskObj.root)
-      ? (taskObj.root as Record<string, unknown>)
-      : typeof taskObj.message === "object" &&
-          taskObj.message !== null &&
-          !Array.isArray(taskObj.message)
-        ? (taskObj.message as Record<string, unknown>)
-        : undefined;
+  const nestedTask = RecordSchema.safeParse(obj.task);
+  const taskObj = nestedTask.success ? nestedTask.data : obj;
 
-  const rawId =
-    taskObj.id ?? taskObj.taskId ?? taskObj.messageId ?? rootObj?.id ?? obj.id;
+  const rootRes = RecordSchema.safeParse(taskObj.root ?? taskObj.message);
+  const rootObj = rootRes.success ? rootRes.data : undefined;
+
+  const rawId = taskObj.id ?? taskObj.taskId ?? taskObj.messageId ?? rootObj?.id ?? obj.id;
   if (rawId === undefined || rawId === null || String(rawId).trim() === "") {
     return null;
   }
@@ -162,16 +143,12 @@ export function normalizeBoardTask(raw: unknown): BoardTask | null {
 
   const assigneeRaw =
     taskObj.claimedBy ?? taskObj.holder ?? taskObj.assignee ?? taskObj.for ?? taskObj.profile;
+  const assigneeObj = RecordSchema.safeParse(assigneeRaw);
   const assignee =
     typeof assigneeRaw === "string"
       ? assigneeRaw
-      : typeof assigneeRaw === "object" && assigneeRaw !== null
-        ? String(
-            (assigneeRaw as Record<string, unknown>).profile ??
-              (assigneeRaw as Record<string, unknown>).handle ??
-              (assigneeRaw as Record<string, unknown>).name ??
-              "",
-          )
+      : assigneeObj.success
+        ? String(assigneeObj.data.profile ?? assigneeObj.data.handle ?? assigneeObj.data.name ?? "")
         : undefined;
 
   return {
@@ -233,7 +210,8 @@ export class BoardClient {
 
   async whoami(): Promise<Record<string, unknown>> {
     const data = await this.runJson(["whoami"]);
-    return (typeof data === "object" && data !== null ? data : {}) as Record<string, unknown>;
+    const parsed = RecordSchema.safeParse(data);
+    return parsed.success ? parsed.data : {};
   }
 
   async listTasks(
@@ -274,12 +252,15 @@ export class BoardClient {
         `vercel board tasks failed: ${combined.trim() || (err instanceof Error ? err.message : String(err))}`,
       );
     }
-    const list = Array.isArray(data)
-      ? data
-      : typeof data === "object" && data !== null && Array.isArray((data as Record<string, unknown>).tasks)
-        ? ((data as Record<string, unknown>).tasks as unknown[])
-        : [];
 
+    const envelope = BoardTaskListEnvelopeSchema.safeParse(data);
+    if (!envelope.success) {
+      throw new Error(
+        `Unexpected JSON from vercel board tasks:\n${z.prettifyError(envelope.error)}`,
+      );
+    }
+
+    const list = Array.isArray(envelope.data) ? envelope.data : envelope.data.tasks;
     const tasks: BoardTask[] = [];
     for (const item of list) {
       const normalized = normalizeBoardTask(item);

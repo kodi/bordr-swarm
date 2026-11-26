@@ -20,7 +20,7 @@ Machine names, OS (`"linux"` or `"macos"`), hostnames, capacities, and repo path
 
 ## Architectural Decisions
 
-- **Stack:** `mise` for toolchains & task automation + **TypeScript on Node 24+/26+ (native TS execution, zero build step)**.
+- **Stack:** `mise` for toolchains & task automation + **TypeScript on Node 24+/26+ (native TS execution, zero build step)** + **Zod v4** (`src/lib/schemas.ts`) for runtime validation and self-documenting `.describe()` metadata (exported to `config/swarm.schema.json` and `config/projects.schema.json` via `mise run schemas:generate`).
   - Keep TS code compatible with Node's built-in type stripping (`erasableSyntaxOnly: true`, `verbatimModuleSyntax: true` — no `enum`, `namespace`, or parameter properties).
 - **Per-machine Dispatcher:** Runs locally on each worker machine, talking directly to the local `herdr` socket. Owns atomic claiming, background lease renewal (`15m` leases renewed every `5m`), spawning, and cleanup — never rely on the LLM to remember `vercel board tasks renew`.
 - **Plain Herdr tabs by default + per-repo lock:** Workers spawn via `herdr tab create` with `--env BOARD_PROFILE=...` and `--env VERCEL_SCOPE=...`, guarded by a per-repo lock so two plain-tab workers never mutate the same checkout simultaneously. Optional `useWorktree: true` per project remains supported.

@@ -1,0 +1,347 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Swarm Configuration",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "description": "Optional JSON Schema path for editor validation.",
+      "type": "string"
+    },
+    "board": {
+      "type": "object",
+      "properties": {
+        "scope": {
+          "default": "",
+          "description": "Optional Vercel team slug passed as `--scope` (or overridden by VERCEL_SCOPE env var). Leave empty (\"\") to use the default team from `vercel login`.",
+          "type": "string"
+        },
+        "boardName": {
+          "default": "",
+          "description": "Optional named board within the Vercel team (`--name`, or VERCEL_BOARD_NAME env var). Leave empty (\"\") to use the team's default board.",
+          "type": "string"
+        },
+        "inboxChannel": {
+          "default": "inbox",
+          "description": "Board channel where humans post raw requests for the Lead agent to triage (without leading \"#\").",
+          "type": "string",
+          "minLength": 1
+        },
+        "projectChannelPrefix": {
+          "description": "Channel path prefix for project task queues (e.g. \"projects/\" matches `#projects/<slug>`). Trailing slash is normalized automatically.",
+          "default": "projects/",
+          "type": "string",
+          "minLength": 1
+        },
+        "humanHandle": {
+          "default": "@owner",
+          "description": "Human operator mention handle injected into Lead and Worker prompts for escalations (e.g. \"@alice\").",
+          "type": "string",
+          "minLength": 1
+        },
+        "viewerPort": {
+          "default": 4747,
+          "description": "Localhost port for `board inspect` (from @vercel/board) on the main machine.",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "viewerUrl": {
+          "default": "http://main-machine:4748",
+          "description": "Client-facing URL (e.g. Tailscale Caddy reverse proxy) where humans and Sheprd open the Board Inspector UI.",
+          "type": "string",
+          "format": "uri"
+        },
+        "leaseDuration": {
+          "default": "15m",
+          "type": "string",
+          "description": "Vercel Board task claim lease duration (\"30s\" to \"1h\", default \"15m\"). The deterministic dispatcher renews active leases automatically."
+        },
+        "leaseRenewIntervalSeconds": {
+          "default": 300,
+          "description": "How often (in seconds) the dispatcher renews active task leases. Must be shorter than `leaseDuration`.",
+          "type": "integer",
+          "minimum": 15,
+          "maximum": 3500
+        }
+      },
+      "additionalProperties": false,
+      "description": "Vercel Board connection, channel conventions, UI port, and lease settings."
+    },
+    "lead": {
+      "type": "object",
+      "properties": {
+        "machine": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Key in `machines` where the Lead agent and Board Inspector UI run (e.g. `main-machine`)."
+        },
+        "boardProfile": {
+          "default": "lead",
+          "description": "Vercel Board profile name (`BOARD_PROFILE`) used by the Lead agent.",
+          "type": "string",
+          "minLength": 1
+        },
+        "model": {
+          "default": "opus",
+          "description": "Claude CLI model or alias for the Lead agent (default \"opus\").",
+          "type": "string",
+          "minLength": 1
+        },
+        "effort": {
+          "default": "high",
+          "type": "string",
+          "enum": [
+            "",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "description": "Reasoning effort passed to the coding agent CLI (--effort). Use \"\" to omit the flag and rely on the CLI default."
+        },
+        "permissionMode": {
+          "default": "auto",
+          "type": "string",
+          "enum": [
+            "",
+            "auto",
+            "acceptEdits",
+            "bypassPermissions",
+            "manual",
+            "dontAsk",
+            "plan"
+          ],
+          "description": "Permission/approval policy for autonomous agents. Recommended: \"auto\" (maps to `--permission-mode auto` for claude and `--mode auto` for agy). \"bypassPermissions\" maps to `--dangerously-skip-permissions` on agy."
+        },
+        "workspaceDir": {
+          "default": "~/swarm-hq",
+          "description": "Directory on the main machine where `apply-main` writes rendered `CLAUDE.md` and symlinks `projects.json`.",
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "machine"
+      ],
+      "additionalProperties": false,
+      "description": "Configuration for the persistent Lead triage agent on the main machine."
+    },
+    "workerDefaults": {
+      "type": "object",
+      "properties": {
+        "defaultAgent": {
+          "default": "claude",
+          "description": "Default agent profile key from `agents` used when a task does not specify an `agent=<name>` label (default \"claude\").",
+          "type": "string",
+          "minLength": 1
+        },
+        "agents": {
+          "default": {
+            "claude": {
+              "kind": "claude",
+              "model": "opus",
+              "effort": "medium",
+              "permissionMode": "auto",
+              "extraArgs": []
+            },
+            "agy": {
+              "kind": "agy",
+              "model": "",
+              "effort": "medium",
+              "permissionMode": "auto",
+              "extraArgs": []
+            }
+          },
+          "description": "Map of worker agent profile keys to CLI settings. Tasks can target any key here with `--label agent=<key>` (e.g. `agent=claude`, `agent=agy`).",
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1
+          },
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Herdr agent kind & CLI binary name passed to `herdr agent start --kind <kind>` (e.g. \"claude\", \"agy\", \"codex\", \"opencode\")."
+              },
+              "model": {
+                "default": "",
+                "description": "Model name or alias passed via `--model` (e.g. \"opus\" for claude). Leave empty (\"\") to omit `--model` and use the CLI's own default model (recommended for `agy`).",
+                "type": "string"
+              },
+              "effort": {
+                "default": "medium",
+                "type": "string",
+                "enum": [
+                  "",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max"
+                ],
+                "description": "Reasoning effort passed to the coding agent CLI (--effort). Use \"\" to omit the flag and rely on the CLI default."
+              },
+              "permissionMode": {
+                "default": "auto",
+                "type": "string",
+                "enum": [
+                  "",
+                  "auto",
+                  "acceptEdits",
+                  "bypassPermissions",
+                  "manual",
+                  "dontAsk",
+                  "plan"
+                ],
+                "description": "Permission/approval policy for autonomous agents. Recommended: \"auto\" (maps to `--permission-mode auto` for claude and `--mode auto` for agy). \"bypassPermissions\" maps to `--dangerously-skip-permissions` on agy."
+              },
+              "extraArgs": {
+                "default": [],
+                "description": "Additional raw CLI flags appended after `--` when launching this agent in Herdr.",
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "additionalProperties": false,
+            "description": "Configuration profile for a selectable worker agent CLI, routed via task label `agent=<profileKey>`."
+          }
+        },
+        "useWorktree": {
+          "default": false,
+          "description": "Default workspace isolation mode. `false` spawns plain Herdr tabs in existing repo checkouts (guarded by a per-repo lock); `true` creates a Git worktree per task via `herdr worktree create`.",
+          "type": "boolean"
+        },
+        "closeTabOnComplete": {
+          "default": true,
+          "description": "When true, automatically closes a worker's Herdr tab (or removes its temporary worktree) once the Board task becomes `completed` or `canceled`, keeping Sheprd clean.",
+          "type": "boolean"
+        },
+        "keepTabOnBlockedOrFailed": {
+          "default": true,
+          "description": "When true, leaves `blocked` or `failed` worker tabs open in Sheprd renamed with `[BLOCKED]` or `[FAILED]` for human inspection.",
+          "type": "boolean"
+        },
+        "maxParkedTabs": {
+          "default": 4,
+          "description": "Maximum number of parked `[BLOCKED]`/`[FAILED]` tabs allowed before the dispatcher pauses claiming new tasks. Set 0 for unlimited.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "pollIntervalSeconds": {
+          "default": 15,
+          "description": "Seconds between dispatcher reconciliation and task-discovery ticks.",
+          "type": "integer",
+          "minimum": 3,
+          "maximum": 9007199254740991
+        },
+        "idleTimeoutSeconds": {
+          "default": 30,
+          "description": "Seconds a worker agent may sit idle while its task is still `claimed` before the dispatcher sends a completion/block reminder (and parks it if still idle after a second window).",
+          "type": "integer",
+          "minimum": 5,
+          "maximum": 9007199254740991
+        },
+        "claimWaitSeconds": {
+          "default": 30,
+          "description": "Reserved wait window in seconds for blocking claim operations.",
+          "type": "integer",
+          "minimum": 5,
+          "maximum": 9007199254740991
+        }
+      },
+      "additionalProperties": false,
+      "description": "Default behavior and selectable agent CLI profiles for ephemeral task workers."
+    },
+    "machines": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "role": {
+            "type": "string",
+            "enum": [
+              "main",
+              "worker",
+              "both"
+            ],
+            "description": "Host role in the swarm: \"main\" runs the Board Inspector UI and Lead agent; \"worker\" runs the Worker Dispatcher daemon; \"both\" runs both on one machine."
+          },
+          "os": {
+            "type": "string",
+            "enum": [
+              "linux",
+              "macos"
+            ],
+            "description": "Host operating system (\"linux\" uses systemd --user services; \"macos\" uses launchd LaunchAgents). Automatically adds an `os=<os>` routing label."
+          },
+          "hostname": {
+            "description": "Actual network/Tailscale hostname used to auto-identify this host and populate `board inspect --allow-host` when `allowedHosts` is omitted.",
+            "type": "string",
+            "minLength": 1
+          },
+          "allowedHosts": {
+            "default": [],
+            "description": "Hostnames and host:port pairs passed to `board inspect --allow-host` on the main machine when served behind a reverse proxy (e.g. [\"main-machine\", \"main-machine:4748\"]).",
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "herdrTarget": {
+            "default": "local",
+            "description": "Herdr target for this dispatcher. Recommended: \"local\" (talks directly to the local `herdr server` socket). Can also be a saved `herdr machine list` label.",
+            "type": "string",
+            "minLength": 1
+          },
+          "maxWorkers": {
+            "default": 0,
+            "description": "Maximum concurrent ephemeral worker sessions this machine will claim and run (0 disables claiming, e.g. on a dedicated main machine).",
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "labels": {
+            "default": [],
+            "description": "Additional routing labels matched against task labels. `machine=<key>` and `os=<os>` are added automatically.",
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[a-zA-Z0-9_.-]+=[a-zA-Z0-9_.:/-]+$",
+              "description": "Routing label in \"key=value\" format used to match Vercel Board task labels."
+            }
+          }
+        },
+        "required": [
+          "os"
+        ],
+        "additionalProperties": false,
+        "description": "Configuration for a single physical or virtual machine in the swarm."
+      },
+      "description": "Map of logical machine keys (e.g. `main-machine`, `worker-machine`, or your real hostnames) to their OS, role, capacity, and labels."
+    }
+  },
+  "required": [
+    "board",
+    "lead",
+    "workerDefaults",
+    "machines"
+  ],
+  "additionalProperties": false,
+  "description": "Top-level swarm configuration (copy `config/swarm.example.json` to gitignored `config/swarm.json`)."
+}
