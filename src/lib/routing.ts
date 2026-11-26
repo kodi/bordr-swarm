@@ -207,11 +207,17 @@ export function renderWorkerPrompt(
     .replaceAll("{{HUMAN_HANDLE}}", vars.humanHandle);
 }
 
+export function shortTaskId(taskId: string): string {
+  const msgUuid = /^msg_([a-zA-Z0-9]{8})/.exec(taskId);
+  if (msgUuid?.[1]) return msgUuid[1];
+  return taskId.replace(/^#/, "").slice(0, 12);
+}
+
 export function formatTabLabel(
   taskId: string,
   agentProfile: string,
   prefix?: "BLOCKED" | "FAILED",
 ): string {
-  const base = `task-${taskId} (${agentProfile})`;
+  const base = `task-${shortTaskId(taskId)} (${agentProfile})`;
   return prefix ? `[${prefix}] ${base}` : base;
 }

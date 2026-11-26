@@ -159,7 +159,7 @@ function runLaunchctl(args: string[], dryRun: boolean, allowFail = false): void 
     return;
   }
   try {
-    execFileSync("launchctl", args, { stdio: "inherit" });
+    execFileSync("launchctl", args, { stdio: allowFail ? "ignore" : "inherit" });
   } catch (err) {
     if (!allowFail) throw err;
   }

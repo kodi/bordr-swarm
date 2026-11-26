@@ -458,7 +458,7 @@ async function main(): Promise<void> {
       boardName: swarm.board.boardName,
       boardUrl: resolvedBoardUrl,
     });
-    writeFileIfChanged(
+    const uiUnitChanged = writeFileIfChanged(
       resolve(home, ".config/systemd/user/vercel-board-ui.service"),
       unitContent,
       flags.dryRun,
@@ -470,7 +470,7 @@ async function main(): Promise<void> {
       scope: swarm.board.scope,
       boardName: swarm.board.boardName,
     });
-    writeFileIfChanged(
+    const watcherUnitChanged = writeFileIfChanged(
       resolve(home, ".config/systemd/user/bordr-lead-watcher.service"),
       leadWatcherUnit,
       flags.dryRun,
@@ -479,9 +479,13 @@ async function main(): Promise<void> {
     if (!flags.noReload) {
       runSystemctlUser(["daemon-reload"], flags.dryRun);
       runSystemctlUser(["enable", "--now", "vercel-board-ui.service"], flags.dryRun);
-      runSystemctlUser(["restart", "vercel-board-ui.service"], flags.dryRun);
+      if (uiUnitChanged) {
+        runSystemctlUser(["restart", "vercel-board-ui.service"], flags.dryRun);
+      }
       runSystemctlUser(["enable", "--now", "bordr-lead-watcher.service"], flags.dryRun);
-      runSystemctlUser(["restart", "bordr-lead-watcher.service"], flags.dryRun);
+      if (watcherUnitChanged) {
+        runSystemctlUser(["restart", "bordr-lead-watcher.service"], flags.dryRun);
+      }
     }
   } else {
     const uid = typeof process.getuid === "function" ? process.getuid() : 501;

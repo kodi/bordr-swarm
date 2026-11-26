@@ -255,6 +255,31 @@ describe("board & herdr helpers", () => {
     assert.equal(t.labels.agent, "agy");
   });
 
+  it("normalizes Vercel Board 66.6.0 nested { message: { ..., task: { state } } } task shape", () => {
+    const t = normalizeBoardTask({
+      message: {
+        id: "msg_8c164000-a378-4377-80ca-a2965566d237_1",
+        channel: "projects/example-app",
+        text: "Smoke test task",
+        labels: {
+          machine: "worker-machine",
+          "board.task": "ready",
+        },
+        task: {
+          state: "ready",
+          claim: null,
+        },
+      },
+      replies: 0,
+      last: null,
+    });
+    assert.ok(t);
+    assert.equal(t.id, "msg_8c164000-a378-4377-80ca-a2965566d237_1");
+    assert.equal(t.channel, "projects/example-app");
+    assert.equal(t.state, "ready");
+    assert.equal(t.labels.machine, "worker-machine");
+  });
+
   it("sanitizes Herdr agent names to match [a-z][a-z0-9_-]{0,31}", () => {
     const name = sanitizeHerdrAgentName("w", "Task #812/foo.bar+extra-very-long-identifier-12345");
     assert.match(name, /^[a-z][a-z0-9_-]{0,31}$/);

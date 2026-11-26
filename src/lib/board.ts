@@ -119,33 +119,46 @@ export function normalizeBoardTask(raw: unknown): BoardTask | null {
   if (!objRes.success) return null;
   const obj = objRes.data;
 
-  const nestedTask = RecordSchema.safeParse(obj.task);
-  const taskObj = nestedTask.success ? nestedTask.data : obj;
+  // Vercel Board CLI 66.6.0 returns `{ message: { id, channel, text, labels, task: { state, claim, ... } }, replies, last }`
+  // Other responses may pass the message object directly or wrap under `.task`.
+  const msgRes = RecordSchema.safeParse(obj.message ?? obj.root);
+  const msgObj = msgRes.success ? msgRes.data : obj;
 
-  const rootRes = RecordSchema.safeParse(taskObj.root ?? taskObj.message);
-  const rootObj = rootRes.success ? rootRes.data : undefined;
+  const taskMetaRes = RecordSchema.safeParse(msgObj.task ?? obj.task);
+  const taskMeta = taskMetaRes.success ? taskMetaRes.data : msgObj;
 
-  const rawId = taskObj.id ?? taskObj.taskId ?? taskObj.messageId ?? rootObj?.id ?? obj.id;
+  const rawId = msgObj.id ?? taskMeta.id ?? taskMeta.taskId ?? taskMeta.messageId ?? obj.id;
   if (rawId === undefined || rawId === null || String(rawId).trim() === "") {
     return null;
   }
 
   const rawChannel =
-    taskObj.channel ??
-    rootObj?.channel ??
-    (typeof taskObj.channelName === "string" ? taskObj.channelName : "");
+    msgObj.channel ??
+    taskMeta.channel ??
+    (typeof msgObj.channelName === "string" ? msgObj.channelName : "");
   const channel = String(rawChannel ?? "").replace(/^#/, "");
 
-  const state = normalizeState(taskObj.state ?? taskObj.status ?? obj.state ?? obj.status);
-  const text = String(taskObj.text ?? rootObj?.text ?? taskObj.title ?? "");
-
   const mergedLabels = {
-    ...normalizeLabels(rootObj?.labels),
-    ...normalizeLabels(taskObj.labels),
+    ...normalizeLabels(obj.labels),
+    ...normalizeLabels(msgObj.labels),
+    ...normalizeLabels(taskMeta.labels),
   };
 
+  const state = normalizeState(
+    taskMeta.state ?? taskMeta.status ?? mergedLabels["board.task"] ?? msgObj.state ?? obj.state,
+  );
+  const text = String(msgObj.text ?? taskMeta.text ?? msgObj.title ?? "");
+
+  const claimRes = RecordSchema.safeParse(taskMeta.claim);
   const assigneeRaw =
-    taskObj.claimedBy ?? taskObj.holder ?? taskObj.assignee ?? taskObj.for ?? taskObj.profile;
+    (claimRes.success
+      ? (claimRes.data.profile ?? claimRes.data.holder ?? claimRes.data.by ?? claimRes.data.actor)
+      : undefined) ??
+    taskMeta.claimedBy ??
+    taskMeta.holder ??
+    taskMeta.assignee ??
+    taskMeta.for ??
+    taskMeta.profile;
   const assigneeObj = RecordSchema.safeParse(assigneeRaw);
   const assignee =
     typeof assigneeRaw === "string"

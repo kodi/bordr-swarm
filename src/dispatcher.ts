@@ -21,6 +21,7 @@ import {
   formatTabLabel,
   renderWorkerPrompt,
   selectEligibleTasks,
+  shortTaskId,
   type CandidateTask,
 } from "./lib/routing.ts";
 
@@ -275,7 +276,8 @@ export class SwarmDispatcher {
 
   private async claimAndSpawn(candidate: CandidateTask): Promise<boolean> {
     const { task, projectSlug, project, repoPath, useWorktree, runtime } = candidate;
-    const boardProfile = `worker-${this.machineName}-${task.id}`;
+    const shortId = shortTaskId(task.id);
+    const boardProfile = `worker-${this.machineName}-${shortId}`;
     const lease = this.swarm.board.leaseDuration;
 
     try {
@@ -304,8 +306,8 @@ export class SwarmDispatcher {
     }
 
     const tabLabel = formatTabLabel(task.id, runtime.profileName);
-    const agentName = sanitizeHerdrAgentName("w", task.id);
-    const branch = `task/${task.id}`;
+    const agentName = sanitizeHerdrAgentName("w", shortId);
+    const branch = `task/${shortId}`;
 
     try {
       const spawnedPane = useWorktree
