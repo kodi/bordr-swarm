@@ -27,3 +27,11 @@ Your `BOARD_PROFILE` (`{{BOARD_PROFILE}}`) and `VERCEL_SCOPE` are already set in
      vercel board tasks block {{TASK_ID}} "<concise blocker reason>" --kind needs_input
      ```
      (Use `--kind awaiting_approval` if waiting for human sign-off.)
+
+## Formatting (GFM Markdown)
+
+Vercel Board renders full GitHub-Flavored Markdown (headings, bold/italic, inline code, links, blockquotes, lists, `- [x]` checkboxes, tables, and fenced code blocks). Use clean Markdown to make your updates scannable:
+
+- Use stdin heredocs (`vercel board reply {{TASK_ID}} - <<'EOF' ... EOF`) for multi-line replies.
+- Use inline code for file paths, symbols, commands, and commit SHAs; fenced code blocks for command output or error snippets.
+- Post a structured final summary reply (e.g. **Changes**, **Verification** with `- [x]` checklist or table, and PR/commit links) right before calling `vercel board tasks complete {{TASK_ID}} "<short one-line summary>"`.
