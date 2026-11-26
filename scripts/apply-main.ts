@@ -479,7 +479,42 @@ async function main(): Promise<void> {
     `[apply:main] Configuring main machine "${machineName}" (os=${machineCfg.os}, hostname=${machineCfg.hostname}, viewerPort=${swarm.board.viewerPort})`,
   );
 
-  // 1. Install Board Inspector UI background service for Linux (systemd --user) or macOS (launchd)
+  // 1. Prepare Lead HQ workspace (e.g. ~/swarm-hq) with rendered CLAUDE.md BEFORE starting Lead Watcher
+  const leadWorkspaceDir = swarm.lead.workspaceDir.startsWith("~/")
+    ? resolve(home, swarm.lead.workspaceDir.slice(2))
+    : swarm.lead.workspaceDir;
+
+  const defaultWorkerMachine =
+    Object.entries(swarm.machines).find(
+      ([name, m]) => name !== machineName && (m.role === "worker" || m.maxWorkers > 0),
+    )?.[0] ?? "any";
+
+  const leadPromptTemplate = readFileSync(resolve(repoRoot, "prompts/lead-CLAUDE.md"), "utf8");
+  const renderedLeadPrompt = leadPromptTemplate
+    .replaceAll("{{MAIN_MACHINE}}", machineName)
+    .replaceAll("{{DEFAULT_WORKER_MACHINE}}", defaultWorkerMachine)
+    .replaceAll("{{HUMAN_HANDLE}}", swarm.board.humanHandle);
+
+  const leadPromptDest = resolve(leadWorkspaceDir, "CLAUDE.md");
+  const projectsLinkDest = resolve(leadWorkspaceDir, "projects.json");
+
+  writeFileIfChanged(leadPromptDest, renderedLeadPrompt, flags.dryRun);
+
+  // Remove any legacy symlink so Lead Watcher can sync #swarm/registry into ~/swarm-hq/projects.json cleanly
+  if (!flags.dryRun) {
+    try {
+      if (lstatSync(projectsLinkDest).isSymbolicLink()) {
+        unlinkSync(projectsLinkDest);
+        console.log(
+          `[apply:main] Removed legacy symlink ${projectsLinkDest} (now auto-synced from #${swarm.board.registryChannel}).`,
+        );
+      }
+    } catch {
+      // Nothing to remove
+    }
+  }
+
+  // 2. Install Board Inspector UI & Lead Watcher background services for Linux (systemd --user) or macOS (launchd)
   if (machineCfg.os === "linux") {
     const envLines: string[] = [];
     if (swarm.board.scope) envLines.push(`VERCEL_SCOPE=${swarm.board.scope}`);
@@ -570,41 +605,6 @@ async function main(): Promise<void> {
         changed: watcherPlistChanged,
         dryRun: flags.dryRun,
       });
-    }
-  }
-
-  // 2. Prepare Lead HQ workspace (e.g. ~/swarm-hq) with rendered CLAUDE.md + projects.json symlink
-  const leadWorkspaceDir = swarm.lead.workspaceDir.startsWith("~/")
-    ? resolve(home, swarm.lead.workspaceDir.slice(2))
-    : swarm.lead.workspaceDir;
-
-  const defaultWorkerMachine =
-    Object.entries(swarm.machines).find(
-      ([name, m]) => name !== machineName && (m.role === "worker" || m.maxWorkers > 0),
-    )?.[0] ?? machineName;
-
-  const leadPromptTemplate = readFileSync(resolve(repoRoot, "prompts/lead-CLAUDE.md"), "utf8");
-  const renderedLeadPrompt = leadPromptTemplate
-    .replaceAll("{{MAIN_MACHINE}}", machineName)
-    .replaceAll("{{DEFAULT_WORKER_MACHINE}}", defaultWorkerMachine)
-    .replaceAll("{{HUMAN_HANDLE}}", swarm.board.humanHandle);
-
-  const leadPromptDest = resolve(leadWorkspaceDir, "CLAUDE.md");
-  const projectsLinkDest = resolve(leadWorkspaceDir, "projects.json");
-
-  writeFileIfChanged(leadPromptDest, renderedLeadPrompt, flags.dryRun);
-
-  // Remove any legacy symlink so Lead Watcher can sync #swarm/registry into ~/swarm-hq/projects.json cleanly
-  if (!flags.dryRun) {
-    try {
-      if (lstatSync(projectsLinkDest).isSymbolicLink()) {
-        unlinkSync(projectsLinkDest);
-        console.log(
-          `[apply:main] Removed legacy symlink ${projectsLinkDest} (now auto-synced from #${swarm.board.registryChannel}).`,
-        );
-      }
-    } catch {
-      // Nothing to remove
     }
   }
 
