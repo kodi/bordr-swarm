@@ -3,12 +3,8 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, unlinkSync, writeFileSy
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import {
-  buildAgentCliArgs,
-  loadSwarmConfig,
-  resolveCurrentMachineName,
-} from "../src/lib/config.ts";
-import { HerdrClient } from "../src/lib/herdr.ts";
+import { loadSwarmConfig, resolveCurrentMachineName } from "../src/lib/config.ts";
+import { HerdrClient, sanitizeHerdrAgentName } from "../src/lib/herdr.ts";
 import { detectTailscaleInfo, detectVercelBoardIdentity } from "../src/lib/host-env.ts";
 
 interface MainApplyFlags {
@@ -365,74 +361,55 @@ ${argsXml}
 `;
 }
 
-async function ensureLeadRunning(params: {
-  workspaceDir: string;
+async function reconcileLeadTabs(params: {
   boardProfile: string;
-  vercelScope: string;
-  boardName: string;
-  leadArgs: string[];
   restartLead: boolean;
   dryRun: boolean;
 }): Promise<void> {
+  const leadPrefix = sanitizeHerdrAgentName(params.boardProfile, "");
   if (params.dryRun) {
     console.log(
-      `[dry-run] Would ensure Herdr workspace "swarm-hq" and Lead agent "lead" (claude ${params.leadArgs.join(" ")})`,
+      `[dry-run] Lead runs ephemerally per thread via Lead Watcher (would close any legacy idle "${leadPrefix}" tab${params.restartLead ? ` and idle "${leadPrefix}-*" tabs` : ""}).`,
     );
     return;
   }
 
   const herdr = new HerdrClient({ target: "local" });
-  const existingLead = await herdr.getAgent("lead");
-  if (existingLead) {
-    if (params.restartLead && existingLead.tab_id) {
+  let agents;
+  try {
+    agents = await herdr.listAgents();
+  } catch {
+    console.log(
+      "[apply:main] Lead runs ephemerally per thread via Lead Watcher (Herdr not reachable right now; Lead Watcher will spawn tabs on demand).",
+    );
+    return;
+  }
+
+  const tabsToClose = new Set<string>();
+  for (const agent of agents) {
+    if (!agent.tab_id) continue;
+    const isLegacyPersistent = agent.name === leadPrefix;
+    const isEphemeralLead = Boolean(agent.name?.startsWith(`${leadPrefix}-`));
+    const isIdle = agent.agent_status === "idle" || agent.agent_status === "done";
+
+    if (isLegacyPersistent && (isIdle || params.restartLead)) {
+      tabsToClose.add(agent.tab_id);
       console.log(
-        `[apply:main] Closing existing Lead tab ${existingLead.tab_id} to reload CLAUDE.md...`,
+        `[apply:main] Closing legacy persistent Lead tab ${agent.tab_id} (Lead now runs ephemerally per thread via Lead Watcher).`,
       );
-      await herdr.closeTab(existingLead.tab_id);
-    } else {
-      console.log(
-        `[apply:main] Lead agent "lead" is already running in pane ${existingLead.pane_id} (status=${existingLead.agent_status}).`,
-      );
-      if (existingLead.agent_status === "blocked") {
-        console.log(
-          '[apply:main] Action needed: open Sheprd -> workspace "swarm-hq" -> tab "lead" to approve Claude\'s prompt.',
-        );
-      }
-      return;
+    } else if (isEphemeralLead && params.restartLead && isIdle) {
+      tabsToClose.add(agent.tab_id);
+      console.log(`[apply:main] Closing idle ephemeral Lead tab ${agent.tab_id} (--restart-lead).`);
     }
   }
 
-  const env: Record<string, string> = {
-    BOARD_PROFILE: params.boardProfile,
-  };
-  if (params.vercelScope) env.VERCEL_SCOPE = params.vercelScope;
-  if (params.boardName) env.VERCEL_BOARD_NAME = params.boardName;
-
-  const pane = await herdr.findOrCreateProjectTab({
-    workspaceLabel: "swarm-hq",
-    cwd: params.workspaceDir,
-    tabLabel: "lead",
-    env,
-  });
-
-  const startRes = await herdr.startAgent({
-    name: "lead",
-    kind: "claude",
-    paneId: pane.paneId,
-    args: params.leadArgs,
-    timeoutMs: 60_000,
-  });
-
-  if (startRes.blockedOnStartup) {
-    console.log(
-      `[apply:main] Lead agent started in ${pane.tabId} (${pane.paneId}) and is waiting on Claude's one-time folder-trust prompt.`,
-    );
-    console.log(
-      '[apply:main] Action needed: open Sheprd -> workspace "swarm-hq" -> tab "lead" and approve the folder-trust prompt once.',
-    );
-  } else {
-    console.log(`[apply:main] Started Lead agent "lead" in ${pane.tabId} (${pane.paneId}).`);
+  for (const tabId of tabsToClose) {
+    await herdr.closeTab(tabId).catch(() => {});
   }
+
+  console.log(
+    "[apply:main] Lead runs ephemerally per thread via Lead Watcher (spawns fresh tabs on demand, auto-closes when idle, and picks up CLAUDE.md automatically).",
+  );
 }
 
 async function main(): Promise<void> {
@@ -608,27 +585,13 @@ async function main(): Promise<void> {
     }
   }
 
-  // 3. Optionally start the Lead agent in Herdr
-  const leadArgs = buildAgentCliArgs({
-    kind: "claude",
-    model: swarm.lead.model,
-    effort: swarm.lead.effort,
-    permissionMode: swarm.lead.permissionMode,
-    extraArgs: [],
-  });
-
-  if (flags.startLead) {
-    await ensureLeadRunning({
-      workspaceDir: leadWorkspaceDir,
+  // 3. Reconcile any legacy persistent Lead tab (Lead Watcher spawns ephemeral per-thread tabs on demand)
+  if (flags.startLead || flags.restartLead) {
+    await reconcileLeadTabs({
       boardProfile: swarm.lead.boardProfile,
-      vercelScope: swarm.board.scope,
-      boardName: swarm.board.boardName,
-      leadArgs,
       restartLead: flags.restartLead,
       dryRun: flags.dryRun,
     });
-  } else {
-    console.log("[apply:main] To start the Lead agent in Herdr, re-run with --start-lead.");
   }
 
   console.log("\n[apply:main] Board UI access:");

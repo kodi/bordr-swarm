@@ -123,19 +123,29 @@ function stopMacosServices(home: string, dryRun: boolean): void {
   }
 }
 
-async function stopLeadAgent(dryRun: boolean): Promise<void> {
+async function stopLeadAgents(dryRun: boolean): Promise<void> {
   const herdr = new HerdrClient({ target: "local" });
   try {
-    const lead = await herdr.getAgent("lead");
-    if (!lead?.tab_id) {
-      return;
+    const agents = await herdr.listAgents();
+    const leadTabIds = new Set<string>();
+    for (const agent of agents) {
+      if (!agent.tab_id) continue;
+      if (
+        agent.name === "lead" ||
+        agent.name?.startsWith("lead-") ||
+        agent.cwd?.endsWith("/swarm-hq")
+      ) {
+        leadTabIds.add(agent.tab_id);
+      }
     }
-    if (dryRun) {
-      console.log(`[dry-run] Would close Lead agent tab ${lead.tab_id} in Herdr`);
-      return;
+    for (const tabId of leadTabIds) {
+      if (dryRun) {
+        console.log(`[dry-run] Would close Lead agent tab ${tabId} in Herdr`);
+        continue;
+      }
+      await herdr.closeTab(tabId);
+      console.log(`[stop] Closed Lead agent tab ${tabId} in Herdr.`);
     }
-    await herdr.closeTab(lead.tab_id);
-    console.log(`[stop] Closed Lead agent tab ${lead.tab_id} in Herdr.`);
   } catch {
     // Herdr server may not be running; ignore gracefully
   }
@@ -155,7 +165,7 @@ async function main(): Promise<void> {
   }
 
   if (!flags.keepLead) {
-    await stopLeadAgent(flags.dryRun);
+    await stopLeadAgents(flags.dryRun);
   }
 
   if (flags.reset) {

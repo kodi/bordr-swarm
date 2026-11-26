@@ -287,9 +287,37 @@ export const LeadConfigSchema = z
       .describe(
         "Seconds between deterministic Lead Watcher checks for new #inbox messages, @lead mentions, and blocked tasks (0 LLM tokens while idle).",
       ),
+    maxConcurrentSessions: z
+      .number()
+      .int()
+      .min(1)
+      .max(10)
+      .default(1)
+      .describe(
+        "Maximum concurrent ephemeral Lead sessions (one isolated session per Board thread). Default 1 serializes threads to avoid cross-thread task-creation races.",
+      ),
+    idleCloseSeconds: z
+      .number()
+      .int()
+      .min(0)
+      .max(3600)
+      .default(15)
+      .describe(
+        "Seconds an ephemeral Lead session must remain idle after its latest prompt before Lead Watcher automatically closes its Herdr tab.",
+      ),
+    maxParkedTabs: z
+      .number()
+      .int()
+      .min(0)
+      .default(4)
+      .describe(
+        "Maximum parked [BLOCKED]/[FAILED] Lead tabs allowed in Sheprd before pausing new Lead spawns. Set 0 for unlimited.",
+      ),
   })
   .strict()
-  .describe("Configuration for the event-driven Lead triage agent and Lead Watcher daemon.");
+  .describe(
+    "Configuration for the ephemeral per-thread Lead triage agent and Lead Watcher daemon.",
+  );
 
 export const WorkerDefaultsConfigSchema = z
   .object({

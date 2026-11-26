@@ -112,10 +112,14 @@ Runs `board inspect --port 4747 --no-open --allow-host <host>...` (from `@vercel
 
 For single-machine setups (`role: "both"`), open `http://127.0.0.1:4747` directly. For remote access over a private network / tailnet, expose over HTTPS via `sudo tailscale serve --bg --https=4748 http://127.0.0.1:4747` (required because the web UI uses `crypto.randomUUID()` which browsers restrict to Secure Contexts).
 
-### 3. Lead Watcher & Lead Agent (`main-machine`)
+### 3. Lead Watcher & Ephemeral Lead Agent (`main-machine`)
 
-- **Lead Watcher (`src/lead-watcher.ts`):** Deterministic 0-token daemon that polls `#inbox`, `@lead` mentions across `#projects/*`, and `blocked` tasks, syncs `#swarm/registry` into `~/swarm-hq/projects.json`, and wakes Lead via `herdr agent prompt` only when new events arrive.
-- **Lead Agent Runtime:** Claude Code (`--model opus --effort high --permission-mode auto`) in a dedicated Herdr workspace (`~/swarm-hq`) on the main machine (`BOARD_PROFILE=lead`).
+- **Lead Watcher (`src/lead-watcher.ts`):** Deterministic 0-token daemon that polls `#inbox`, `@lead` mentions across `#projects/*`, and `blocked` tasks, syncs `#swarm/registry` into `~/swarm-hq/projects.json`, and persists queued events per thread in `~/.local/state/bordr-swarm/lead-watcher-state.json`.
+- **Ephemeral Per-Thread Lead Sessions:** Rather than keeping one long-lived Claude session that accumulates cross-project context rot over days, Lead Watcher spawns a fresh Claude Code tab (`lead-<shortId>`, `--model opus --effort high --permission-mode auto`) in `~/swarm-hq` (`BOARD_PROFILE=lead`) scoped to a single `threadId` (`maxConcurrentSessions: 1` by default to prevent cross-thread races).
+  - Lead reads the full thread verbatim via `vercel board read <id>` (and can inspect recent `#inbox` / `#projects/*` if another thread is referenced).
+  - Rapid follow-up replies on the _same_ thread reuse the open tab before closing; once the session stays `idle` for `idleCloseSeconds` (default `15s`) with no queued events, Lead Watcher automatically closes the tab.
+  - If a Lead session hits a startup/approval prompt in Sheprd, it is renamed `[BLOCKED] lead-<shortId>` and parked (capped by `lead.maxParkedTabs`) so other threads are not stalled, then automatically unparked and closed once resolved.
+  - Every new Lead session automatically loads the latest `~/swarm-hq/CLAUDE.md` and `projects.json` with zero restarts needed.
 - **Owns:** Triage, decomposition into `#projects/<slug>` tasks, dependency wiring (`--needs`), and unblocking workers within policy. Escalates human-only decisions to `board.humanHandle`.
 - **Does NOT own:** Process spawning, lease renewal, or tab cleanup.
 

@@ -11,19 +11,31 @@ import {
   type ProjectsConfig,
   type SwarmConfig,
 } from "./lib/config.ts";
-import { HerdrClient, sanitizeHerdrAgentName } from "./lib/herdr.ts";
+import { HerdrClient, type HerdrAgent, type HerdrTab } from "./lib/herdr.ts";
 import {
   buildLeadWakePrompt,
   collectLeadEvents,
   createEmptyLeadState,
+  enqueueLeadEvents,
   type LeadWakeEvent,
   type LeadWatcherState,
 } from "./lib/lead-events.ts";
+import {
+  buildLeadAgentName,
+  formatLeadTabLabel,
+  isLeadSessionParked,
+  stepLeadSession,
+  type LeadSession,
+  type LeadSessionEffect,
+} from "./lib/lead-fsm.ts";
 import {
   catalogFingerprint,
   mergeRegistryIntoLeadCatalog,
   readAllMachineRegistryEntries,
 } from "./lib/registry.ts";
+import { assertNever } from "./lib/session-fsm.ts";
+
+const LEAD_STARTUP_GRACE_MS = 20_000;
 
 interface CliFlags {
   machine?: string;
@@ -63,6 +75,30 @@ function sleep(ms: number): Promise<void> {
   });
 }
 
+function parsePendingByThread(raw: unknown): Record<string, LeadWakeEvent[]> {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return {};
+  }
+  const out: Record<string, LeadWakeEvent[]> = {};
+  for (const [threadId, list] of Object.entries(raw as Record<string, unknown>)) {
+    if (!Array.isArray(list)) continue;
+    const valid = list.filter(
+      (item): item is LeadWakeEvent =>
+        typeof item === "object" &&
+        item !== null &&
+        typeof (item as LeadWakeEvent).kind === "string" &&
+        typeof (item as LeadWakeEvent).channel === "string" &&
+        typeof (item as LeadWakeEvent).threadId === "string" &&
+        typeof (item as LeadWakeEvent).author === "string" &&
+        typeof (item as LeadWakeEvent).preview === "string",
+    );
+    if (valid.length > 0) {
+      out[threadId] = valid;
+    }
+  }
+  return out;
+}
+
 function loadState(statePath: string): LeadWatcherState {
   if (!existsSync(statePath)) {
     return createEmptyLeadState();
@@ -75,6 +111,7 @@ function loadState(statePath: string): LeadWatcherState {
           ? raw.seenThreadLatestMsgId
           : {},
       seenBlockedTaskIds: Array.isArray(raw.seenBlockedTaskIds) ? raw.seenBlockedTaskIds : [],
+      pendingByThread: parsePendingByThread(raw.pendingByThread),
     };
   } catch (err) {
     log(
@@ -97,13 +134,13 @@ export class LeadWatcher {
   readonly statePath: string;
   readonly leadWorkspaceDir: string;
   readonly localProjectsPath: string | null;
-  readonly leadAgentName: string;
   readonly dryRun: boolean;
+  readonly now: () => number;
 
   private state: LeadWatcherState;
-  private pendingEvents: LeadWakeEvent[] = [];
+  private sessions = new Map<string, LeadSession>();
   private stopping = false;
-  private startupWarnedBlocked = false;
+  private parkedLimitWarned = false;
   private lastCatalogFingerprint = "";
 
   constructor(params: {
@@ -114,6 +151,7 @@ export class LeadWatcher {
     leadWorkspaceDir: string;
     localProjectsPath?: string | null;
     dryRun: boolean;
+    now?: () => number;
   }) {
     this.swarm = params.swarm;
     this.board = params.board;
@@ -121,9 +159,39 @@ export class LeadWatcher {
     this.statePath = params.statePath;
     this.leadWorkspaceDir = params.leadWorkspaceDir;
     this.localProjectsPath = params.localProjectsPath ?? null;
-    this.leadAgentName = sanitizeHerdrAgentName(params.swarm.lead.boardProfile, "");
     this.dryRun = params.dryRun;
+    this.now = params.now ?? (() => Date.now());
     this.state = loadState(params.statePath);
+  }
+
+  /** Exposed for observability and tests. */
+  getTrackedSessions(): ReadonlyMap<string, LeadSession> {
+    return this.sessions;
+  }
+
+  private persistState(): void {
+    if (!this.dryRun) {
+      saveState(this.statePath, this.state);
+    }
+  }
+
+  private consumeQueuedEvents(threadId: string, count: number): void {
+    const existing = this.state.pendingByThread[threadId];
+    if (!existing || existing.length === 0) return;
+    const remaining = existing.slice(count);
+    if (remaining.length === 0) {
+      delete this.state.pendingByThread[threadId];
+    } else {
+      this.state.pendingByThread[threadId] = remaining;
+    }
+    this.persistState();
+  }
+
+  private clearQueuedEvents(threadId: string): void {
+    if (threadId in this.state.pendingByThread) {
+      delete this.state.pendingByThread[threadId];
+      this.persistState();
+    }
   }
 
   private async syncRegistryCatalog(): Promise<void> {
@@ -181,27 +249,172 @@ export class LeadWatcher {
     this.stopping = true;
   }
 
-  private async ensureLeadAgent(): Promise<"ready" | "busy" | "blocked"> {
-    const existing = await this.herdr.getAgent(this.leadAgentName);
-    if (existing) {
-      if (existing.agent_status === "idle" || existing.agent_status === "done") {
-        this.startupWarnedBlocked = false;
-        return "ready";
-      }
-      if (existing.agent_status === "blocked") {
-        if (!this.startupWarnedBlocked) {
-          log(
-            "WARN",
-            `Lead agent "${this.leadAgentName}" is currently blocked in Sheprd (pane ${existing.pane_id}); queuing ${this.pendingEvents.length} event(s) until unblocked.`,
-          );
-          this.startupWarnedBlocked = true;
+  private async applySessionEffects(effects: LeadSessionEffect[]): Promise<boolean> {
+    for (const effect of effects) {
+      switch (effect.type) {
+        case "rename_tab": {
+          await this.herdr.renameTab(effect.tabId, effect.label).catch((err) => {
+            log(
+              "WARN",
+              `Could not rename Lead tab ${effect.tabId}: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          });
+          break;
         }
-        return "blocked";
+        case "deliver_prompt": {
+          const prompt = buildLeadWakePrompt(effect.events);
+          try {
+            await this.herdr.promptAgent(effect.agentName, prompt);
+            this.consumeQueuedEvents(effect.threadId, effect.events.length);
+            log(
+              "INFO",
+              `Delivered ${effect.events.length} event(s) to Lead "${effect.agentName}" for thread ${effect.threadId}.`,
+            );
+          } catch (err) {
+            log(
+              "ERROR",
+              `Failed to prompt Lead "${effect.agentName}" for thread ${effect.threadId}: ${err instanceof Error ? err.message : String(err)}`,
+            );
+            return false;
+          }
+          break;
+        }
+        case "clear_queued_events": {
+          this.clearQueuedEvents(effect.threadId);
+          break;
+        }
+        case "close_tab": {
+          await this.herdr.closeTab(effect.tabId).catch((err) => {
+            log(
+              "WARN",
+              `Could not close Lead tab ${effect.tabId}: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          });
+          break;
+        }
+        case "log": {
+          log(effect.level, effect.message);
+          break;
+        }
+        default:
+          return assertNever(effect);
       }
-      return "busy";
+    }
+    return true;
+  }
+
+  private async reconcileSessions(): Promise<void> {
+    if (this.sessions.size === 0) {
+      return;
     }
 
-    // Lead is not running in Herdr yet -> auto-start it in ~/swarm-hq
+    const [tabs, agents] = await Promise.all([this.herdr.listTabs(), this.herdr.listAgents()]);
+    const tabsById = new Map<string, HerdrTab>(tabs.map((t) => [t.tab_id, t]));
+    const agentsByName = new Map<string, HerdrAgent>();
+    const agentsByPane = new Map<string, HerdrAgent>();
+    for (const a of agents) {
+      if (a.name) agentsByName.set(a.name, a);
+      agentsByPane.set(a.pane_id, a);
+    }
+
+    const nowMs = this.now();
+    const idleCloseMs = this.swarm.lead.idleCloseSeconds * 1000;
+
+    for (const [threadId, session] of this.sessions.entries()) {
+      const tabExists = tabsById.has(session.tabId);
+      const liveAgent =
+        agentsByName.get(session.agentName) ?? agentsByPane.get(session.paneId) ?? null;
+      const pendingEventsForThread = this.state.pendingByThread[threadId] ?? [];
+
+      const outcome = stepLeadSession(session, {
+        tabExists,
+        agentStatus: liveAgent?.agent_status ?? null,
+        pendingEventsForThread,
+        nowMs,
+        startupGraceMs: LEAD_STARTUP_GRACE_MS,
+        idleCloseMs,
+      });
+
+      const ok = await this.applySessionEffects(outcome.effects);
+      if (!ok) {
+        // Keep previous session state so next tick retries failed prompt delivery
+        continue;
+      }
+
+      if (outcome.status === "active") {
+        this.sessions.set(threadId, outcome.next);
+      } else {
+        this.sessions.delete(threadId);
+      }
+    }
+  }
+
+  private async spawnSessionForThread(threadId: string): Promise<"active" | "parked" | "failed"> {
+    const events = this.state.pendingByThread[threadId] ?? [];
+    if (events.length === 0) {
+      return "failed";
+    }
+
+    const agentName = buildLeadAgentName(this.swarm.lead.boardProfile, threadId);
+    const nowMs = this.now();
+
+    // If an orphaned session for this exact thread still exists in Herdr (e.g. after daemon restart), adopt it
+    const existing = await this.herdr.getAgent(agentName).catch(() => null);
+    if (existing?.tab_id) {
+      const isBlocked = existing.agent_status === "blocked";
+      if (isBlocked) {
+        await this.herdr
+          .renameTab(existing.tab_id, formatLeadTabLabel(threadId, "BLOCKED"))
+          .catch(() => {});
+        this.sessions.set(threadId, {
+          threadId,
+          agentName,
+          tabId: existing.tab_id,
+          paneId: existing.pane_id,
+          startedAtMs: nowMs,
+          phase: { kind: "startup_blocked" },
+        });
+        log(
+          "WARN",
+          `Adopted existing blocked Lead "${agentName}" in tab ${existing.tab_id} for thread ${threadId}.`,
+        );
+        return "parked";
+      }
+
+      if (existing.agent_status === "idle" || existing.agent_status === "done") {
+        await this.herdr.promptAgent(agentName, buildLeadWakePrompt(events));
+        this.consumeQueuedEvents(threadId, events.length);
+        this.sessions.set(threadId, {
+          threadId,
+          agentName,
+          tabId: existing.tab_id,
+          paneId: existing.pane_id,
+          startedAtMs: nowMs,
+          phase: { kind: "prompt_sent", promptedAtMs: nowMs },
+        });
+        log(
+          "INFO",
+          `Adopted idle Lead "${agentName}" in tab ${existing.tab_id} and delivered ${events.length} event(s) for thread ${threadId}.`,
+        );
+        return "active";
+      }
+
+      // Already working; adopt and let reconcileSessions deliver queued events once idle
+      this.sessions.set(threadId, {
+        threadId,
+        agentName,
+        tabId: existing.tab_id,
+        paneId: existing.pane_id,
+        startedAtMs: nowMs,
+        phase: { kind: "working" },
+      });
+      log(
+        "INFO",
+        `Adopted running Lead "${agentName}" in tab ${existing.tab_id} for thread ${threadId}.`,
+      );
+      return "active";
+    }
+
     const env: Record<string, string> = {
       BOARD_PROFILE: this.swarm.lead.boardProfile,
     };
@@ -219,29 +432,107 @@ export class LeadWatcher {
     const pane = await this.herdr.findOrCreateProjectTab({
       workspaceLabel: "swarm-hq",
       cwd: this.leadWorkspaceDir,
-      tabLabel: this.leadAgentName,
+      tabLabel: formatLeadTabLabel(threadId),
       env,
     });
 
-    const startRes = await this.herdr.startAgent({
-      name: this.leadAgentName,
-      kind: "claude",
-      paneId: pane.paneId,
-      args: leadArgs,
-      timeoutMs: 60_000,
-    });
+    try {
+      const startRes = await this.herdr.startAgent({
+        name: agentName,
+        kind: "claude",
+        paneId: pane.paneId,
+        args: leadArgs,
+        timeoutMs: 60_000,
+      });
 
-    if (startRes.blockedOnStartup) {
+      if (startRes.blockedOnStartup) {
+        await this.herdr
+          .renameTab(pane.tabId, formatLeadTabLabel(threadId, "BLOCKED"))
+          .catch(() => {});
+        this.sessions.set(threadId, {
+          threadId,
+          agentName,
+          tabId: pane.tabId,
+          paneId: pane.paneId,
+          startedAtMs: nowMs,
+          phase: { kind: "startup_blocked" },
+        });
+        log(
+          "WARN",
+          `Spawned ephemeral Lead "${agentName}" in ${pane.tabId} for thread ${threadId}, waiting on startup prompt in Sheprd.`,
+        );
+        return "parked";
+      }
+
+      await this.herdr.promptAgent(agentName, buildLeadWakePrompt(events));
+      this.consumeQueuedEvents(threadId, events.length);
+
+      this.sessions.set(threadId, {
+        threadId,
+        agentName,
+        tabId: pane.tabId,
+        paneId: pane.paneId,
+        startedAtMs: nowMs,
+        phase: { kind: "prompt_sent", promptedAtMs: nowMs },
+      });
+
       log(
-        "WARN",
-        `Auto-started Lead agent "${this.leadAgentName}" in ${pane.tabId}, waiting on startup prompt in Sheprd.`,
+        "INFO",
+        `Spawned ephemeral Lead "${agentName}" in ${pane.tabId} for thread ${threadId} (${events.length} event(s)).`,
       );
-      this.startupWarnedBlocked = true;
-      return "blocked";
+      return "active";
+    } catch (err) {
+      log(
+        "ERROR",
+        `Failed to spawn Lead "${agentName}" for thread ${threadId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      await this.herdr.closeTab(pane.tabId).catch(() => {});
+      return "failed";
+    }
+  }
+
+  private async dispatchQueuedThreads(): Promise<void> {
+    const queuedThreadIds = Object.keys(this.state.pendingByThread).filter(
+      (threadId) =>
+        (this.state.pendingByThread[threadId]?.length ?? 0) > 0 && !this.sessions.has(threadId),
+    );
+    if (queuedThreadIds.length === 0) {
+      return;
     }
 
-    log("INFO", `Auto-started Lead agent "${this.leadAgentName}" in ${pane.tabId}.`);
-    return "ready";
+    let activeCount = 0;
+    let parkedCount = 0;
+    for (const session of this.sessions.values()) {
+      if (isLeadSessionParked(session)) parkedCount += 1;
+      else activeCount += 1;
+    }
+
+    const maxConcurrent = this.swarm.lead.maxConcurrentSessions;
+    const maxParked = this.swarm.lead.maxParkedTabs;
+
+    if (maxParked > 0 && parkedCount >= maxParked) {
+      if (!this.parkedLimitWarned) {
+        log(
+          "WARN",
+          `Paused spawning new Lead sessions: ${parkedCount}/${maxParked} parked [BLOCKED]/[FAILED] Lead tab(s) in Sheprd.`,
+        );
+        this.parkedLimitWarned = true;
+      }
+      return;
+    }
+    this.parkedLimitWarned = false;
+
+    for (const threadId of queuedThreadIds) {
+      if (activeCount >= maxConcurrent) {
+        break;
+      }
+      if (maxParked > 0 && parkedCount >= maxParked) {
+        break;
+      }
+      const res = await this.spawnSessionForThread(threadId);
+      if (res === "active") activeCount += 1;
+      else if (res === "parked") parkedCount += 1;
+    }
   }
 
   async tick(): Promise<void> {
@@ -273,51 +564,40 @@ export class LeadWatcher {
 
     if (events.length > 0) {
       log("INFO", `Detected ${events.length} new Board event(s) for Lead.`);
-      this.pendingEvents.push(...events);
-      this.state = nextState;
-      if (!this.dryRun) {
-        saveState(this.statePath, this.state);
-      }
+      this.state = {
+        ...nextState,
+        pendingByThread: enqueueLeadEvents(nextState.pendingByThread, events),
+      };
+      this.persistState();
     } else if (
       nextState.seenBlockedTaskIds.length !== this.state.seenBlockedTaskIds.length ||
       Object.keys(nextState.seenThreadLatestMsgId).length !==
         Object.keys(this.state.seenThreadLatestMsgId).length
     ) {
       this.state = nextState;
-      if (!this.dryRun) {
-        saveState(this.statePath, this.state);
-      }
-    }
-
-    if (this.pendingEvents.length === 0) {
-      return;
+      this.persistState();
     }
 
     if (this.dryRun) {
-      log(
-        "INFO",
-        `[dry-run] Would wake Lead with prompt:\n${buildLeadWakePrompt(this.pendingEvents)}`,
-      );
-      this.pendingEvents = [];
+      for (const [threadId, threadEvents] of Object.entries(this.state.pendingByThread)) {
+        if (threadEvents.length === 0) continue;
+        log(
+          "INFO",
+          `[dry-run] Would spawn ephemeral Lead "${buildLeadAgentName(this.swarm.lead.boardProfile, threadId)}" for thread ${threadId}:\n${buildLeadWakePrompt(threadEvents)}`,
+        );
+      }
+      this.state.pendingByThread = {};
       return;
     }
 
-    const readiness = await this.ensureLeadAgent();
-    if (readiness !== "ready") {
-      return;
-    }
-
-    const batch = this.pendingEvents;
-    const prompt = buildLeadWakePrompt(batch);
-    await this.herdr.promptAgent(this.leadAgentName, prompt);
-    this.pendingEvents = [];
-    log("INFO", `Woke Lead agent "${this.leadAgentName}" with ${batch.length} event(s).`);
+    await this.reconcileSessions();
+    await this.dispatchQueuedThreads();
   }
 
   async runLoop(once: boolean): Promise<void> {
     log(
       "INFO",
-      `Starting Lead Watcher (inbox=#${this.swarm.board.inboxChannel}, prefix=${this.swarm.board.projectChannelPrefix}, lead=${this.leadAgentName}, poll=${this.swarm.lead.pollIntervalSeconds}s, dryRun=${this.dryRun})`,
+      `Starting Lead Watcher (mode=ephemeral, inbox=#${this.swarm.board.inboxChannel}, prefix=${this.swarm.board.projectChannelPrefix}, profile=${this.swarm.lead.boardProfile}, maxConcurrent=${this.swarm.lead.maxConcurrentSessions}, idleClose=${this.swarm.lead.idleCloseSeconds}s, poll=${this.swarm.lead.pollIntervalSeconds}s, dryRun=${this.dryRun})`,
     );
 
     if (!this.dryRun) {

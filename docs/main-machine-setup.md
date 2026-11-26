@@ -45,9 +45,9 @@ mise run logs ui
 `mise run apply` (via `apply:main`) idempotently:
 
 1. Installs and enables the Board Inspector UI background service (`systemd --user` on Linux, `launchd` on macOS), automatically passing `--allow-host` for both `allowedHosts` and any detected Tailscale MagicDNS hostname.
-2. Installs and enables the deterministic **Lead Watcher** service (`bordr-lead-watcher.service` on Linux, `dev.swarm.lead-watcher` on macOS) that watches `#inbox`, `@lead` mentions, and `blocked` tasks with **0 idle LLM tokens**, syncs `#swarm/registry` into `~/swarm-hq/projects.json`, and wakes Lead in Herdr only when real events arrive.
-3. Creates/updates `lead.workspaceDir` (default `~/swarm-hq`) with rendered `CLAUDE.md` — you do **not** need a `config/projects.json` on a main-only host.
-4. Starts the Lead agent in Herdr by default (pass `--no-start-lead` to skip, or `--restart-lead` after editing `prompts/lead-CLAUDE.md`). On first run, open **Sheprd** once to approve Claude's folder-trust prompt for `~/swarm-hq`.
+2. Installs and enables the deterministic **Lead Watcher** service (`bordr-lead-watcher.service` on Linux, `dev.swarm.lead-watcher` on macOS) that watches `#inbox`, `@lead` mentions, and `blocked` tasks with **0 idle LLM tokens**, syncs `#swarm/registry` into `~/swarm-hq/projects.json`, and spawns **ephemeral per-thread Lead tabs** (`lead-<shortId>`) in Herdr on demand, auto-closing each tab once idle.
+3. Creates/updates `lead.workspaceDir` (default `~/swarm-hq`) with rendered `CLAUDE.md` — you do **not** need a `config/projects.json` on a main-only host. Every new ephemeral Lead session automatically picks up the latest `CLAUDE.md` and `projects.json`.
+4. Closes any legacy persistent `lead` tab left over from older versions (on first-ever run on a new host, if Claude prompts for `~/swarm-hq` folder trust when the first event arrives, Lead Watcher parks it as `[BLOCKED] lead-<shortId>` in **Sheprd** until you approve it once).
 
 ## 3. Optional: Expose Board UI Over Tailscale (HTTPS Recommended)
 

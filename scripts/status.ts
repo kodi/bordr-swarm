@@ -114,10 +114,13 @@ async function main(): Promise<void> {
   const herdr = new HerdrClient({ target: machine.herdrTarget });
   try {
     const agents = await herdr.listAgents();
+    const leadPrefix = swarm.lead.boardProfile.toLowerCase();
     const swarmAgents = agents.filter(
       (a) =>
-        a.name === swarm.lead.boardProfile ||
-        (a.name && a.name.startsWith("w-")) ||
+        a.name === leadPrefix ||
+        Boolean(a.name?.startsWith(`${leadPrefix}-`)) ||
+        Boolean(a.name?.startsWith("w-")) ||
+        Boolean(a.name?.startsWith("r-")) ||
         a.cwd?.endsWith("/swarm-hq"),
     );
     console.log("");

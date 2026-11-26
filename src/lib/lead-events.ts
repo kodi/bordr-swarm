@@ -14,13 +14,37 @@ export interface LeadWakeEvent {
 export interface LeadWatcherState {
   seenThreadLatestMsgId: Record<string, string>;
   seenBlockedTaskIds: string[];
+  pendingByThread: Record<string, LeadWakeEvent[]>;
 }
 
 export function createEmptyLeadState(): LeadWatcherState {
   return {
     seenThreadLatestMsgId: {},
     seenBlockedTaskIds: [],
+    pendingByThread: {},
   };
+}
+
+export function enqueueLeadEvents(
+  existing: Record<string, LeadWakeEvent[]>,
+  events: LeadWakeEvent[],
+): Record<string, LeadWakeEvent[]> {
+  if (events.length === 0) return existing;
+  const next: Record<string, LeadWakeEvent[]> = {};
+  for (const [threadId, list] of Object.entries(existing)) {
+    next[threadId] = [...list];
+  }
+  for (const ev of events) {
+    const bucket = next[ev.threadId] ?? [];
+    const isDuplicate = bucket.some(
+      (prev) => prev.kind === ev.kind && prev.latestMessageId === ev.latestMessageId,
+    );
+    if (!isDuplicate) {
+      bucket.push(ev);
+      next[ev.threadId] = bucket;
+    }
+  }
+  return next;
 }
 
 export function isAuthoredByProfile(msg: BoardMessage, profile: string): boolean {
@@ -139,13 +163,14 @@ export function collectLeadEvents(params: {
     nextState: {
       seenThreadLatestMsgId: nextSeenThreads,
       seenBlockedTaskIds: currentBlockedIds,
+      pendingByThread: params.state.pendingByThread ?? {},
     },
   };
 }
 
 export function buildLeadWakePrompt(events: LeadWakeEvent[]): string {
   const lines: string[] = [
-    "New Vercel Board event(s) arrived. Follow your playbook in CLAUDE.md and projects.json, inspect each thread with `vercel board read <id>`, act or escalate as appropriate, and then stop cleanly (the Lead Watcher daemon will wake you on the next event):",
+    "New Vercel Board event(s) arrived for this thread. This is an ephemeral Lead session scoped to this thread — follow your playbook in CLAUDE.md and projects.json, inspect the full thread with `vercel board read <id>` (and recent `#inbox` / `#projects/*` if the message references earlier work), act or escalate as appropriate, and then stop cleanly (this tab will auto-close once idle):",
     "",
   ];
 
