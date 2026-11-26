@@ -24,7 +24,8 @@
     "update": "node scripts/update.ts",
     "project:add": "node scripts/project.ts add",
     "project:rm": "node scripts/project.ts rm",
-    "project:ls": "node scripts/project.ts ls"
+    "project:ls": "node scripts/project.ts ls",
+    "agents": "node scripts/agents.ts"
   },
   "dependencies": {
     "zod": "^4.6.7"

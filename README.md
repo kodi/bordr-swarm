@@ -119,17 +119,18 @@ Want an always-on Linux box hosting the Board UI + Lead, and one or more Macs/Li
 
 Never remember raw `systemctl --user`, `XDG_RUNTIME_DIR`, or `launchctl` incantations again. Every host exposes the same ergonomic command set:
 
-| Command                          | What It Does                                                                                                                                                                                                 |
-| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `mise run init`                  | Interactive first-time setup wizard — handles `vercel login`, environment auto-detection, minimal `config/swarm.json`, and initial service start.                                                            |
-| `mise run apply`                 | Role-aware idempotent apply (`main`, `worker`, or `both`) with a "Ready to go!" summary banner.                                                                                                              |
-| `mise run doctor`                | Preflight check for tools, Zod config validation, Vercel Board auth, Herdr server, Tailscale, and Linux `systemd` linger — with 1-line fix hints on every warning.                                           |
-| `mise run status`                | Shows active background services, Board UI HTTP health, and live Herdr swarm agents on this host.                                                                                                            |
-| `mise run logs -- -f`            | Cross-platform log tailing (`lead-watcher`, `ui`, or `dispatcher`).                                                                                                                                          |
-| `mise run project:add -- <path>` | Registers a local Git repo, auto-detects its default branch, hot-reloads the Dispatcher, and updates `#swarm/registry` immediately. (`project:ls`, `project:rm -- <slug>`)                                   |
-| `mise run reviewer`              | Inspect or configure the code reviewer agent/model/effort for the whole worker host (`--agent`, `--model`, `--off`) or a specific project (`--project <slug> ...`), with automatic reload and registry sync. |
-| `mise run update`                | Pull-based self-update (`git pull --ff-only`, conditional tool/dep sync, role-aware service reload, and status check). Pass `-- --restart-lead` after editing prompts.                                       |
-| `mise run stop`                  | Cleanly stops & unloads all swarm services and closes Lead in Herdr. Add `-- --reset` for a 1-command clean slate.                                                                                           |
+| Command                          | What It Does                                                                                                                                                                                                                                                                                   |
+| -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `mise run init`                  | Interactive first-time setup wizard — handles `vercel login`, environment auto-detection, minimal `config/swarm.json`, and initial service start.                                                                                                                                              |
+| `mise run apply`                 | Role-aware idempotent apply (`main`, `worker`, or `both`) with a "Ready to go!" summary banner.                                                                                                                                                                                                |
+| `mise run doctor`                | Preflight check for tools, Zod config validation, Vercel Board auth, Herdr server, Tailscale, and Linux `systemd` linger — with 1-line fix hints on every warning.                                                                                                                             |
+| `mise run status`                | Shows active background services, Board UI HTTP health, and live Herdr swarm agents on this host.                                                                                                                                                                                              |
+| `mise run logs -- -f`            | Cross-platform log tailing (`lead-watcher`, `ui`, or `dispatcher`).                                                                                                                                                                                                                            |
+| `mise run project:add -- <path>` | Registers a local Git repo, auto-detects its default branch, hot-reloads the Dispatcher, and updates `#swarm/registry` immediately. (`project:ls`, `project:rm -- <slug>`)                                                                                                                     |
+| `mise run reviewer`              | Inspect or configure the code reviewer agent/model/effort for the whole worker host (`--agent`, `--model`, `--off`) or a specific project (`--project <slug> ...`), with automatic reload and registry sync.                                                                                   |
+| `mise run agents`                | Lists every worker agent (`claude`, `agy`, `codex`, `pi`, plus custom profiles): installed or not, default model/effort, exact model IDs for `model=` labels (dynamic from each CLI, static fallback when listing fails), and a copy-ready label line. `--json`, `--static`, `--agent <name>`. |
+| `mise run update`                | Pull-based self-update (`git pull --ff-only`, conditional tool/dep sync, role-aware service reload, and status check). Pass `-- --restart-lead` after editing prompts.                                                                                                                         |
+| `mise run stop`                  | Cleanly stops & unloads all swarm services and closes Lead in Herdr. Add `-- --reset` for a 1-command clean slate.                                                                                                                                                                             |
 
 ### Task Routing Labels
 
@@ -143,6 +144,11 @@ vercel board tasks create projects/example-app "Add health check endpoint"
 vercel board tasks create projects/example-app "Refactor parser" --label agent=agy
 vercel board tasks create projects/example-app "Write integration tests" --label agent=codex
 vercel board tasks create projects/example-app "Audit build scripts" --label agent=pi --label effort=high
+
+# Not sure which model IDs an agent accepts? List them (add `-- --json` for machine output)
+mise run agents -- --agent pi
+vercel board tasks create projects/example-app "Port parser" \
+  --label agent=pi --label model=openai-codex/gpt-5.4 --label effort=high
 
 # Target a specific host, OS, model, or reasoning effort
 vercel board tasks create projects/example-app "Build macOS bundle" \
@@ -238,8 +244,8 @@ npm run schemas:generate # Regenerate JSON Schemas from Zod definitions
 ├── src/
 │   ├── dispatcher.ts           # Per-machine Worker Dispatcher daemon (thin imperative shell)
 │   ├── lead-watcher.ts         # Event-driven Lead Watcher & #swarm/registry sync (0 idle tokens)
-│   └── lib/                    # Pure FSMs (session-fsm, task-fsm), effects, review, config, schemas, board, herdr, registry, routing
-├── scripts/                    # bootstrap, init, apply, apply-main, apply-worker, stop, doctor, project, status, logs, update
+│   └── lib/                    # agent-catalog, Pure FSMs (session-fsm, task-fsm), effects, review, config, schemas, board, herdr, registry, routing
+├── scripts/                    # bootstrap, init, apply, apply-main, apply-worker, stop, doctor, project, reviewer, agents, status, logs, update
 ├── infra/                      # Optional systemd, launchd, and Caddy reference templates
 └── tests/                      # Fast Node built-in unit tests (dispatcher, lead-watcher, registry)
 ```

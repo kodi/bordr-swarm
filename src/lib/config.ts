@@ -94,7 +94,7 @@ export interface ResolvedReviewerConfig {
 
 export const BUILTIN_AGENT_KINDS = ["claude", "agy", "codex", "pi"] as const;
 
-const BUILTIN_AGENT_PROFILES: Record<string, WorkerAgentProfile> = {
+export const BUILTIN_AGENT_PROFILES: Record<string, WorkerAgentProfile> = {
   claude: {
     kind: "claude",
     model: "opus",

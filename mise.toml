@@ -102,6 +102,10 @@ run = "node scripts/project.ts ls"
 description = "Show or configure worker-default and per-project code reviewer (agent, model, effort, max-rounds)"
 run = "node scripts/reviewer.ts"
 
+[tasks.agents]
+description = "List worker agents (claude, agy, codex, pi): installed?, default model/effort, accepted model IDs (dynamic or static), and example labels (--json, --static, --agent <name>)"
+run = "node scripts/agents.ts"
+
 [tasks.install-skills]
 description = "Install the official vercel/board skill for coding agents"
 run = "npx -y skills add vercel/board"
