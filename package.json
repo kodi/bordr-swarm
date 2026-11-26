@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "Reproducible setup and TypeScript orchestration for a Vercel Board + Herdr + Sheprd agent swarm",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "prepare": "lefthook install",
