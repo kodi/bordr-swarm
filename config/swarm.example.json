@@ -1,0 +1,67 @@
+{
+  "board": {
+    "scope": "",
+    "boardName": "",
+    "inboxChannel": "inbox",
+    "projectChannelPrefix": "projects/",
+    "humanHandle": "@owner",
+    "viewerPort": 4747,
+    "viewerUrl": "http://main-machine:4748",
+    "leaseDuration": "15m",
+    "leaseRenewIntervalSeconds": 300
+  },
+  "lead": {
+    "machine": "main-machine",
+    "boardProfile": "lead",
+    "model": "opus",
+    "effort": "high",
+    "permissionMode": "auto",
+    "workspaceDir": "~/swarm-hq"
+  },
+  "workerDefaults": {
+    "defaultAgent": "claude",
+    "agents": {
+      "claude": {
+        "kind": "claude",
+        "model": "opus",
+        "effort": "medium",
+        "permissionMode": "auto",
+        "extraArgs": []
+      },
+      "agy": {
+        "kind": "agy",
+        "model": "",
+        "effort": "medium",
+        "permissionMode": "auto",
+        "extraArgs": []
+      }
+    },
+    "useWorktree": false,
+    "closeTabOnComplete": true,
+    "keepTabOnBlockedOrFailed": true,
+    "maxParkedTabs": 4,
+    "pollIntervalSeconds": 15,
+    "idleTimeoutSeconds": 30,
+    "claimWaitSeconds": 30
+  },
+  "machines": {
+    "main-machine": {
+      "role": "main",
+      "os": "linux",
+      "hostname": "main-machine",
+      "allowedHosts": ["main-machine", "main-machine:4748"],
+      "herdrTarget": "local",
+      "maxWorkers": 0,
+      "labels": ["machine=main-machine", "os=linux"]
+    },
+    "worker-machine": {
+      "role": "worker",
+      "os": "macos",
+      "hostname": "worker-machine",
+      "allowedHosts": [],
+      "herdrTarget": "local",
+      "maxWorkers": 2,
+      "labels": ["machine=worker-machine", "os=macos"]
+    }
+  }
+}

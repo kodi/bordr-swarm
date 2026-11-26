@@ -1,0 +1,7 @@
+node_modules/
+mise.local.toml
+config/swarm.json
+config/projects.json
+HANDOFF.md
+.DS_Store
+*.log

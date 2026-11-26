@@ -1,0 +1,51 @@
+# Reproducible toolchain & task runner for vercel-board-herdr-agent-swarm
+# Usage:
+#   mise trust && mise install
+#   mise run doctor
+
+[tools]
+node = "24"
+"npm:vercel" = "latest"
+"npm:@vercel/board" = "latest"
+
+[env]
+# Optional: override per-machine in mise.local.toml (gitignored)
+# VERCEL_SCOPE = "your-team-slug"
+# SWARM_MACHINE = "worker-machine"
+NODE_NO_WARNINGS = "1"
+
+[tasks.doctor]
+description = "Check mise tools, Vercel Board auth, Herdr server, Claude CLI, and local config"
+run = "node scripts/doctor.ts"
+
+[tasks.typecheck]
+description = "Typecheck all TypeScript files without emitting JS"
+run = "npx tsc --noEmit"
+
+[tasks.test]
+description = "Run unit tests with Node built-in test runner"
+run = "node --test tests/*.test.ts"
+
+[tasks.dispatcher]
+description = "Run the Worker Dispatcher daemon for this machine"
+run = "node src/dispatcher.ts"
+
+[tasks."apply:main"]
+description = "Idempotently configure the main machine (Board Inspector UI service + Lead HQ workspace)"
+run = "node scripts/apply-main.ts"
+
+[tasks."apply:worker"]
+description = "Idempotently install/reload the Worker Dispatcher service (launchd on macOS, systemd on Linux)"
+run = "node scripts/apply-worker.ts"
+
+[tasks.install-skills]
+description = "Install the official vercel/board skill for coding agents"
+run = "npx -y skills add vercel/board"
+
+[tasks."board:whoami"]
+description = "Verify Vercel Board CLI identity and active board"
+run = "vercel board whoami"
+
+[tasks."board:ui"]
+description = "Run the Vercel Board viewer locally on 127.0.0.1:4747"
+run = "board inspect --port 4747 --no-open"

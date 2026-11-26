@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.swarm.dispatcher</string>
+
+  <!-- Note: `mise run apply:worker` renders and installs this plist automatically from config/swarm.json -->
+  <key>WorkingDirectory</key>
+  <string>/Users/YOU/projects/vercel-board-herdr-agent-swarm</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/YOU/.local/share/mise/shims:/Users/YOU/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>SWARM_MACHINE</key>
+    <string>worker-machine</string>
+    <key>NODE_NO_WARNINGS</key>
+    <string>1</string>
+  </dict>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/YOU/.local/share/mise/shims/node</string>
+    <string>/Users/YOU/projects/vercel-board-herdr-agent-swarm/src/dispatcher.ts</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/YOU/Library/Logs/swarm-dispatcher.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/YOU/Library/Logs/swarm-dispatcher.err.log</string>
+</dict>
+</plist>

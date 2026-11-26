@@ -1,0 +1,22 @@
+{
+  "projects": {
+    "example-app": {
+      "defaultMachine": "worker-machine",
+      "baseBranch": "main",
+      "useWorktree": false,
+      "paths": {
+        "worker-machine": "/Users/you/projects/example-app",
+        "main-machine": "/home/agent/projects/example-app"
+      }
+    },
+    "vercel-board-herdr-agent-swarm": {
+      "defaultMachine": "worker-machine",
+      "baseBranch": "main",
+      "useWorktree": false,
+      "paths": {
+        "worker-machine": "/Users/you/projects/vercel-board-herdr-agent-swarm",
+        "main-machine": "/home/agent/projects/vercel-board-herdr-agent-swarm"
+      }
+    }
+  }
+}

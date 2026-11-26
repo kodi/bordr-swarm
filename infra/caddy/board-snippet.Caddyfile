@@ -1,0 +1,9 @@
+# Optional Caddy snippet to reverse-proxy the Board Inspector UI on your main machine.
+# Restrict port 4748 strictly to your private network / Tailscale interface in your firewall.
+# Make sure the client-facing hostnames/ports are listed under `allowedHosts` in config/swarm.json.
+
+:4748 {
+	reverse_proxy 127.0.0.1:4747 {
+		header_up Host 127.0.0.1:4747
+	}
+}

@@ -1,0 +1,18 @@
+[Unit]
+Description=Vercel Board Inspector UI (localhost only, optional private reverse proxy)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/vercel-board-herdr-agent-swarm
+# Set VERCEL_SCOPE / VERCEL_BOARD_NAME in ~/.config/swarm/board.env if overriding defaults
+EnvironmentFile=-%h/.config/swarm/board.env
+Environment=PATH=%h/.local/share/mise/shims:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# Note: `mise run apply:main` renders this unit automatically with --allow-host from config/swarm.json
+ExecStart=%h/.local/share/mise/shims/board inspect --port 4747 --no-open --allow-host main-machine --allow-host main-machine:4748
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
