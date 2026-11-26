@@ -9,6 +9,7 @@ import {
   resolveCurrentMachineName,
 } from "../src/lib/config.ts";
 import { HerdrClient } from "../src/lib/herdr.ts";
+import { detectTailscaleInfo, detectVercelBoardIdentity } from "../src/lib/host-env.ts";
 
 interface MainApplyFlags {
   dryRun: boolean;
@@ -364,22 +365,6 @@ ${argsXml}
 `;
 }
 
-function detectDefaultBoardUrl(): string {
-  try {
-    const out = execFileSync("vercel", ["board", "whoami", "--json"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-      timeout: 15_000,
-    });
-    const startIdx = out.indexOf("{");
-    if (startIdx === -1) return "";
-    const parsed = JSON.parse(out.slice(startIdx)) as { board?: unknown };
-    return typeof parsed.board === "string" ? parsed.board.trim() : "";
-  } catch {
-    return "";
-  }
-}
-
 async function ensureLeadRunning(params: {
   workspaceDir: string;
   boardProfile: string;
@@ -408,6 +393,11 @@ async function ensureLeadRunning(params: {
       console.log(
         `[apply:main] Lead agent "lead" is already running in pane ${existingLead.pane_id} (status=${existingLead.agent_status}).`,
       );
+      if (existingLead.agent_status === "blocked") {
+        console.log(
+          '[apply:main] Action needed: open Sheprd -> workspace "swarm-hq" -> tab "lead" to approve Claude\'s prompt.',
+        );
+      }
       return;
     }
   }
@@ -435,7 +425,10 @@ async function ensureLeadRunning(params: {
 
   if (startRes.blockedOnStartup) {
     console.log(
-      `[apply:main] Lead agent started in ${pane.tabId} but is waiting on a startup prompt in Sheprd.`,
+      `[apply:main] Lead agent started in ${pane.tabId} (${pane.paneId}) and is waiting on Claude's one-time folder-trust prompt.`,
+    );
+    console.log(
+      '[apply:main] Action needed: open Sheprd -> workspace "swarm-hq" -> tab "lead" and approve the folder-trust prompt once.',
     );
   } else {
     console.log(`[apply:main] Started Lead agent "lead" in ${pane.tabId} (${pane.paneId}).`);
@@ -463,17 +456,19 @@ async function main(): Promise<void> {
     );
   }
 
+  const tailscale = detectTailscaleInfo();
   const allowHosts = [
-    ...new Set(
-      machineCfg.allowedHosts.length > 0
+    ...new Set([
+      ...(machineCfg.allowedHosts.length > 0
         ? machineCfg.allowedHosts
         : machineCfg.hostname
           ? [machineCfg.hostname]
-          : [],
-    ),
+          : []),
+      ...(tailscale.ok ? [tailscale.dnsName, `${tailscale.dnsName}:4748`] : []),
+    ]),
   ];
 
-  const resolvedBoardUrl = swarm.board.scope ? "" : detectDefaultBoardUrl();
+  const resolvedBoardUrl = swarm.board.scope ? "" : detectVercelBoardIdentity().boardUrl;
   if (!swarm.board.scope && !resolvedBoardUrl) {
     console.warn(
       "[apply:main] Warning: board.scope is empty and `vercel board whoami --json` did not return a board URL; `board inspect` may need --scope or --url.",
@@ -636,10 +631,29 @@ async function main(): Promise<void> {
     console.log("[apply:main] To start the Lead agent in Herdr, re-run with --start-lead.");
   }
 
-  console.log("\n[apply:main] Optional reverse-proxy reminder:");
-  console.log(
-    `  Board UI listens on 127.0.0.1:${swarm.board.viewerPort}. To expose over your tailnet/LAN, reverse-proxy it (see infra/caddy/board-snippet.Caddyfile) and restrict access to your private network interface.`,
-  );
+  console.log("\n[apply:main] Board UI access:");
+  if (machineCfg.role === "both") {
+    console.log(
+      `  Local: http://127.0.0.1:${swarm.board.viewerPort} (ready immediately — localhost is a Secure Context).`,
+    );
+    if (tailscale.ok) {
+      console.log(
+        `  Optional remote HTTPS: sudo tailscale serve --bg --https=4748 http://127.0.0.1:${swarm.board.viewerPort}  ->  https://${tailscale.dnsName}:4748`,
+      );
+    }
+  } else if (tailscale.ok) {
+    console.log(
+      `  Board UI listens on 127.0.0.1:${swarm.board.viewerPort} (Tailscale FQDN "${tailscale.dnsName}" auto-added to --allow-host).`,
+    );
+    console.log(
+      `  Expose privately over HTTPS (required for posting messages): sudo tailscale serve --bg --https=4748 http://127.0.0.1:${swarm.board.viewerPort}`,
+    );
+    console.log(`  Then open: https://${tailscale.dnsName}:4748`);
+  } else {
+    console.log(
+      `  Board UI listens on 127.0.0.1:${swarm.board.viewerPort}. For remote access, expose over HTTPS (e.g. \`sudo tailscale serve --bg --https=4748 http://127.0.0.1:${swarm.board.viewerPort}\`).`,
+    );
+  }
 }
 
 main().catch((err) => {

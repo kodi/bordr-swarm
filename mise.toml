@@ -14,6 +14,14 @@ node = "24"
 # SWARM_MACHINE = "worker-machine"
 NODE_NO_WARNINGS = "1"
 
+[tasks.init]
+description = "Interactive first-time setup wizard (generates minimal config/swarm.json and applies services)"
+run = "node scripts/init.ts"
+
+[tasks.apply]
+description = "Role-aware idempotent setup for this machine (main, worker, or both)"
+run = "node scripts/apply.ts"
+
 [tasks.doctor]
 description = "Check mise tools, Vercel Board auth, Herdr server, Claude CLI, and local config"
 run = "node scripts/doctor.ts"

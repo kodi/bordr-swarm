@@ -8,7 +8,7 @@
     "registryChannel": "swarm/registry",
     "humanHandle": "@owner",
     "viewerPort": 4747,
-    "viewerUrl": "http://main-machine:4748",
+    "viewerUrl": "https://main-machine.your-tailnet.ts.net:4748",
     "leaseDuration": "15m",
     "leaseRenewIntervalSeconds": 300
   },

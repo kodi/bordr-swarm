@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  loadProjectsConfig,
+  loadProjectsConfigOptional,
   loadSwarmConfig,
   resolveCurrentMachineName,
 } from "../src/lib/config.ts";
@@ -239,7 +239,7 @@ function main(): void {
   const home = homedir();
 
   const swarm = loadSwarmConfig(repoRoot);
-  const projects = loadProjectsConfig(repoRoot);
+  const projects = loadProjectsConfigOptional(repoRoot);
   const machineName = resolveCurrentMachineName(swarm, flags.machine, "worker");
   const machineCfg = swarm.machines[machineName];
   if (!machineCfg) {
@@ -311,6 +311,11 @@ function main(): void {
     console.log("[apply:worker] Logs:");
     console.log(`  stdout: ${resolve(home, "Library/Logs/swarm-dispatcher.out.log")}`);
     console.log(`  stderr: ${resolve(home, "Library/Logs/swarm-dispatcher.err.log")}`);
+    if (Object.keys(projects.projects).length === 0) {
+      console.log(
+        "[apply:worker] No repos registered yet — add one anytime with: mise run project:add -- ~/path/to/your-repo",
+      );
+    }
     return;
   }
 

@@ -2,7 +2,7 @@
 
 A **worker machine** (macOS or Linux) runs **Herdr**, optional **Sheprd**, and the local **Worker Dispatcher** daemon that claims tasks from Vercel Board and spawns ephemeral coding agents (`claude` by default, or `agy` when labeled `agent=agy`).
 
-## 1. Install Tools & Auth
+## 1. Install Tools & Run Setup Wizard
 
 ```bash
 git clone https://github.com/kodi/bordr-swarm.git ~/projects/bordr-swarm
@@ -11,48 +11,40 @@ cd ~/projects/bordr-swarm
 # Install mise-managed Node, Vercel CLI, @vercel/board, and the vercel/board agent skill
 ./scripts/bootstrap.sh
 
-# Authenticate Vercel CLI (one-time)
-mise exec -- vercel login
-
-# Verify all tools, Board auth, Herdr server, and configs in one command
-mise run doctor
+# Interactive setup: authenticates Vercel CLI, writes a minimal per-host config/swarm.json,
+# optionally registers your first repo, and installs the Worker Dispatcher service
+mise run init
 ```
 
-> **PATH note:** If an older `vercel` binary exists in npm/pnpm global bins, make sure `mise` shims come first in `PATH` (`~/.local/share/mise/shims`) and confirm `vercel --version` is `>= 66.6.0`.
+Choose role **`worker`** (or **`both`** if this is a single-machine setup). A worker's `config/swarm.json` only needs to describe itself — you do not need to list other machines or manually copy `config/projects.example.json`.
 
-## 2. Configure Local Swarm Files
+> **PATH note:** If an older `vercel` binary exists in npm/pnpm global bins, make sure `mise` shims come first in `PATH` (`~/.local/share/mise/shims`) and confirm `vercel --version` is `>= 66.6.0` via `mise run doctor`.
 
-```bash
-cp config/swarm.example.json config/swarm.json
-cp config/projects.example.json config/projects.json
-```
+## 2. Register Local Repositories
 
-In `config/swarm.json`:
-
-- Define your worker machine under `machines` with `os` (`"macos"` or `"linux"`), `hostname`, `maxWorkers` (e.g. `2`), and optional custom `labels`.
-- Customize `workerDefaults.agents` if you want to adjust default models/efforts/flags for `claude`, `agy`, or additional Herdr-supported agent CLIs.
-
-Register local repositories with the 1-line CLI helper (or edit `config/projects.json` directly):
+Add or remove local Git repos at any time with the 1-line CLI helper (no restart required):
 
 ```bash
 # Register a local repo on this worker and auto-publish to #swarm/registry
-mise run project:add -- /path/to/your-repo
+mise run project:add -- ~/path/to/your-repo
 
 # List or remove local repos on this worker
 mise run project:ls
 mise run project:rm -- your-repo
 ```
 
-The Worker Dispatcher hot-reloads `config/projects.json` and auto-publishes this machine's capabilities and project slugs to **`#swarm/registry`** on Vercel Board (local filesystem paths stay private on the host). The main machine's Lead Watcher automatically syncs `#swarm/registry` into `~/swarm-hq/projects.json` — so you never need to maintain `projects.json` on the main machine.
+The Worker Dispatcher hot-reloads `config/projects.json` and auto-publishes this machine's capabilities and project slugs to **`#swarm/registry`** on Vercel Board (local filesystem paths stay private on the host). The main machine's Lead Watcher automatically syncs `#swarm/registry` into `~/swarm-hq/projects.json`.
 
-Run preflight checks:
+You can also register the same project slug on **multiple worker machines** — Lead automatically sees all hosts that advertise it (`defaultMachine: "any"`) and workers can claim tasks in parallel or via `machine=<name>` / `os=<os>` labels.
 
-```bash
-mise run doctor
-```
+## 3. Running & Managing the Worker Dispatcher
 
-## 3. Running the Worker Dispatcher
-
+- **Apply / reload always-on background service (macOS `launchd` or Linux `systemd --user`):**
+  ```bash
+  mise run apply          # Role-aware apply (or `mise run apply:worker`)
+  mise run status         # Verify dispatcher service and active Herdr agents
+  mise run logs -- -f     # Tail dispatcher logs
+  ```
 - **Dry-run / development test:**
   ```bash
   node src/dispatcher.ts --once --dry-run
@@ -61,21 +53,14 @@ mise run doctor
   ```bash
   mise run dispatcher
   ```
-- **Always-on background service (macOS `launchd` or Linux `systemd --user`):**
+- **Uninstall background service later:**
   ```bash
-  # Preview first
-  node scripts/apply-worker.ts --dry-run
-
-  # Install & start
-  mise run apply:worker
-
-  # Uninstall later if needed
   node scripts/apply-worker.ts --unload
   ```
 
 ## 4. Routing Tasks to Specific Workers or Agents
 
-Create tasks under `#projects/<slug>` with optional routing labels:
+Create tasks under `#projects/<slug>` with optional routing labels (or just ask Lead in `#inbox`):
 
 ```bash
 # Default worker (claude opus medium, auto mode) on any matching machine
@@ -96,6 +81,7 @@ vercel board tasks create projects/example-app "Audit auth flow" --label agent=a
 - Add your main machine and worker machines as saved SSH profiles in Herdr/Sheprd so all agents appear in one sidebar.
 - Open the Board UI inside Sheprd:
   ```bash
-  sheprd browser open http://<main-hostname>:4748
+  sheprd browser open https://<main-machine>.<tailnet>.ts.net:4748
+  # (or http://127.0.0.1:4747 on a single-machine setup)
   ```
 - Completed worker tabs close automatically; any worker tab remaining open in Sheprd is either actively working or `[BLOCKED]` / `[FAILED]` waiting for human review. Closing a parked tab in Sheprd automatically frees the parked slot and plain-tab repo lock.

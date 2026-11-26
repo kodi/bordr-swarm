@@ -96,26 +96,39 @@ export function parseSwarmConfig(input: unknown, sourceLabel = "swarm.json"): Sw
 
   const parsed = result.data;
   const machines: Record<string, MachineConfig> = {};
+  const fallbackOs = currentPlatformOs();
 
   for (const [machineName, m] of Object.entries(parsed.machines)) {
-    const role: MachineRole =
+    const inferredRole: MachineRole =
       m.role ??
-      (machineName === parsed.lead.machine ? (m.maxWorkers > 0 ? "both" : "main") : "worker");
+      (parsed.lead.machine && machineName === parsed.lead.machine
+        ? (m.maxWorkers ?? 0) > 0
+          ? "both"
+          : "main"
+        : "worker");
+
+    const maxWorkers = m.maxWorkers ?? (inferredRole === "main" ? 0 : 2);
+    const resolvedOs = m.os ?? fallbackOs;
 
     const labelSet = new Set(m.labels);
     labelSet.add(`machine=${machineName}`);
-    labelSet.add(`os=${m.os}`);
+    labelSet.add(`os=${resolvedOs}`);
 
     machines[machineName] = {
-      role,
-      os: m.os,
+      role: inferredRole,
+      os: resolvedOs,
       hostname: m.hostname ?? machineName,
       allowedHosts: m.allowedHosts,
       herdrTarget: m.herdrTarget,
-      maxWorkers: m.maxWorkers,
+      maxWorkers,
       labels: [...labelSet],
     };
   }
+
+  const inferredLeadMachine =
+    parsed.lead.machine ||
+    Object.entries(machines).find(([, m]) => m.role === "main" || m.role === "both")?.[0] ||
+    "";
 
   return {
     board: {
@@ -123,7 +136,10 @@ export function parseSwarmConfig(input: unknown, sourceLabel = "swarm.json"): Sw
       scope: (process.env.VERCEL_SCOPE || parsed.board.scope).trim(),
       boardName: (process.env.VERCEL_BOARD_NAME || parsed.board.boardName).trim(),
     },
-    lead: parsed.lead,
+    lead: {
+      ...parsed.lead,
+      machine: inferredLeadMachine,
+    },
     workerDefaults: parsed.workerDefaults,
     machines,
   };
@@ -168,6 +184,19 @@ export function loadSwarmConfig(repoRoot = process.cwd(), configPath?: string): 
 export function loadProjectsConfig(repoRoot = process.cwd(), configPath?: string): ProjectsConfig {
   const resolvedPath =
     configPath ?? process.env.PROJECTS_CONFIG_PATH ?? resolve(repoRoot, "config/projects.json");
+  const raw = readRawJson(resolvedPath);
+  return parseProjectsConfig(raw, resolvedPath);
+}
+
+export function loadProjectsConfigOptional(
+  repoRoot = process.cwd(),
+  configPath?: string,
+): ProjectsConfig {
+  const resolvedPath =
+    configPath ?? process.env.PROJECTS_CONFIG_PATH ?? resolve(repoRoot, "config/projects.json");
+  if (!existsSync(resolvedPath)) {
+    return { projects: {} };
+  }
   const raw = readRawJson(resolvedPath);
   return parseProjectsConfig(raw, resolvedPath);
 }

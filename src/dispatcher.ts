@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { BoardClient, type BoardTask } from "./lib/board.ts";
 import {
   loadProjectsConfig,
+  loadProjectsConfigOptional,
   loadSwarmConfig,
   resolveCurrentMachineName,
   type ProjectsConfig,
@@ -826,7 +827,7 @@ async function main(): Promise<void> {
   const swarm = loadSwarmConfig(repoRoot);
   const projectsConfigPath =
     process.env.PROJECTS_CONFIG_PATH ?? resolve(repoRoot, "config/projects.json");
-  const projects = loadProjectsConfig(repoRoot, projectsConfigPath);
+  const projects = loadProjectsConfigOptional(repoRoot, projectsConfigPath);
   const machineName = resolveCurrentMachineName(swarm, flags.machine, "worker");
   const machineCfg = swarm.machines[machineName];
   if (!machineCfg) {

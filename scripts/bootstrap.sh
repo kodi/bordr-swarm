@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Idempotent machine bootstrap for bordr-swarm.
-# Works on Linux (main or worker machine) and macOS (main or worker machine).
+# Works on Linux (main, worker, or both) and macOS (main, worker, or both).
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
@@ -23,14 +23,12 @@ mise exec -- npm install
 echo "[bootstrap] Installing vercel/board agent skill..."
 mise exec -- npx -y skills add vercel/board
 
-if [[ ! -f config/swarm.json ]]; then
-  echo "[bootstrap] Note: copy config/swarm.example.json -> config/swarm.json"
-fi
-if [[ ! -f config/projects.json ]]; then
-  echo "[bootstrap] Note: copy config/projects.example.json -> config/projects.json"
-fi
-
+echo ""
 echo "[bootstrap] Done! Next steps:"
-echo "  1. vercel login (if not already authenticated)"
-echo "  2. Edit config/swarm.json and config/projects.json"
-echo "  3. mise run doctor"
+if [[ ! -f config/swarm.json ]]; then
+  echo "  1. mise run init     # Interactive setup wizard (auth, minimal config, and service install)"
+  echo "  2. mise run doctor   # Optional preflight check"
+else
+  echo "  1. mise run doctor   # Verify tools, auth, and Herdr"
+  echo "  2. mise run apply    # Apply & start services for this machine's role"
+fi

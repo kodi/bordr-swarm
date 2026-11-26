@@ -14,6 +14,7 @@ import {
 import {
   buildAgentCliArgs,
   loadProjectsConfig,
+  loadProjectsConfigOptional,
   loadSwarmConfig,
   parseProjectsConfig,
   parseSwarmConfig,
@@ -220,6 +221,42 @@ describe("config & worker agent selection", () => {
     };
     assert.ok(jsonSchema.description && jsonSchema.description.length > 20);
     assert.ok(jsonSchema.properties?.workerDefaults?.description?.includes("agent"));
+  });
+
+  it("supports minimal per-host swarm.json with defaults and optional projects.json", () => {
+    // Minimal worker-only host (no board, lead, workerDefaults, os, or maxWorkers required)
+    const workerOnly = parseSwarmConfig({
+      machines: {
+        "worker-box": { role: "worker" },
+      },
+    });
+    assert.equal(workerOnly.lead.machine, "");
+    assert.equal(workerOnly.machines["worker-box"]?.role, "worker");
+    assert.equal(workerOnly.machines["worker-box"]?.maxWorkers, 2);
+    assert.equal(workerOnly.workerDefaults.defaultAgent, "claude");
+    assert.equal(workerOnly.board.viewerUrl, "http://127.0.0.1:4747");
+
+    // Minimal single-machine ("both") host auto-infers lead.machine
+    const singleHost = parseSwarmConfig({
+      board: { humanHandle: "@dev" },
+      machines: {
+        "dev-laptop": { role: "both", os: "macos" },
+      },
+    });
+    assert.equal(singleHost.lead.machine, "dev-laptop");
+    assert.equal(singleHost.board.humanHandle, "@dev");
+    assert.equal(singleHost.machines["dev-laptop"]?.maxWorkers, 2);
+    assert.ok(singleHost.machines["dev-laptop"]?.labels.includes("machine=dev-laptop"));
+    assert.ok(singleHost.machines["dev-laptop"]?.labels.includes("os=macos"));
+
+    // Missing projects.json loads cleanly as empty registry via loadProjectsConfigOptional
+    const tempDir = mkdtempSync(join(tmpdir(), "bordr-opt-projects-"));
+    try {
+      const emptyProjects = loadProjectsConfigOptional(tempDir);
+      assert.deepEqual(emptyProjects, { projects: {} });
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 });
 

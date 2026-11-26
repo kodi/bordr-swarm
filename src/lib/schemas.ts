@@ -137,9 +137,9 @@ export const BoardConfigSchema = z
     viewerUrl: z
       .string()
       .url()
-      .default("http://main-machine:4748")
+      .default("http://127.0.0.1:4747")
       .describe(
-        "Client-facing URL (e.g. Tailscale Caddy reverse proxy) where humans and Sheprd open the Board Inspector UI.",
+        "Client-facing URL where humans and Sheprd open the Board Inspector UI (defaults to local http://127.0.0.1:4747; set to your Tailscale HTTPS URL on a remote main machine).",
       ),
     leaseDuration: LeaseDurationSchema.default("15m"),
     leaseRenewIntervalSeconds: z
@@ -169,9 +169,9 @@ export const LeadConfigSchema = z
   .object({
     machine: z
       .string()
-      .min(1)
+      .default("")
       .describe(
-        "Key in `machines` where the Lead agent and Board Inspector UI run (e.g. `main-machine`).",
+        'Optional key in `machines` where the Lead agent and Board Inspector UI run (e.g. "main-machine"). Leave empty ("") to auto-select the machine with role "main" or "both".',
       ),
     boardProfile: z
       .string()
@@ -190,7 +190,7 @@ export const LeadConfigSchema = z
       .min(1)
       .default("~/swarm-hq")
       .describe(
-        "Directory on the main machine where `apply-main` writes rendered `CLAUDE.md` and symlinks `projects.json`.",
+        "Directory on the main machine where `apply:main` writes rendered `CLAUDE.md` and Lead Watcher syncs `projects.json` from `#swarm/registry`.",
       ),
     pollIntervalSeconds: z
       .number()
@@ -287,7 +287,7 @@ export const WorkerDefaultsConfigSchema = z
 export const MachineConfigSchema = z
   .object({
     role: MachineRoleSchema.optional(),
-    os: MachineOsSchema,
+    os: MachineOsSchema.optional(),
     hostname: z
       .string()
       .min(1)
@@ -299,7 +299,7 @@ export const MachineConfigSchema = z
       .array(z.string().min(1))
       .default([])
       .describe(
-        'Hostnames and host:port pairs passed to `board inspect --allow-host` on the main machine when served behind a reverse proxy (e.g. ["main-machine", "main-machine:4748"]).',
+        'Hostnames and host:port pairs passed to `board inspect --allow-host` on the main machine when served behind a reverse proxy (e.g. ["main-machine", "main-machine:4748"]). Detected Tailscale MagicDNS is also added automatically.',
       ),
     herdrTarget: z
       .string()
@@ -312,9 +312,9 @@ export const MachineConfigSchema = z
       .number()
       .int()
       .min(0)
-      .default(0)
+      .optional()
       .describe(
-        "Maximum concurrent ephemeral worker sessions this machine will claim and run (0 disables claiming, e.g. on a dedicated main machine).",
+        'Maximum concurrent ephemeral worker sessions this machine will claim and run (defaults to 2 for "worker"/"both" roles and 0 for "main").',
       ),
     labels: z
       .array(LabelStringSchema)
@@ -329,9 +329,9 @@ export const MachineConfigSchema = z
 export const SwarmConfigSchema = z
   .object({
     $schema: z.string().optional().describe("Optional JSON Schema path for editor validation."),
-    board: BoardConfigSchema,
-    lead: LeadConfigSchema,
-    workerDefaults: WorkerDefaultsConfigSchema,
+    board: BoardConfigSchema.prefault({}),
+    lead: LeadConfigSchema.prefault({}),
+    workerDefaults: WorkerDefaultsConfigSchema.prefault({}),
     machines: z
       .record(z.string().min(1), MachineConfigSchema)
       .refine(
@@ -339,12 +339,12 @@ export const SwarmConfigSchema = z
         "At least one machine must be defined in `machines`.",
       )
       .describe(
-        "Map of logical machine keys (e.g. `main-machine`, `worker-machine`, or your real hostnames) to their OS, role, capacity, and labels.",
+        "Map of logical machine keys (at minimum this host; other hosts are discovered automatically via `#swarm/registry`).",
       ),
   })
   .strict()
   .superRefine((cfg, ctx) => {
-    if (!cfg.machines[cfg.lead.machine]) {
+    if (cfg.lead.machine && !cfg.machines[cfg.lead.machine]) {
       ctx.addIssue({
         code: "custom",
         path: ["lead", "machine"],
@@ -364,7 +364,7 @@ export const SwarmConfigSchema = z
     }
   })
   .describe(
-    "Top-level swarm configuration (copy `config/swarm.example.json` to gitignored `config/swarm.json`).",
+    "Top-level swarm configuration (generate with `mise run init` or copy `config/swarm.example.json` to gitignored `config/swarm.json`).",
   );
 
 export const ProjectConfigSchema = z

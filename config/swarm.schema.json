@@ -8,6 +8,7 @@
       "type": "string"
     },
     "board": {
+      "default": {},
       "type": "object",
       "properties": {
         "scope": {
@@ -52,8 +53,8 @@
           "maximum": 65535
         },
         "viewerUrl": {
-          "default": "http://main-machine:4748",
-          "description": "Client-facing URL (e.g. Tailscale Caddy reverse proxy) where humans and Sheprd open the Board Inspector UI.",
+          "default": "http://127.0.0.1:4747",
+          "description": "Client-facing URL where humans and Sheprd open the Board Inspector UI (defaults to local http://127.0.0.1:4747; set to your Tailscale HTTPS URL on a remote main machine).",
           "type": "string",
           "format": "uri"
         },
@@ -74,12 +75,13 @@
       "description": "Vercel Board connection, channel conventions, UI port, and lease settings."
     },
     "lead": {
+      "default": {},
       "type": "object",
       "properties": {
         "machine": {
-          "type": "string",
-          "minLength": 1,
-          "description": "Key in `machines` where the Lead agent and Board Inspector UI run (e.g. `main-machine`)."
+          "default": "",
+          "description": "Optional key in `machines` where the Lead agent and Board Inspector UI run (e.g. \"main-machine\"). Leave empty (\"\") to auto-select the machine with role \"main\" or \"both\".",
+          "type": "string"
         },
         "boardProfile": {
           "default": "lead",
@@ -107,7 +109,7 @@
         },
         "workspaceDir": {
           "default": "~/swarm-hq",
-          "description": "Directory on the main machine where `apply-main` writes rendered `CLAUDE.md` and symlinks `projects.json`.",
+          "description": "Directory on the main machine where `apply:main` writes rendered `CLAUDE.md` and Lead Watcher syncs `projects.json` from `#swarm/registry`.",
           "type": "string",
           "minLength": 1
         },
@@ -119,11 +121,11 @@
           "maximum": 9007199254740991
         }
       },
-      "required": ["machine"],
       "additionalProperties": false,
       "description": "Configuration for the event-driven Lead triage agent and Lead Watcher daemon."
     },
     "workerDefaults": {
+      "default": {},
       "type": "object",
       "properties": {
         "defaultAgent": {
@@ -276,7 +278,7 @@
           },
           "allowedHosts": {
             "default": [],
-            "description": "Hostnames and host:port pairs passed to `board inspect --allow-host` on the main machine when served behind a reverse proxy (e.g. [\"main-machine\", \"main-machine:4748\"]).",
+            "description": "Hostnames and host:port pairs passed to `board inspect --allow-host` on the main machine when served behind a reverse proxy (e.g. [\"main-machine\", \"main-machine:4748\"]). Detected Tailscale MagicDNS is also added automatically.",
             "type": "array",
             "items": {
               "type": "string",
@@ -290,8 +292,7 @@
             "minLength": 1
           },
           "maxWorkers": {
-            "default": 0,
-            "description": "Maximum concurrent ephemeral worker sessions this machine will claim and run (0 disables claiming, e.g. on a dedicated main machine).",
+            "description": "Maximum concurrent ephemeral worker sessions this machine will claim and run (defaults to 2 for \"worker\"/\"both\" roles and 0 for \"main\").",
             "type": "integer",
             "minimum": 0,
             "maximum": 9007199254740991
@@ -307,14 +308,13 @@
             }
           }
         },
-        "required": ["os"],
         "additionalProperties": false,
         "description": "Configuration for a single physical or virtual machine in the swarm."
       },
-      "description": "Map of logical machine keys (e.g. `main-machine`, `worker-machine`, or your real hostnames) to their OS, role, capacity, and labels."
+      "description": "Map of logical machine keys (at minimum this host; other hosts are discovered automatically via `#swarm/registry`)."
     }
   },
-  "required": ["board", "lead", "workerDefaults", "machines"],
+  "required": ["machines"],
   "additionalProperties": false,
-  "description": "Top-level swarm configuration (copy `config/swarm.example.json` to gitignored `config/swarm.json`)."
+  "description": "Top-level swarm configuration (generate with `mise run init` or copy `config/swarm.example.json` to gitignored `config/swarm.json`)."
 }
