@@ -98,6 +98,10 @@ run = "node scripts/project.ts rm"
 description = "List local repos registered on this machine"
 run = "node scripts/project.ts ls"
 
+[tasks.reviewer]
+description = "Show or configure worker-default and per-project code reviewer (agent, model, effort, max-rounds)"
+run = "node scripts/reviewer.ts"
+
 [tasks.install-skills]
 description = "Install the official vercel/board skill for coding agents"
 run = "npx -y skills add vercel/board"

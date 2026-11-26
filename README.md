@@ -119,16 +119,17 @@ Want an always-on Linux box hosting the Board UI + Lead, and one or more Macs/Li
 
 Never remember raw `systemctl --user`, `XDG_RUNTIME_DIR`, or `launchctl` incantations again. Every host exposes the same ergonomic command set:
 
-| Command                          | What It Does                                                                                                                                                               |
-| -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `mise run init`                  | Interactive first-time setup wizard — handles `vercel login`, environment auto-detection, minimal `config/swarm.json`, and initial service start.                          |
-| `mise run apply`                 | Role-aware idempotent apply (`main`, `worker`, or `both`) with a "Ready to go!" summary banner.                                                                            |
-| `mise run doctor`                | Preflight check for tools, Zod config validation, Vercel Board auth, Herdr server, Tailscale, and Linux `systemd` linger — with 1-line fix hints on every warning.         |
-| `mise run status`                | Shows active background services, Board UI HTTP health, and live Herdr swarm agents on this host.                                                                          |
-| `mise run logs -- -f`            | Cross-platform log tailing (`lead-watcher`, `ui`, or `dispatcher`).                                                                                                        |
-| `mise run project:add -- <path>` | Registers a local Git repo, auto-detects its default branch, hot-reloads the Dispatcher, and updates `#swarm/registry` immediately. (`project:ls`, `project:rm -- <slug>`) |
-| `mise run update`                | Pull-based self-update (`git pull --ff-only`, conditional tool/dep sync, role-aware service reload, and status check). Pass `-- --restart-lead` after editing prompts.     |
-| `mise run stop`                  | Cleanly stops & unloads all swarm services and closes Lead in Herdr. Add `-- --reset` for a 1-command clean slate.                                                         |
+| Command                          | What It Does                                                                                                                                                                                                 |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `mise run init`                  | Interactive first-time setup wizard — handles `vercel login`, environment auto-detection, minimal `config/swarm.json`, and initial service start.                                                            |
+| `mise run apply`                 | Role-aware idempotent apply (`main`, `worker`, or `both`) with a "Ready to go!" summary banner.                                                                                                              |
+| `mise run doctor`                | Preflight check for tools, Zod config validation, Vercel Board auth, Herdr server, Tailscale, and Linux `systemd` linger — with 1-line fix hints on every warning.                                           |
+| `mise run status`                | Shows active background services, Board UI HTTP health, and live Herdr swarm agents on this host.                                                                                                            |
+| `mise run logs -- -f`            | Cross-platform log tailing (`lead-watcher`, `ui`, or `dispatcher`).                                                                                                                                          |
+| `mise run project:add -- <path>` | Registers a local Git repo, auto-detects its default branch, hot-reloads the Dispatcher, and updates `#swarm/registry` immediately. (`project:ls`, `project:rm -- <slug>`)                                   |
+| `mise run reviewer`              | Inspect or configure the code reviewer agent/model/effort for the whole worker host (`--agent`, `--model`, `--off`) or a specific project (`--project <slug> ...`), with automatic reload and registry sync. |
+| `mise run update`                | Pull-based self-update (`git pull --ff-only`, conditional tool/dep sync, role-aware service reload, and status check). Pass `-- --restart-lead` after editing prompts.                                       |
+| `mise run stop`                  | Cleanly stops & unloads all swarm services and closes Lead in Herdr. Add `-- --reset` for a 1-command clean slate.                                                                                           |
 
 ### Task Routing Labels
 
@@ -158,7 +159,22 @@ vercel board tasks create projects/example-app "Refactor auth flow" \
 
 ### Optional Cross-Model Code Review Gate
 
-Enable automated code review per worker machine (`workerDefaults.reviewer` in `config/swarm.json`) or override per repository (`config/projects.json` or `mise run project:add -- ~/path/to/repo --reviewer pi --reviewer-model openai-codex/gpt-5.4`). All review comments, fix rounds, and verdicts stay inside the Vercel Board task thread — no GitHub/PR dependency required, and tasks with no Git diff auto-skip review.
+Configure automated code review via CLI (no JSON editing required) — globally on a worker host or overridden per project:
+
+```bash
+# Set worker-wide default reviewer (validates, updates config, reloads Dispatcher)
+mise run reviewer -- --agent codex --effort high --max-rounds 2
+
+# Override reviewer agent + model for a single project (hot-reloads automatically)
+mise run reviewer -- --project my-app --agent pi --model openai-codex/gpt-5.4 --effort high
+
+# Disable review for a specific repo, reset back to worker default, or inspect all settings
+mise run reviewer -- --project notes-repo --off
+mise run reviewer -- --project my-app --inherit
+mise run reviewer
+```
+
+All review comments, fix rounds, and verdicts stay inside the Vercel Board task thread — no GitHub/PR dependency required, and tasks with no Git diff auto-skip review.
 
 ### Minimal Config, Strict Validation
 

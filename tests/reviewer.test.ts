@@ -3,6 +3,11 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
+import {
+  applyProjectReviewerUpdate,
+  applyWorkerReviewerUpdate,
+  parseReviewerCliArgs,
+} from "../scripts/reviewer.ts";
 import { SwarmDispatcher } from "../src/dispatcher.ts";
 import {
   BoardClient,
@@ -600,5 +605,117 @@ describe("SwarmDispatcher review & fix lifecycles", () => {
     } finally {
       rmSync(tmpBase, { recursive: true, force: true });
     }
+  });
+});
+
+describe("mise run reviewer CLI config updates", () => {
+  it("updates minimal swarm.json without bloating keys and clears stale model on agent switch", () => {
+    const minimalRaw = {
+      $schema: "./swarm.schema.json",
+      machines: {
+        "worker-machine": { role: "worker", os: "macos", maxWorkers: 2 },
+      },
+    };
+
+    const setPi = applyWorkerReviewerUpdate(
+      minimalRaw,
+      parseReviewerCliArgs([
+        "--agent",
+        "pi",
+        "--model",
+        "openai-codex/gpt-5.4",
+        "--effort",
+        "high",
+        "--max-rounds",
+        "3",
+      ]),
+    );
+    assert.deepEqual(Object.keys(setPi.nextRaw).toSorted(), [
+      "$schema",
+      "machines",
+      "workerDefaults",
+    ]);
+    assert.equal(setPi.parsed.workerDefaults.reviewer.enabled, true);
+    assert.equal(setPi.parsed.workerDefaults.reviewer.agent, "pi");
+    assert.equal(setPi.parsed.workerDefaults.reviewer.model, "openai-codex/gpt-5.4");
+    assert.equal(setPi.parsed.workerDefaults.reviewer.maxRounds, 3);
+
+    // Switching agent to codex without --model drops the stale pi model
+    const switchCodex = applyWorkerReviewerUpdate(
+      setPi.nextRaw,
+      parseReviewerCliArgs(["--agent", "codex"]),
+    );
+    assert.equal(switchCodex.parsed.workerDefaults.reviewer.agent, "codex");
+    assert.equal(switchCodex.parsed.workerDefaults.reviewer.model, "");
+
+    // --off disables without losing configured agent
+    const disabled = applyWorkerReviewerUpdate(
+      switchCodex.nextRaw,
+      parseReviewerCliArgs(["--off"]),
+    );
+    assert.equal(disabled.parsed.workerDefaults.reviewer.enabled, false);
+    assert.equal(disabled.parsed.workerDefaults.reviewer.agent, "codex");
+
+    // --reset removes workerDefaults.reviewer cleanly
+    const reset = applyWorkerReviewerUpdate(disabled.nextRaw, parseReviewerCliArgs(["--reset"]));
+    assert.equal(reset.parsed.workerDefaults.reviewer.enabled, false);
+    assert.equal("workerDefaults" in reset.nextRaw, false);
+  });
+
+  it("updates, disables, and resets per-project reviewer overrides cleanly", () => {
+    const swarm = makeSwarmWithReviewer({ agent: "codex", effort: "high" });
+    const projects: ProjectsConfig = {
+      $schema: "./projects.schema.json",
+      projects: {
+        "my-app": {
+          defaultMachine: "worker-machine",
+          baseBranch: "main",
+          paths: { "worker-machine": "/tmp/my-app" },
+        },
+      },
+    };
+
+    const setProj = applyProjectReviewerUpdate(
+      projects,
+      swarm,
+      "my-app",
+      parseReviewerCliArgs([
+        "--project",
+        "my-app",
+        "--agent",
+        "pi",
+        "--model",
+        "openai-codex/gpt-5.4",
+      ]),
+    );
+    assert.equal(setProj.projects["my-app"]?.reviewer?.agent, "pi");
+    assert.equal(setProj.projects["my-app"]?.reviewer?.model, "openai-codex/gpt-5.4");
+
+    const disabledProj = applyProjectReviewerUpdate(
+      setProj,
+      swarm,
+      "my-app",
+      parseReviewerCliArgs(["--project", "my-app", "--off"]),
+    );
+    assert.equal(disabledProj.projects["my-app"]?.reviewer?.enabled, false);
+
+    const inherited = applyProjectReviewerUpdate(
+      disabledProj,
+      swarm,
+      "my-app",
+      parseReviewerCliArgs(["--project", "my-app", "--inherit"]),
+    );
+    assert.equal(inherited.projects["my-app"]?.reviewer, undefined);
+
+    assert.throws(
+      () =>
+        applyProjectReviewerUpdate(
+          projects,
+          swarm,
+          "nonexistent",
+          parseReviewerCliArgs(["--project", "nonexistent", "--agent", "codex"]),
+        ),
+      /not found in config\/projects\.json/i,
+    );
   });
 });
