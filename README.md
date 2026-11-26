@@ -34,41 +34,26 @@ Most DIY agent swarms fail in the same four ways: polling loops burn tokens over
 
 ## Architecture at a Glance
 
-Main and worker machines **never talk directly to each other** — **Vercel Board** is the shared async bus in the middle, so hosts can come and go with zero SSH wiring or shared config files:
+Main and worker machines **never connect directly to each other** — **Vercel Board** sits in the middle as the shared cloud bus, so you can run everything on one machine (`role: both`) or spread work across Macs and Linux boxes with zero SSH wiring:
 
 ```mermaid
 flowchart TD
-  You(["You\nBrowser / Phone"])
+  You(["You\nBrowser · Phone · Sheprd"])
 
-  subgraph Main["Main Machine (Hub)"]
-    UI["Board UI\n:4747 / Tailscale HTTPS"]
-    Watcher["Lead Watcher (0 tokens)\nPolls Board · Syncs registry"]
-    Lead["Lead Agent (Claude Opus)\nPlans & assigns tasks"]
-    Watcher -->|"wakes"| Lead
-  end
+  Main["Main Machine (Hub)\nBoard UI · Lead Agent\nTurns #inbox ideas into tasks"]
+  Workers["Worker Machine(s) (Mac / Linux)\nHerdr · claude / agy / codex / pi\nRuns tasks on your local repos"]
 
-  Board[("Vercel Board (Shared Bus)\n#inbox · #projects/* · #swarm/registry")]
+  Board[("Vercel Board (Cloud Bus)\n#inbox · Task Queue · Machine Registry")]
 
-  subgraph Worker["Worker Machine(s) (macOS / Linux)"]
-    Disp["Worker Dispatcher (0 tokens)\nClaims · 5m leases · Repo lock"]
-    Tab["Herdr Agent Tab\nclaude · agy · codex · pi"]
-    Disp -->|"spawns & auto-closes"| Tab
-  end
-
-  Sheprd(["Sheprd (Desktop & Mobile)\nLive view & [BLOCKED] tabs"])
-
-  You -->|"1. Post in #inbox"| UI
-  UI <--> Board
-  Watcher <-->|"2. Poll & sync"| Board
-  Lead -->|"3. Create tasks"| Board
-  Board <-->|"4. Registry · Claim & renew"| Disp
-  Tab -->|"5. Reply · Complete / Block"| Board
-  Tab -.->|"6. Parked if blocked"| Sheprd
+  You -->|"1. Post ideas & review"| Main
+  Main <-->|"2. Queue & track tasks"| Board
+  Workers <-->|"3. Claim & report results"| Board
+  You -.->|"4. Watch & unblock in Sheprd"| Workers
 ```
 
-- **Main machine (hub):** Serves the Board Inspector UI and runs the 0-token **Lead Watcher**, which syncs `#swarm/registry` and wakes **Lead** only when a new `#inbox` post, `@lead` mention, or blocker arrives.
-- **Worker machine(s):** Each host runs its own 0-token **Worker Dispatcher** that announces local repo slugs to `#swarm/registry`, atomically claims matching tasks, renews `15m` leases every `5m`, spawns an ephemeral **Herdr** tab (`claude`, `agy`, `codex`, or `pi`), and auto-closes it when done.
-- **Single-machine (`role: both`) vs. fleet:** On one machine, both halves run side by side locally. Add more workers anytime with `mise run init` + `mise run project:add` — Lead discovers them automatically.
+- **Main machine (hub):** Hosts the Board UI and **Lead Agent** (woken on demand by a 0-token watcher — no idle LLM burn).
+- **Worker machine(s):** Announce their local repos to the registry, claim matching tasks, run `claude`, `agy`, `codex`, or `pi` in fresh **Herdr** tabs, and auto-close tabs on completion.
+- **One box or many:** Start on a single machine (`role: both`) and add extra workers anytime with `mise run init` + `mise run project:add`. See [docs/architecture.md](docs/architecture.md) for the detailed daemon, lease-renewal, and task lifecycle diagrams.
 
 ---
 
