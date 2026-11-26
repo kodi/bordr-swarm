@@ -32,9 +32,18 @@ In `config/swarm.json`:
 - Define your worker machine under `machines` with `os` (`"macos"` or `"linux"`), `hostname`, `maxWorkers` (e.g. `2`), and optional custom `labels`.
 - Customize `workerDefaults.agents` if you want to adjust default models/efforts/flags for `claude`, `agy`, or additional Herdr-supported agent CLIs.
 
-In `config/projects.json`:
+Register local repositories with the 1-line CLI helper (or edit `config/projects.json` directly):
 
-- Map each project slug (`#projects/<slug>`) to its local repository checkout path on each machine.
+```bash
+# Register a local repo on this worker and auto-publish to #swarm/registry
+mise run project:add -- /path/to/your-repo
+
+# List or remove local repos on this worker
+mise run project:ls
+mise run project:rm -- your-repo
+```
+
+The Worker Dispatcher hot-reloads `config/projects.json` and auto-publishes this machine's capabilities and project slugs to **`#swarm/registry`** on Vercel Board (local filesystem paths stay private on the host). The main machine's Lead Watcher automatically syncs `#swarm/registry` into `~/swarm-hq/projects.json` — so you never need to maintain `projects.json` on the main machine.
 
 Run preflight checks:
 

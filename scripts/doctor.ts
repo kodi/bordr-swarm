@@ -96,10 +96,18 @@ if (!existsSync(swarmPath)) {
 
 const projectsPath = process.env.PROJECTS_CONFIG_PATH ?? resolve(repoRoot, "config/projects.json");
 if (!existsSync(projectsPath)) {
+  const isMainOnly =
+    loadedSwarm !== null &&
+    (() => {
+      const m = Object.values(loadedSwarm.machines).find((entry) => entry.role === "main");
+      return Boolean(m && loadedSwarm.machines[loadedSwarm.lead.machine]?.maxWorkers === 0);
+    })();
   results.push({
     name: "projects config",
-    status: "warn",
-    detail: "missing config/projects.json (copy from config/projects.example.json)",
+    status: isMainOnly ? "ok" : "warn",
+    detail: isMainOnly
+      ? "optional on main-only host (Lead auto-syncs from #swarm/registry)"
+      : "missing config/projects.json (run `mise run project:add -- <path>` or copy from example)",
   });
 } else {
   try {

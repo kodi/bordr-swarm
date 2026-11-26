@@ -32,6 +32,12 @@
           "type": "string",
           "minLength": 1
         },
+        "registryChannel": {
+          "default": "swarm/registry",
+          "description": "Board channel where worker machines auto-publish their capabilities and local project slugs (without leading \"#\"). Lead Watcher syncs this channel into ~/swarm-hq/projects.json automatically.",
+          "type": "string",
+          "minLength": 1
+        },
         "humanHandle": {
           "default": "@owner",
           "description": "Human operator mention handle injected into Lead and Worker prompts for escalations (e.g. \"@alice\"). Find yours via `vercel board whoami --json` (field `handle`).",

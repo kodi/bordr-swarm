@@ -113,6 +113,13 @@ export const BoardConfigSchema = z
       .describe(
         'Channel path prefix for project task queues (e.g. "projects/" matches `#projects/<slug>`). Trailing slash is normalized automatically.',
       ),
+    registryChannel: z
+      .string()
+      .min(1)
+      .default("swarm/registry")
+      .describe(
+        'Board channel where worker machines auto-publish their capabilities and local project slugs (without leading "#"). Lead Watcher syncs this channel into ~/swarm-hq/projects.json automatically.',
+      ),
     humanHandle: z
       .string()
       .min(1)
@@ -501,6 +508,68 @@ export const BoardReadChannelEnvelopeSchema = z
   .passthrough();
 
 // ---------------------------------------------------------------------------
+// Swarm Registry channel schemas (#swarm/registry)
+// ---------------------------------------------------------------------------
+
+export const MachineRegistryProjectSchema = z
+  .object({
+    slug: z.string().min(1).describe("Project slug matching `#projects/<slug>`."),
+    baseBranch: z.string().min(1).default("main").describe("Default base branch for this repo."),
+    useWorktree: z
+      .boolean()
+      .optional()
+      .describe("Whether this machine uses isolated Git worktrees for this project."),
+  })
+  .strict();
+
+export const MachineRegistryEntrySchema = z
+  .object({
+    version: z.literal(1),
+    machine: z.string().min(1).describe("Logical machine key from swarm.json."),
+    os: MachineOsSchema,
+    role: MachineRoleSchema,
+    maxWorkers: z.number().int().min(0),
+    agents: z
+      .array(z.string().min(1))
+      .describe("Agent CLI profiles installed and available on this machine (e.g. claude, agy)."),
+    labels: z.array(z.string()).describe("Routing labels advertised by this machine."),
+    projects: z
+      .array(MachineRegistryProjectSchema)
+      .describe("Projects checked out locally on this machine (paths stay private on-host)."),
+    updatedAt: z.string().min(1),
+  })
+  .strict()
+  .describe("Structured machine capability & project advertisement posted to `#swarm/registry`.");
+
+export const MergedLeadProjectsCatalogSchema = z
+  .object({
+    source: z.literal("swarm-registry"),
+    updatedAt: z.string(),
+    machines: z.record(
+      z.string(),
+      z.object({
+        os: MachineOsSchema,
+        role: MachineRoleSchema,
+        maxWorkers: z.number().int().min(0),
+        agents: z.array(z.string()),
+        labels: z.array(z.string()),
+        updatedAt: z.string(),
+      }),
+    ),
+    projects: z.record(
+      z.string(),
+      z.object({
+        defaultMachine: z.string(),
+        machines: z.array(z.string()),
+        baseBranch: z.string(),
+      }),
+    ),
+  })
+  .describe(
+    "Merged fleet catalog generated automatically by Lead Watcher from `#swarm/registry` for Lead (`~/swarm-hq/projects.json`).",
+  );
+
+// ---------------------------------------------------------------------------
 // Herdr CLI JSON schemas (verified against herdr 0.9.3)
 // ---------------------------------------------------------------------------
 
@@ -625,6 +694,9 @@ export type ProjectsConfig = z.infer<typeof ProjectsConfigSchema>;
 export type BoardTaskState = z.infer<typeof BoardTaskStateSchema>;
 export type BoardMessage = z.infer<typeof BoardMessageSchema>;
 export type BoardThreadSummary = z.infer<typeof BoardThreadSummarySchema>;
+export type MachineRegistryProject = z.infer<typeof MachineRegistryProjectSchema>;
+export type MachineRegistryEntry = z.infer<typeof MachineRegistryEntrySchema>;
+export type MergedLeadProjectsCatalog = z.infer<typeof MergedLeadProjectsCatalogSchema>;
 export type HerdrAgentStatus = z.infer<typeof HerdrAgentStatusSchema>;
 export type HerdrWorkspace = z.infer<typeof HerdrWorkspaceSchema>;
 export type HerdrTab = z.infer<typeof HerdrTabSchema>;

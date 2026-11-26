@@ -21,6 +21,7 @@ function makeSwarm(): SwarmConfig {
       boardName: "",
       inboxChannel: "inbox",
       projectChannelPrefix: "projects/",
+      registryChannel: "swarm/registry",
       humanHandle: "@owner",
       viewerPort: 4747,
       viewerUrl: "http://main-machine:4748",

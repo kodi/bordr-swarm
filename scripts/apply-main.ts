@@ -1,19 +1,10 @@
 import { execFileSync } from "node:child_process";
-import {
-  existsSync,
-  lstatSync,
-  mkdirSync,
-  readFileSync,
-  symlinkSync,
-  unlinkSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   buildAgentCliArgs,
-  loadProjectsConfig,
   loadSwarmConfig,
   resolveCurrentMachineName,
 } from "../src/lib/config.ts";
@@ -458,7 +449,6 @@ async function main(): Promise<void> {
   const home = homedir();
 
   const swarm = loadSwarmConfig(repoRoot);
-  loadProjectsConfig(repoRoot);
 
   const machineName = resolveCurrentMachineName(swarm, flags.machine ?? swarm.lead.machine, "main");
   const machineCfg = swarm.machines[machineName];
@@ -605,25 +595,22 @@ async function main(): Promise<void> {
     .replaceAll("{{HUMAN_HANDLE}}", swarm.board.humanHandle);
 
   const leadPromptDest = resolve(leadWorkspaceDir, "CLAUDE.md");
-  const projectsConfigSrc = resolve(repoRoot, "config/projects.json");
   const projectsLinkDest = resolve(leadWorkspaceDir, "projects.json");
 
   writeFileIfChanged(leadPromptDest, renderedLeadPrompt, flags.dryRun);
 
-  if (flags.dryRun) {
-    console.log(`[dry-run] Would symlink ${projectsConfigSrc} -> ${projectsLinkDest}`);
-  } else if (existsSync(projectsConfigSrc)) {
-    mkdirSync(leadWorkspaceDir, { recursive: true });
-    let linkExists = false;
+  // Remove any legacy symlink so Lead Watcher can sync #swarm/registry into ~/swarm-hq/projects.json cleanly
+  if (!flags.dryRun) {
     try {
-      lstatSync(projectsLinkDest);
-      linkExists = true;
+      if (lstatSync(projectsLinkDest).isSymbolicLink()) {
+        unlinkSync(projectsLinkDest);
+        console.log(
+          `[apply:main] Removed legacy symlink ${projectsLinkDest} (now auto-synced from #${swarm.board.registryChannel}).`,
+        );
+      }
     } catch {
-      linkExists = false;
+      // Nothing to remove
     }
-    if (linkExists) unlinkSync(projectsLinkDest);
-    symlinkSync(projectsConfigSrc, projectsLinkDest);
-    console.log(`[apply:main] Linked ${projectsLinkDest} -> ${projectsConfigSrc}`);
   }
 
   // 3. Optionally start the Lead agent in Herdr

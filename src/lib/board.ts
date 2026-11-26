@@ -336,6 +336,28 @@ export class BoardClient {
     await this.runJson(args, { asProfile: opts.asProfile });
   }
 
+  async postMessage(
+    channel: string,
+    text: string,
+    opts: { asProfile: string; labels?: string[] },
+  ): Promise<string> {
+    const clean = channel.replace(/^#/, "");
+    const args = ["post", clean, text];
+    for (const label of opts.labels ?? []) {
+      args.push("--label", label);
+    }
+    const data = await this.runJson(args, { asProfile: opts.asProfile });
+    const rec = RecordSchema.safeParse(data);
+    const msg = rec.success ? RecordSchema.safeParse(rec.data.message ?? rec.data) : null;
+    const id = msg?.success ? msg.data.id : undefined;
+    return typeof id === "string" ? id : "";
+  }
+
+  async editMessage(messageId: string, text: string, opts: { asProfile: string }): Promise<void> {
+    const args = ["edit", messageId, text];
+    await this.runJson(args, { asProfile: opts.asProfile });
+  }
+
   async ensureChannel(channel: string, opts?: { asProfile?: string }): Promise<void> {
     const clean = channel.replace(/^#/, "");
     await this.runJson(["channels", "create", clean], { asProfile: opts?.asProfile });

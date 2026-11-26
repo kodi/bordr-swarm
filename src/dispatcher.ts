@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { BoardClient, type BoardTask } from "./lib/board.ts";
@@ -17,6 +17,7 @@ import {
   type HerdrAgent,
   type HerdrTab,
 } from "./lib/herdr.ts";
+import { buildMachineRegistryEntry, publishMachineRegistry } from "./lib/registry.ts";
 import {
   formatTabLabel,
   renderWorkerPrompt,
@@ -121,7 +122,8 @@ function detectAvailableAgentKinds(swarm: SwarmConfig): Set<string> {
 export class SwarmDispatcher {
   readonly repoRoot: string;
   readonly swarm: SwarmConfig;
-  readonly projects: ProjectsConfig;
+  projects: ProjectsConfig;
+  readonly projectsConfigPath: string | null;
   readonly machineName: string;
   readonly board: BoardClient;
   readonly herdr: HerdrClient;
@@ -132,11 +134,14 @@ export class SwarmDispatcher {
   readonly activeWorkers = new Map<string, ActiveWorker>();
   readonly parkedTabs = new Map<string, ParkedTab>();
   private stopping = false;
+  private lastProjectsMtimeMs = 0;
+  private registryPublishedOnce = false;
 
   constructor(params: {
     repoRoot: string;
     swarm: SwarmConfig;
     projects: ProjectsConfig;
+    projectsConfigPath?: string;
     machineName: string;
     board: BoardClient;
     herdr: HerdrClient;
@@ -147,12 +152,69 @@ export class SwarmDispatcher {
     this.repoRoot = params.repoRoot;
     this.swarm = params.swarm;
     this.projects = params.projects;
+    this.projectsConfigPath = params.projectsConfigPath ?? null;
     this.machineName = params.machineName;
     this.board = params.board;
     this.herdr = params.herdr;
     this.promptTemplate = params.promptTemplate;
     this.availableAgentKinds = params.availableAgentKinds;
     this.dryRun = params.dryRun;
+    if (this.projectsConfigPath && existsSync(this.projectsConfigPath)) {
+      this.lastProjectsMtimeMs = statSync(this.projectsConfigPath).mtimeMs;
+    }
+  }
+
+  private async maybeReloadProjectsAndPublishRegistry(): Promise<void> {
+    let projectsChanged = false;
+    if (this.projectsConfigPath && existsSync(this.projectsConfigPath)) {
+      const mtimeMs = statSync(this.projectsConfigPath).mtimeMs;
+      if (mtimeMs !== this.lastProjectsMtimeMs) {
+        try {
+          this.projects = loadProjectsConfig(this.repoRoot, this.projectsConfigPath);
+          this.lastProjectsMtimeMs = mtimeMs;
+          projectsChanged = true;
+          log(
+            "INFO",
+            `Hot-reloaded ${this.projectsConfigPath} (${Object.keys(this.projects.projects).length} project(s)).`,
+          );
+        } catch (err) {
+          log(
+            "WARN",
+            `Failed to hot-reload ${this.projectsConfigPath}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+    }
+
+    if (this.dryRun || (this.registryPublishedOnce && !projectsChanged)) {
+      return;
+    }
+
+    try {
+      const entry = buildMachineRegistryEntry({
+        swarm: this.swarm,
+        projects: this.projects,
+        machineName: this.machineName,
+        availableAgentKinds: this.availableAgentKinds,
+      });
+      const res = await publishMachineRegistry({
+        board: this.board,
+        registryChannel: this.swarm.board.registryChannel,
+        entry,
+      });
+      this.registryPublishedOnce = true;
+      if (res.action !== "unchanged") {
+        log(
+          "INFO",
+          `Published machine registry to #${this.swarm.board.registryChannel} (${res.action}, projects=[${entry.projects.map((p) => p.slug).join(",")}]).`,
+        );
+      }
+    } catch (err) {
+      log(
+        "WARN",
+        `Failed to publish machine registry to #${this.swarm.board.registryChannel}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   requestStop(): void {
@@ -186,6 +248,8 @@ export class SwarmDispatcher {
     if (!machineCfg) {
       throw new Error(`Missing machine config for "${this.machineName}"`);
     }
+
+    await this.maybeReloadProjectsAndPublishRegistry();
 
     const prefix = this.swarm.board.projectChannelPrefix;
     const allTasks = await this.board.listTasks(prefix, { state: "all", limit: 200 });
@@ -760,7 +824,9 @@ async function main(): Promise<void> {
   const repoRoot = resolve(scriptDir, "..");
 
   const swarm = loadSwarmConfig(repoRoot);
-  const projects = loadProjectsConfig(repoRoot);
+  const projectsConfigPath =
+    process.env.PROJECTS_CONFIG_PATH ?? resolve(repoRoot, "config/projects.json");
+  const projects = loadProjectsConfig(repoRoot, projectsConfigPath);
   const machineName = resolveCurrentMachineName(swarm, flags.machine, "worker");
   const machineCfg = swarm.machines[machineName];
   if (!machineCfg) {
@@ -782,6 +848,7 @@ async function main(): Promise<void> {
     repoRoot,
     swarm,
     projects,
+    projectsConfigPath,
     machineName,
     board,
     herdr,

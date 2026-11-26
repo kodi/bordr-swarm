@@ -1,12 +1,14 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { BoardClient, type BoardThreadSummary } from "./lib/board.ts";
 import {
   buildAgentCliArgs,
+  loadProjectsConfig,
   loadSwarmConfig,
   resolveCurrentMachineName,
+  type ProjectsConfig,
   type SwarmConfig,
 } from "./lib/config.ts";
 import { HerdrClient, sanitizeHerdrAgentName } from "./lib/herdr.ts";
@@ -17,6 +19,11 @@ import {
   type LeadWakeEvent,
   type LeadWatcherState,
 } from "./lib/lead-events.ts";
+import {
+  catalogFingerprint,
+  mergeRegistryIntoLeadCatalog,
+  readAllMachineRegistryEntries,
+} from "./lib/registry.ts";
 
 interface CliFlags {
   machine?: string;
@@ -89,6 +96,7 @@ export class LeadWatcher {
   readonly herdr: HerdrClient;
   readonly statePath: string;
   readonly leadWorkspaceDir: string;
+  readonly localProjectsPath: string | null;
   readonly leadAgentName: string;
   readonly dryRun: boolean;
 
@@ -96,6 +104,7 @@ export class LeadWatcher {
   private pendingEvents: LeadWakeEvent[] = [];
   private stopping = false;
   private startupWarnedBlocked = false;
+  private lastCatalogFingerprint = "";
 
   constructor(params: {
     swarm: SwarmConfig;
@@ -103,6 +112,7 @@ export class LeadWatcher {
     herdr: HerdrClient;
     statePath: string;
     leadWorkspaceDir: string;
+    localProjectsPath?: string | null;
     dryRun: boolean;
   }) {
     this.swarm = params.swarm;
@@ -110,9 +120,61 @@ export class LeadWatcher {
     this.herdr = params.herdr;
     this.statePath = params.statePath;
     this.leadWorkspaceDir = params.leadWorkspaceDir;
+    this.localProjectsPath = params.localProjectsPath ?? null;
     this.leadAgentName = sanitizeHerdrAgentName(params.swarm.lead.boardProfile, "");
     this.dryRun = params.dryRun;
     this.state = loadState(params.statePath);
+  }
+
+  private async syncRegistryCatalog(): Promise<void> {
+    const entries = await readAllMachineRegistryEntries(
+      this.board,
+      this.swarm.board.registryChannel,
+    ).catch(() => []);
+
+    let localProjects: ProjectsConfig | null = null;
+    if (this.localProjectsPath && existsSync(this.localProjectsPath)) {
+      try {
+        localProjects = loadProjectsConfig(process.cwd(), this.localProjectsPath);
+      } catch {
+        localProjects = null;
+      }
+    }
+
+    if (entries.length === 0 && !localProjects) {
+      return;
+    }
+
+    const catalog = mergeRegistryIntoLeadCatalog({ entries, localProjects });
+    const fp = catalogFingerprint(catalog);
+    if (fp === this.lastCatalogFingerprint) {
+      return;
+    }
+
+    this.lastCatalogFingerprint = fp;
+    if (this.dryRun) {
+      log(
+        "INFO",
+        `[dry-run] Would sync ${Object.keys(catalog.projects).length} project(s) from #${this.swarm.board.registryChannel} into ${resolve(this.leadWorkspaceDir, "projects.json")}`,
+      );
+      return;
+    }
+
+    const dest = resolve(this.leadWorkspaceDir, "projects.json");
+    mkdirSync(this.leadWorkspaceDir, { recursive: true });
+    // Replace any legacy symlink so we never overwrite repo-local config/projects.json
+    try {
+      if (lstatSync(dest).isSymbolicLink()) {
+        unlinkSync(dest);
+      }
+    } catch {
+      // Destination does not exist yet
+    }
+    writeFileSync(dest, `${JSON.stringify(catalog, null, 2)}\n`, "utf8");
+    log(
+      "INFO",
+      `Synced #${this.swarm.board.registryChannel} -> ${dest} (${Object.keys(catalog.machines).length} machine(s), ${Object.keys(catalog.projects).length} project(s)).`,
+    );
   }
 
   requestStop(): void {
@@ -183,6 +245,8 @@ export class LeadWatcher {
   }
 
   async tick(): Promise<void> {
+    await this.syncRegistryCatalog();
+
     const inboxChannel = this.swarm.board.inboxChannel;
     const prefix = this.swarm.board.projectChannelPrefix;
 
@@ -314,6 +378,8 @@ async function main(): Promise<void> {
     herdr: new HerdrClient({ target: machineCfg.herdrTarget }),
     statePath,
     leadWorkspaceDir,
+    localProjectsPath:
+      process.env.PROJECTS_CONFIG_PATH ?? resolve(repoRoot, "config/projects.json"),
     dryRun: flags.dryRun,
   });
 
