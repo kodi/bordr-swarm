@@ -129,7 +129,7 @@ Runs as a **per-machine daemon** locally on each worker machine (Linux or macOS)
 
 #### Per-Task Lifecycle
 
-1. **Discover & Claim:** When `activeSlots < maxWorkers`, list ready tasks under `projects/` (`vercel board tasks projects/ --state all --json`), filter by machine/OS labels, installed agent binary, and repo availability (ensuring at most one active/parked plain-tab worker per project checkout at a time), and atomically claim the oldest eligible task with `vercel board tasks claim <task_id> --as <workerProfile> --lease 15m --json`.
+1. **Discover & Claim:** When `activeSlots < maxWorkers`, list open tasks under `projects/` (`vercel board tasks projects/ --state open --limit 100 --json`, following `--after <cursor>` until a page comes back short or empty), filter by machine/OS labels, installed agent binary, and repo availability (ensuring at most one active/parked plain-tab worker per project checkout at a time), and atomically claim the oldest eligible task with `vercel board tasks claim <task_id> --as <workerProfile> --lease 15m --json`.
 2. **Lease heartbeat (critical):** The **dispatcher** runs `vercel board tasks renew <task_id> --as <workerProfile> --lease 15m` every 5 minutes while the worker is alive. Never rely on the LLM to remember renewals.
 3. **Spawn in Herdr:**
    - Look up `project` in `config/projects.json` → resolve local repo path for this machine.
@@ -163,11 +163,25 @@ Runs as a **per-machine daemon** locally on each worker machine (Linux or macOS)
      - If Board task is `blocked`, park the tab (subject to `maxParkedTabs` cap) and free the active compute slot. If the task is later unblocked and resumed (`claimed`) in that tab, the dispatcher restores it to active tracking and removes the `[BLOCKED]` prefix; once it reaches `completed`/`canceled` (or is closed manually in Sheprd), the dispatcher auto-closes the tab and frees the parked slot and repo lock.
    - **`failed` / unexpected exit:** Keep tab open as `[FAILED] task-<taskId> (<agent>)`, post tail of `herdr pane read` to the Board thread, fail the task if still claimed, stop lease renewal, free the slot.
 
+#### Restart and Recovery
+
+The dispatcher can be stopped, restarted, or killed at any point with tasks in any phase. Agents keep running in their Herdr tabs throughout.
+
+- **State file:** the dispatcher keeps its tracked tasks (active and parked, with each one's phase, session handles, review round, and seen reply ids) in `~/.local/state/bordr-swarm/dispatcher-<machine>.json`. Set `DISPATCHER_STATE_PATH` to move it. The file is versioned and validated with Zod on boot. It is written atomically (temp file, then `rename`) at the end of any tick that changed something, and again on stop. A file that fails validation is renamed to `*.corrupt-<timestamp>`, and the dispatcher starts empty. A file written for a different machine is ignored. `--dry-run` never reads or writes it.
+- **What survives a restart:** everything the dispatcher tracks. On boot it logs `Restored N active and M parked task(s)`. The next tick reconciles them as usual: it renews leases, delivers review verdicts, wakes implementers for fix rounds, keeps repo locks held by parked tabs, and closes tabs when tasks finish. A graceful stop (`SIGTERM`/`SIGINT`) persists state and exits after the current tick. It never closes tabs or releases tasks.
+- **Finished while it was down:** the open-task list leaves out `completed`, `canceled`, and `failed` tasks. A tracked task missing from that list is looked up with `vercel board read <id> --json`, so its terminal state is still seen and its tab cleaned up.
+- **Lease lapsed while it was down** (down longer than `board.leaseDuration`): the Board puts the task back to `ready`. If the task's agent is still alive, the dispatcher claims it again under the same worker profile and carries on. A plain `renew` would fail with `claim_lost`. If someone else got there first, it renames the tab `[ORPHANED] …`, posts one reply naming the new holder, and stops tracking the task. It leaves the task's state alone.
+- **No usable state file** (first deploy, corrupt file, manual wipe): each tick, an orphan sweep looks for open tasks claimed by exactly `worker-<machine>-<shortId>` that nothing tracks.
+  - Live `w-<shortId>` agent: the task is adopted as implementing. Its existing replies are marked seen, and its lease is renewed on the next tick.
+  - Live reviewer `r<N>-<shortId>` as well: the dispatcher cannot tell which review round it is in. It blocks the task (`needs_input`) and parks the implementer tab `[BLOCKED]` for a human.
+  - No live agent: it posts a reply and releases the task so it becomes `ready` again.
+  - If Herdr cannot be reached, the sweep does nothing that tick.
+
 ---
 
 ## Operational Gotchas
 
-1. **Lease TTL:** Always renew in the TypeScript dispatcher loop, never in the LLM prompt.
+1. **Lease TTL:** Always renew in the TypeScript dispatcher loop, never in the LLM prompt. After a lapse, `renew` fails with `claim_lost` and the same profile has to `claim` again. The dispatcher does this automatically (see Restart and Recovery).
 2. **Shared repo checkouts in plain-tab mode:** The Dispatcher enforces a per-repo lock across active and parked plain-tab workers so two tasks never mutate the same working tree simultaneously. Enable `useWorktree: true` per project if you need parallel tasks on the same repository.
 3. **Host header protection on `board inspect`:** When reverse-proxying `board inspect`, pass `--allow-host <host>` for every hostname/port used by clients (handled automatically by `scripts/apply-main.ts` from `machines.<main>.allowedHosts`).
 4. **Non-interactive PATH:** `systemd --user` and macOS `launchd` do not load interactive shell profiles. Point services at `mise` shims (`~/.local/share/mise/shims`) or invoke `mise exec -- ...`.

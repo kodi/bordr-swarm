@@ -185,7 +185,7 @@ Status: `[x]` Done
 
 ### Slice 6: Docs and operational polish
 
-Status: `[ ]` Not started
+Status: `[x]` Done (docs, `update` restart skip, and a dry-run against the live board; the manual restart check in the Testing Plan has not been run yet, see Working Notes)
 
 - Goal: docs match behavior.
 - This slice should implement:
@@ -262,6 +262,12 @@ Status: `[ ]` Not started
   - Ids tracked at tick start are excluded. Otherwise a task that reconcile completed this tick, which still reads `claimed` in the list fetched before reconcile, would be re-adopted. A mutation check confirms the lifecycle test fails without this guard.
   - Follow-up, out of scope (it applies to every parked `[BLOCKED]` tab): `tasks unblock` returns a task to `ready`, not `claimed`, so `stepParkedTab`'s unpark-on-`claimed` path only fires when someone re-claims under our profile. An unblocked parked task waits until its tab is closed.
 
+- 2026-11-27 (Slice 6): docs updated. `docs/architecture.md` gains "Restart and Recovery" and corrects the listing command to `--state open` with pagination. `docs/worker-machine-setup.md` and the README command table note that `mise run update` is safe with tasks in flight. `AGENTS.md` records the durable-state decision.
+  - `scripts/apply-worker.ts` gains `--keep-running`, which leaves a running dispatcher alone when its service file is unchanged. `scripts/update.ts` passes it when the pull brought no `src/`, `scripts/`, `prompts/`, or dependency changes.
+  - Without that flag, `apply:worker` now restarts the dispatcher on Linux too (`systemctl --user restart`). Previously `enable --now` never restarted a running unit, so `mise run update` on Linux kept running the old dispatcher code.
+  - Real-world check (read-only): `node src/dispatcher.ts --once --dry-run` on the worker host running this very task. With no state file, it reported `Orphan sweep would adopt task #<this task>`. That confirms open-only listing, claim-actor normalization to `worker-<machine>-<shortId>`, live-agent lookup, and routing against the live board and Herdr.
+  - **Not done:** the Testing Plan's manual end-to-end restart (`mise run apply:worker` mid-task, during review, and after a lease lapse). It means restarting the live dispatcher that supervises in-flight tasks, including the task that implemented this plan, so it is left for a human to run after merge.
+
 ## Next Slice
 
-**Slice 6**: docs (architecture "Restart and recovery", worker setup + README note that `mise run update` is safe with tasks in flight, AGENTS.md durable-state decision) and optionally skip the dispatcher restart in `scripts/update.ts` when no code changed.
+All slices are implemented. What remains is the manual end-to-end check in the **Testing Plan**, on a worker host after merge. Then continue with Plan B (`2026-11-27-event-bus-reactors-plan.md`). Candidate follow-up: let a parked `[BLOCKED]` tab resume when its task is unblocked to `ready` (see the Slice 5 notes).
