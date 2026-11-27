@@ -238,7 +238,7 @@ Status: `[x]` Done
 
 ### Slice 8: Pipeline stage seam (behavior-preserving)
 
-Status: `[ ]` Not started
+Status: `[ ]` Deferred to a follow-up plan (see the design note below and Working Notes)
 
 - Goal: review is one implementation of a `Stage` interface; the task FSM composes stages.
 - Why here: last, because it is the largest refactor and nothing else depends on it.
@@ -248,6 +248,40 @@ Status: `[ ]` Not started
 - Scope guard: `tests/fsm.test.ts`, `tests/reviewer.test.ts` and `tests/dispatcher.test.ts` must pass **without modification**. If the extraction cannot be done within that constraint or the diff is too large to review as one commit, stop, record what was learned, and move this slice to a follow-up plan. Plan C changes review signal detection; note any conflict under Working Notes.
 - Verification: unchanged tests pass; `npm run check`.
 - Dependencies: Slices 4 and 6.
+
+#### Design note (written before coding, 2026-11-27)
+
+Proposed interface:
+
+```ts
+type StageOutcome =
+  | { kind: "continue"; next: StageState; effects: TaskEffect[] } // still running
+  | { kind: "pass"; summary: string; effects: TaskEffect[] } // next stage, or complete
+  | { kind: "retry"; round: number; effects: TaskEffect[] } // back to the implementer
+  | { kind: "escalate"; reason: string; effects: TaskEffect[] }; // block + park for a human
+
+interface Stage<S extends { kind: string }> {
+  name: string; // "review"; later "tests", "pr"
+  /** Entry condition, checked while implementing (e.g. a READY_FOR_REVIEW handoff with a diff). */
+  enter(task: ActiveTask, signal: ThreadSignal): { effects: TaskEffect[]; state: S } | null;
+  step(state: S, task: ActiveTask, obs: TaskObservation): StageOutcome;
+  sessions(state: S): SessionHandle[]; // for reconcile, pane subscriptions, orphan sweep
+}
+
+type TaskPhase =
+  | { kind: "implementing"; impl: ManagedSession }
+  | { kind: "stage"; impl: SessionHandle; stage: StageState }; // StageState = union of stage states
+```
+
+`TaskPhase` composes stages by holding exactly one stage state; `fixing` becomes the review stage's `retry` outcome, which returns to `implementing` with a round counter carried in the stage's own state. No boolean flags are involved.
+
+What was learned (why it was not implemented here):
+
+1. The `reviewing` and `fixing` variants of `TaskPhase` are constructed directly by `tests/fsm.test.ts` and `tests/reviewer.test.ts`, and persisted 1:1 by `PersistedDispatcherStateSchema` (`version: 1`, Plan A). Any seam that changes `TaskPhase` must change those tests and needs a v2 state migration. The scope guard forbids the first, and the second is a durability change that deserves its own review.
+2. A seam that keeps `TaskPhase` unchanged can only move code (the review branches of `stepTask`, the `spawn_reviewer` and `resume_implementer_for_fix` executors, and `observeThreadSignal`) behind function boundaries. Every phase switch still names `reviewing`/`fixing`, so adding a stage would still touch the same four files. That is churn without the benefit.
+3. Plan C replaces review handoff detection (text markers to labels), which is exactly the `enter`/signal half of this interface. Doing the seam first would be rewritten by Plan C.
+
+Recommendation: a follow-up plan after Plan C that introduces `{ kind: "stage" }` together with a `version: 2` dispatcher state (and a v1 → v2 loader), updates the FSM and reviewer tests deliberately, and lands review as the first `Stage`.
 
 ### Slice 9: Docs
 
@@ -331,6 +365,7 @@ Status: `[ ]` Not started
   - Loop prevention: a reactor never matches a message authored by its own posting profile (`reactor-<name>` unless set), and the executor's `CooldownGate` allows one run per `cooldownSeconds`. A test drives an "echo every #ops post into #ops" rule through both guards.
   - Lead runs configured effects after triage in the same tick (`runDeferredEffects`), so 👀 and Lead prompts are never delayed by a slow command. Dry-run logs instead of running.
   - Manual check: a non-dry-run Lead Watcher on scratch channels with `{ on: "message.posted", match: { channel: "scratch/..." }, run: { command: ["append.sh", "<file>"] } }` appended the event JSON about 5s after the post (behind that tick's triage). Process note: its startup catch-up also picked up an earlier probe post in the scratch inbox and spawned a real Lead tab. I closed it before it was prompted; use a fresh inbox channel for probes like this.
+- 2026-11-27 (Slice 8): not implemented; deferred to a follow-up plan per the scope guard. The design note under Slice 8 records the proposed `Stage` interface and the reasons: `TaskPhase`'s review variants are fixed by the FSM and reviewer tests and by the v1 persisted state, and Plan C rewrites review signal detection. No code changed for this slice.
 
 ## Next Slice
 

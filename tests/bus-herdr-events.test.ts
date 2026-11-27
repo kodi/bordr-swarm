@@ -144,9 +144,15 @@ describe("HerdrEventSource", () => {
     const { server, events, source } = await setup();
     source.setWatchedPanes(["w1:p1"]);
     source.start();
-    await until(() => server.live().length === 2, "global + pane connection");
+    await until(
+      () => server.live().filter((c) => c.requests.length > 0).length === 2,
+      "global + pane connection subscribed",
+    );
     source.setWatchedPanes(["w1:p1", "w1:p2"]);
-    await until(() => server.live().length === 3, "second pane connection");
+    await until(
+      () => server.live().filter((c) => c.requests.length > 0).length === 3,
+      "second pane connection subscribed",
+    );
     const paneSubs = server.conns
       .map((c) => c.requests[0]?.params.subscriptions[0] as { type: string; pane_id?: string })
       .filter((sub) => sub?.type === "pane.agent_status_changed")
@@ -181,7 +187,10 @@ describe("HerdrEventSource", () => {
     await until(() => !source.isHealthy, "unhealthy");
     assert.equal(server.live().length, 0);
     timers.advance(1_000);
-    await until(() => source.isHealthy && server.live().length === 2, "reconnected");
+    await until(
+      () => source.isHealthy && server.live().filter((c) => c.requests.length > 0).length === 2,
+      "reconnected",
+    );
     assert.equal(server.conns.length, 4);
     const resubscribed = server
       .live()
