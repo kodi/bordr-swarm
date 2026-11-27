@@ -223,7 +223,7 @@ Status: `[x]` Done
 
 ### Slice 7: Config-driven reactors
 
-Status: `[ ]` Not started
+Status: `[x]` Done
 
 - Goal: a user can add "when a task blocks, notify me" without touching the code.
 - Why here: needs the registry.
@@ -326,6 +326,11 @@ Status: `[ ]` Not started
 - 2026-11-27 (Slice 6): `src/bus/reactor.ts` holds the `Reactor` interface, `ReactorRegistry` (per-reactor isolation for both `matches` and `react`, duplicate names rejected), the `ReactorEffect` union, and `executeEffects` (one handler per effect type; failures and unsupported effect types are logged, never fatal). Built-ins: `src/reactors/dispatcher-wake.ts` (`dispatcher-wake`, `projects-reload`) and `src/reactors/lead.ts` (`inbox-ack`, `lead-wake`, `registry-sync`, `lead-session-wake`). Each daemon logs its reactor list at startup.
   - Deviation from the interface sketch: configuration (channels, profile, paths) is bound when a reactor is created, and `ctx` carries only the daemon's live read-only view (tracked task, pane, and tab IDs; Lead session panes). That keeps `matches(event)` pure and usable at receipt time.
   - Lead runs Board-event reactors when the tick drains its queue, after the replay/duplicate check, so a reactor never sees an already-handled message. At receipt it only asks `matchesAny` to decide whether to wake. Lead's own effects (`lead_event`, `react`, `registry_sync`) feed triage directly; other effects are deferred until after triage.
+- 2026-11-27 (Slice 7): `swarm.json` `reactors[]` (`ConfiguredReactorSchema`: `name`, `enabled`, `on` (selector or list, including `task.*` / `message.*`), `runOn`, `match { channel, labels }`, `run { command, timeoutSeconds } | { post { channel, text, profile? } }`, `cooldownSeconds` default 30; duplicate names rejected). Implementation: `src/reactors/configured.ts`. Commands run with `spawn(..., { shell: false })`, the argv comes from config only, and the event JSON goes to stdin. `post` text placeholders are `{type} {channel} {id} {thread} {author} {state} {text}`; the channel always comes from config. `mise run doctor` reports a missing command (fail), a dispatcher reactor whose channel is outside the dispatcher's prefix (warn), and a `post` reactor without a cooldown (warn).
+  - **OQ6 (answered differently from the default assumption):** reactors run in **one** daemon, chosen per reactor with `runOn`, default `"lead"`. "Both" would run every reactor once per worker machine, plus once more on a `both` machine. Lead sees the whole board, and there is one Lead per swarm. `runOn: "dispatcher"` runs on every worker and only sees the project prefix; it is for per-machine local commands.
+  - Loop prevention: a reactor never matches a message authored by its own posting profile (`reactor-<name>` unless set), and the executor's `CooldownGate` allows one run per `cooldownSeconds`. A test drives an "echo every #ops post into #ops" rule through both guards.
+  - Lead runs configured effects after triage in the same tick (`runDeferredEffects`), so 👀 and Lead prompts are never delayed by a slow command. Dry-run logs instead of running.
+  - Manual check: a non-dry-run Lead Watcher on scratch channels with `{ on: "message.posted", match: { channel: "scratch/..." }, run: { command: ["append.sh", "<file>"] } }` appended the event JSON about 5s after the post (behind that tick's triage). Process note: its startup catch-up also picked up an earlier probe post in the scratch inbox and spawned a real Lead tab. I closed it before it was prompted; use a fresh inbox channel for probes like this.
 
 ## Next Slice
 

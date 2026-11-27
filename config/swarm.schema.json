@@ -358,6 +358,177 @@
       "additionalProperties": false,
       "description": "Live event sources. Events are hints that trigger an immediate reconcile; periodic polling remains the safety net."
     },
+    "reactors": {
+      "description": "User-defined reactors (for example \"when a task blocks, notify me\").",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{0,39}$",
+            "description": "Unique reactor name, used in logs and as the default posting profile `reactor-<name>`."
+          },
+          "enabled": {
+            "default": true,
+            "description": "Set false to keep a reactor configured but inactive.",
+            "type": "boolean"
+          },
+          "on": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "message.posted",
+                  "message.edited",
+                  "message.deleted",
+                  "message.*",
+                  "reaction.added",
+                  "reaction.removed",
+                  "task.created",
+                  "task.ready",
+                  "task.claimed",
+                  "task.completed",
+                  "task.blocked",
+                  "task.unblocked",
+                  "task.failed",
+                  "task.canceled",
+                  "task.released",
+                  "task.expired",
+                  "task.renewed",
+                  "task.*"
+                ],
+                "description": "Board event type to react to (`message.posted`, `task.blocked`, ...); `message.*` and `task.*` match every message or task event."
+              },
+              {
+                "minItems": 1,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "message.posted",
+                    "message.edited",
+                    "message.deleted",
+                    "message.*",
+                    "reaction.added",
+                    "reaction.removed",
+                    "task.created",
+                    "task.ready",
+                    "task.claimed",
+                    "task.completed",
+                    "task.blocked",
+                    "task.unblocked",
+                    "task.failed",
+                    "task.canceled",
+                    "task.released",
+                    "task.expired",
+                    "task.renewed",
+                    "task.*"
+                  ],
+                  "description": "Board event type to react to (`message.posted`, `task.blocked`, ...); `message.*` and `task.*` match every message or task event."
+                }
+              }
+            ],
+            "description": "Event selector, or a list of them."
+          },
+          "runOn": {
+            "default": "lead",
+            "description": "\"lead\" (default): runs once, in the Lead Watcher on the main machine, which sees the whole board. \"dispatcher\": runs in every worker dispatcher, which only sees `board.projectChannelPrefix` (use for per-machine local commands).",
+            "type": "string",
+            "enum": ["lead", "dispatcher"]
+          },
+          "match": {
+            "description": "Optional filters; every given filter must match.",
+            "type": "object",
+            "properties": {
+              "channel": {
+                "description": "Exact channel (`inbox`) or a prefix ending in \"/\" (`projects/`).",
+                "type": "string",
+                "minLength": 1
+              },
+              "labels": {
+                "description": "Labels the event's message (or task root) must carry, e.g. `{ \"review\": \"skip\" }`.",
+                "type": "object",
+                "propertyNames": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "additionalProperties": {
+                  "type": "string"
+                }
+              }
+            },
+            "additionalProperties": false
+          },
+          "run": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "command": {
+                    "minItems": 1,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "description": "Local command as argv (no shell). The event is passed as JSON on stdin; nothing from the event is ever put in the command line."
+                  },
+                  "timeoutSeconds": {
+                    "default": 30,
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 600
+                  }
+                },
+                "required": ["command"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "post": {
+                    "type": "object",
+                    "properties": {
+                      "channel": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Channel to post in (from config only)."
+                      },
+                      "text": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Message text. Placeholders: {type} {channel} {id} {thread} {author} {state} {text} (event values, text truncated)."
+                      },
+                      "profile": {
+                        "description": "Board profile to post as (default `reactor-<name>`).",
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "required": ["channel", "text"],
+                    "additionalProperties": false
+                  }
+                },
+                "required": ["post"],
+                "additionalProperties": false
+              }
+            ],
+            "description": "What to do: run a local command, or post a message."
+          },
+          "cooldownSeconds": {
+            "default": 30,
+            "description": "Minimum seconds between two runs of this reactor (loop and burst protection).",
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "required": ["name", "on", "run"],
+        "additionalProperties": false,
+        "description": "A user-defined \"when X, do Y\" rule. Runs local commands only from this local, gitignored config."
+      }
+    },
     "machines": {
       "type": "object",
       "propertyNames": {

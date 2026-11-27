@@ -82,6 +82,11 @@ import {
   type ThreadSignal,
 } from "./lib/task-fsm.ts";
 import {
+  createConfiguredEffectHandlers,
+  createConfiguredReactors,
+  type CommandRunner,
+} from "./reactors/configured.ts";
+import {
   createDispatcherWakeReactor,
   createProjectsReloadReactor,
   type DispatcherWakeContext,
@@ -171,6 +176,8 @@ export class SwarmDispatcher {
   private scheduler: WakeScheduler | null = null;
   /** Built-in (and configured) "when X, do Y" rules, run for every bus event. */
   readonly reactors: ReactorRegistry<DispatcherWakeContext>;
+  /** Runs `run_command` / `post` effects of configured reactors (keeps their cooldowns). */
+  private readonly configuredEffects: EffectHandlers;
 
   constructor(params: {
     repoRoot: string;
@@ -191,6 +198,7 @@ export class SwarmDispatcher {
     timers?: Timers;
     /** Additional reactors (config-driven ones), run after the built-ins. */
     extraReactors?: Array<Reactor<DispatcherWakeContext>>;
+    commandRunner?: CommandRunner;
   }) {
     this.repoRoot = params.repoRoot;
     this.swarm = params.swarm;
@@ -213,10 +221,17 @@ export class SwarmDispatcher {
           projectChannelPrefix: this.swarm.board.projectChannelPrefix,
         }),
         createProjectsReloadReactor({ projectsConfigPath: this.projectsConfigPath }),
+        ...createConfiguredReactors(this.swarm.reactors, "dispatcher"),
         ...(params.extraReactors ?? []),
       ],
       log,
     );
+    this.configuredEffects = createConfiguredEffectHandlers({
+      board: this.board,
+      log,
+      dryRun: this.dryRun,
+      runner: params.commandRunner,
+    });
     if (this.projectsConfigPath && existsSync(this.projectsConfigPath)) {
       this.lastProjectsMtimeMs = statSync(this.projectsConfigPath).mtimeMs;
     }
@@ -284,6 +299,7 @@ export class SwarmDispatcher {
   /** How this dispatcher runs reactor effects (Lead-only effects are not handled here). */
   private effectHandlers(): EffectHandlers {
     return {
+      ...this.configuredEffects,
       wake: (effect) => this.scheduler?.wake(effect.reason),
       // The tick's mtime check decides whether projects.json really changed.
       projects_reload: () => this.scheduler?.wake("projects_reload"),

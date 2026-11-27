@@ -16,6 +16,7 @@ import {
   selectThreadsNeedingRead,
   type LeadWatcherState,
 } from "../src/lib/lead-events.ts";
+import type { CommandRunner } from "../src/reactors/configured.ts";
 import { flushMicrotasks, ManualTimers } from "./helpers/bus-fakes.ts";
 
 const ok = (body: unknown) => ({ stdout: JSON.stringify(body), stderr: "" });
@@ -232,13 +233,21 @@ afterEach(async () => {
   for (const fn of cleanups.splice(0)) await fn();
 });
 
-function setup(opts: { inbox?: () => BoardThreadSummary[]; state?: LeadWatcherState } = {}) {
+function setup(
+  opts: {
+    inbox?: () => BoardThreadSummary[];
+    state?: LeadWatcherState;
+    reactors?: unknown[];
+    commandRunner?: CommandRunner;
+  } = {},
+) {
   const tmp = mkdtempSync(join(tmpdir(), "lead-bus-"));
   const statePath = join(tmp, "state.json");
   if (opts.state) writeFileSync(statePath, JSON.stringify(opts.state));
   const swarm = parseSwarmConfig({
     lead: { pollIntervalSeconds: 10, reconcileIntervalSeconds: 60, idleCloseSeconds: 15 },
     machines: { main: { role: "main", os: "linux" } },
+    ...(opts.reactors ? { reactors: opts.reactors } : {}),
   });
   const board = fakeBoard(opts.inbox ?? (() => []));
   const herdr = fakeHerdr();
@@ -257,6 +266,7 @@ function setup(opts: { inbox?: () => BoardThreadSummary[]; state?: LeadWatcherSt
     now: () => clock,
     events: { bus, health, paneWatcher: null },
     timers,
+    commandRunner: opts.commandRunner,
   });
   let loop: Promise<void> | null = null;
   const start = () => {
@@ -400,6 +410,40 @@ describe("LeadWatcher on the bus", () => {
     assert.equal(t.watcher.currentIntervalMs(), 60_000);
     t.bus.publish({ kind: "source.health", source: "board", healthy: false, detail: "down" });
     assert.equal(t.watcher.currentIntervalMs(), 10_000);
+  });
+
+  it("runs a configured command reactor for a live event, after triage", async () => {
+    const ran: Array<{ argv: readonly string[]; stdin: string }> = [];
+    const t = setup({
+      reactors: [
+        { name: "notify-blocked", on: "task.blocked", run: { command: ["notify", "--now"] } },
+      ],
+      commandRunner: async (argv, o) => {
+        ran.push({ argv, stdin: o.stdin });
+        return { code: 0, stdout: "", stderr: "", timedOut: false };
+      },
+    });
+    assert.ok(t.watcher.reactors.names.includes("config:notify-blocked"));
+    t.start();
+    await settle();
+    t.bus.publish(
+      tailEvent({
+        cursor: "c-1",
+        type: "task.blocked",
+        payload: {},
+        message: {
+          id: "msg_eee55555_1",
+          channel: "projects/app",
+          text: "Need key",
+          task: { state: "blocked" },
+        },
+      }),
+    );
+    t.timers.advance(250);
+    await settle();
+    assert.equal(ran.length, 1);
+    assert.deepEqual(ran[0]?.argv, ["notify", "--now"]);
+    assert.match(ran[0]?.stdin ?? "", /"msg_eee55555_1"/);
   });
 
   it("loads a pre-bus state file unchanged (tolerant loader)", () => {

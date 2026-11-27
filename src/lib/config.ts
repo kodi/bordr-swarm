@@ -6,6 +6,7 @@ import {
   ProjectsConfigSchema,
   SwarmConfigSchema,
   type BoardConfig,
+  type ConfiguredReactor,
   type EffortLevel,
   type EventsConfig,
   type LeadConfig,
@@ -19,6 +20,7 @@ import {
 
 export type {
   BoardConfig,
+  ConfiguredReactor,
   EffortLevel,
   EventsConfig,
   LeadConfig,
@@ -78,6 +80,8 @@ export interface SwarmConfig {
   workerDefaults: WorkerDefaultsConfig;
   /** Live event sources (both on when omitted). */
   events?: EventsConfig;
+  /** User-defined reactors from local config. */
+  reactors?: ConfiguredReactor[];
   machines: Record<string, MachineConfig>;
 }
 
@@ -248,6 +252,7 @@ export function parseSwarmConfig(input: unknown, sourceLabel = "swarm.json"): Sw
       reviewer: normalizedReviewer,
     },
     ...(parsed.events ? { events: parsed.events } : {}),
+    ...(parsed.reactors ? { reactors: parsed.reactors } : {}),
     machines,
   };
 }

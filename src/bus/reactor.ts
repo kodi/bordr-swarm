@@ -15,9 +15,16 @@ export type ReactorEffect =
   /** `projects.json` may have changed: re-check it on the next tick. */
   | { type: "projects_reload" }
   /** Run a configured local command (argv from local config only) with the event JSON on stdin. */
-  | { type: "run_command"; command: string[]; timeoutMs: number; stdin: string }
+  | {
+      type: "run_command";
+      command: string[];
+      timeoutMs: number;
+      stdin: string;
+      /** Minimum gap between two runs of the same reactor. */
+      cooldownMs: number;
+    }
   /** Post a configured message. */
-  | { type: "post"; channel: string; text: string; asProfile: string };
+  | { type: "post"; channel: string; text: string; asProfile: string; cooldownMs: number };
 
 export type ReactorEffectType = ReactorEffect["type"];
 

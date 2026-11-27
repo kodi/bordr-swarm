@@ -57,6 +57,11 @@ import {
   readAllMachineRegistryEntries,
 } from "./lib/registry.ts";
 import { assertNever } from "./lib/session-fsm.ts";
+import {
+  createConfiguredEffectHandlers,
+  createConfiguredReactors,
+  type CommandRunner,
+} from "./reactors/configured.ts";
 import { createBuiltinLeadReactors, type LeadReactorContext } from "./reactors/lead.ts";
 
 const LEAD_STARTUP_GRACE_MS = 20_000;
@@ -190,6 +195,8 @@ export class LeadWatcher {
   private scheduler: WakeScheduler | null = null;
   /** Built-in (and configured) "when X, do Y" rules. */
   readonly reactors: ReactorRegistry<LeadReactorContext>;
+  /** Runs `run_command` / `post` effects of configured reactors (keeps their cooldowns). */
+  private readonly configuredEffects: EffectHandlers;
 
   constructor(params: {
     swarm: SwarmConfig;
@@ -205,6 +212,7 @@ export class LeadWatcher {
     timers?: Timers;
     /** Additional reactors (config-driven ones), run after the built-ins. */
     extraReactors?: Array<Reactor<LeadReactorContext>>;
+    commandRunner?: CommandRunner;
   }) {
     this.swarm = params.swarm;
     this.board = params.board;
@@ -225,10 +233,17 @@ export class LeadWatcher {
           registryChannel: this.swarm.board.registryChannel,
           leadProfile: this.swarm.lead.boardProfile,
         }),
+        ...createConfiguredReactors(this.swarm.reactors, "lead"),
         ...(params.extraReactors ?? []),
       ],
       log,
     );
+    this.configuredEffects = createConfiguredEffectHandlers({
+      board: this.board,
+      log,
+      dryRun: this.dryRun,
+      runner: params.commandRunner,
+    });
   }
 
   private reactorContext(): LeadReactorContext {
@@ -362,11 +377,6 @@ export class LeadWatcher {
 
   /** Effects other than Lead's own (commands, posts) run after the tick's triage. */
   private deferredEffects: CollectedEffect[] = [];
-
-  /** Handlers for effects that are not part of Lead's triage (config-driven reactors). */
-  protected extraEffectHandlers(): EffectHandlers {
-    return {};
-  }
 
   private async reactAck(messageId: string, threadId: string): Promise<void> {
     const leadProfile = this.swarm.lead.boardProfile;
@@ -849,6 +859,7 @@ export class LeadWatcher {
         );
       }
       this.state.pendingByThread = {};
+      await this.runDeferredEffects();
       return;
     }
 
@@ -860,7 +871,7 @@ export class LeadWatcher {
   private async runDeferredEffects(): Promise<void> {
     const effects = this.deferredEffects;
     this.deferredEffects = [];
-    if (effects.length > 0) await executeEffects(effects, this.extraEffectHandlers(), log);
+    if (effects.length > 0) await executeEffects(effects, this.configuredEffects, log);
   }
 
   /** Full poll of #inbox, project channels, and blocked tasks (the pre-bus detection path). */

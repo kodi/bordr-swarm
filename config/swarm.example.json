@@ -78,6 +78,16 @@
     "boardTail": true,
     "herdr": true
   },
+  "reactors": [
+    {
+      "name": "log-blocked-tasks",
+      "enabled": false,
+      "on": "task.blocked",
+      "match": { "channel": "projects/" },
+      "run": { "command": ["logger", "-t", "bordr-swarm"], "timeoutSeconds": 10 },
+      "cooldownSeconds": 30
+    }
+  ],
   "machines": {
     "main-machine": {
       "role": "main",
