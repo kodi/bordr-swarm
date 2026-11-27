@@ -285,7 +285,7 @@ Recommendation: a follow-up plan after Plan C that introduces `{ kind: "stage" }
 
 ### Slice 9: Docs
 
-Status: `[ ]` Not started
+Status: `[x]` Done
 
 - Update `docs/architecture.md` (diagrams and the polling language), README (latency and "what it feels like" claims, reactor configuration), `AGENTS.md` (bus, reactor and source conventions), and the setup guides if any command changed.
 - Verification: `npm run check`; read the docs against the running system.
@@ -366,6 +366,7 @@ Status: `[ ]` Not started
   - Lead runs configured effects after triage in the same tick (`runDeferredEffects`), so 👀 and Lead prompts are never delayed by a slow command. Dry-run logs instead of running.
   - Manual check: a non-dry-run Lead Watcher on scratch channels with `{ on: "message.posted", match: { channel: "scratch/..." }, run: { command: ["append.sh", "<file>"] } }` appended the event JSON about 5s after the post (behind that tick's triage). Process note: its startup catch-up also picked up an earlier probe post in the scratch inbox and spawned a real Lead tab. I closed it before it was prompted; use a fresh inbox channel for probes like this.
 - 2026-11-27 (Slice 8): not implemented; deferred to a follow-up plan per the scope guard. The design note under Slice 8 records the proposed `Stage` interface and the reasons: `TaskPhase`'s review variants are fixed by the FSM and reviewer tests and by the v1 persisted state, and Plan C rewrites review signal detection. No code changed for this slice.
+- 2026-11-27 (Slice 9): `docs/architecture.md` gains "Live Events, Wake-ups, and Reactors" (with a diagram) and drops the polling language from the overview diagram, the lifecycle sequence, and the component descriptions. The README's "What It Feels Like" now describes the event-driven latency, and a new "Live Events and Reactors" section shows reactor configuration. `AGENTS.md` records the bus, source, and reactor conventions. No command changed, so the setup guides are untouched.
 
 ## Next Slice
 
