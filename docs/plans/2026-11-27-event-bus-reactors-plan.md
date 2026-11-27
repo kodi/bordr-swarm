@@ -131,7 +131,7 @@ interface Reactor {
 
 ### Slice 1: Board tail source
 
-Status: `[ ]` Not started
+Status: `[x]` Done
 
 - Goal: a supervised, resumable stream of typed Board events.
 - Why here: it proves the riskiest external assumption and nothing else depends on Herdr.
@@ -295,6 +295,12 @@ Status: `[ ]` Not started
 ## Working Notes
 
 - 2026-11-27: Plan written from a code review. The tail event envelope, the sampled event types, the process-group kill requirement, the Herdr socket framing and the `events.subscribe` response were checked by hand on one machine (Vercel CLI 66.6.0, Herdr 0.9.5). Nothing was run end to end and no code has been changed.
+
+- 2026-11-27 (Slice 1): `src/bus/events.ts` (`SwarmEvent`, `parseBoardTailLine`, `LineSplitter`, `parseHerdrEventLine`), `src/bus/board-tail-source.ts` (`BoardTailSource`), `src/bus/timers.ts` (injectable `Timers`). `BoardClient.buildTailCommand` builds the args with the same `--url`/`--name`/`--scope` handling as every other call (so `vb tail` works in the e2e stack). `BoardMessageSchema` gained optional `re`, `thread`, and `labels`. Fixture: `tests/fixtures/board-tail-sample.ndjson` (one sanitized live event per observed type).
+  - **OQ3:** a live 100-event sample contained `message.posted`, `message.edited`, `reaction.added`, and `task.{created,ready,claimed,completed,failed,blocked,expired,released,canceled}`. A lapsed lease is `task.expired` (the message snapshot then says `ready`). `task.unblocked` and `task.renewed` were not in the sample; both are typed ops, and any other `task.*` maps to `op: "other"`. Each task event carries the root message snapshot (with `task { state, claim, blocked, ... }`) as of the event, so `normalizeBoardTask({ message })` works unchanged.
+  - **OQ2:** a rejected `--after` (a bogus string or a malformed `x1.` cursor) makes the CLI exit with code 2 and print a _pretty-printed_ (multi-line) JSON error on stdout with `"reason": "invalid_cursor"` (`after: <value> isn't a cursor here or a message's ID`). A message ID is accepted as `--after` too. An old message ID from many hours earlier was still accepted and replayed what followed it; how long a cursor stays valid was not determined beyond that. The supervisor detects the error line, calls `onCursorRejected`, and restarts without `--after`.
+  - **OQ1:** not verified (no way to cut the network safely on this host). The supervisor restarts the child with capped exponential backoff (1s doubling to 60s, reset once the stream has been up for 3s or delivers an event) and has a stall watchdog (default 10 min without output): it restarts the stream quietly, without a health transition, resuming from the last cursor.
+  - Stop sends `SIGTERM` to the process group (spawned `detached: true`), escalates to `SIGKILL` after 3s, and never restarts afterwards. A manual run against the live board printed the reply posted from another shell about 2s after posting, and `pgrep` found no `board tail` process after stop.
 
 ## Next Slice
 

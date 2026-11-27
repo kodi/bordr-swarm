@@ -638,6 +638,14 @@ export const BoardMessageSchema = z
     text: z.string().default(""),
     createdAt: z.string().optional(),
     deleted: z.boolean().optional(),
+    re: z
+      .string()
+      .nullable()
+      .optional()
+      .catch(undefined)
+      .describe("Root message ID when this message is a reply; null/absent for a thread root."),
+    thread: z.string().nullable().optional().catch(undefined),
+    labels: z.unknown().optional(),
     by: z
       .object({
         actor: z.string().optional(),
