@@ -161,7 +161,7 @@ Status: `[x]` Done
 
 ### Slice 3: Bus core and wake scheduler
 
-Status: `[ ]` Not started
+Status: `[x]` Done
 
 - Goal: one place where events are published, fanned out, and turned into debounced wake-ups.
 - Why here: both daemons need it before either can move.
@@ -307,6 +307,10 @@ Status: `[ ]` Not started
   - Health follows the main connection: healthy on `subscription_started`, unhealthy (logged once until it recovers) on connect failure, a rejected or unanswered subscribe (10s), an unparseable line, or a close. Every connection reconnects with capped backoff and re-subscribes. A non-local `herdrTarget` disables the source.
   - **OQ5:** not verified (needs a live agent in a `--no-focus` pane). The CLI reconcile still covers it.
   - Manual check: the source against the local server printed `herdr.tab_closed` for a scratch tab closed from another shell.
+- 2026-11-27 (Slice 3): `src/bus/bus.ts` (`Bus`, `SourceHealth`, `selectReconcileIntervalMs`), `src/bus/scheduler.ts` (`WakeScheduler`), `src/bus/fs-watch-source.ts` (`FsWatchSource`). Config: `lead.reconcileIntervalSeconds`, `workerDefaults.reconcileIntervalSeconds` (optional, default 60 via `DEFAULT_RECONCILE_INTERVAL_SECONDS`), and a top-level `events: { boardTail, herdr }` kill switch (both on when omitted). The keys are optional in the resolved `SwarmConfig` type so existing test fixtures compile unchanged.
+  - Deviation: there is no separate `TimerSource`. The scheduler owns the periodic timer and passes `periodic: true` to the tick it starts, so the event union keeps `timer.reconcile` only for reactors. The periodic deadline is measured from the previous periodic run, so a steady stream of events cannot postpone the full reconcile forever.
+  - Deviation: `selectReconcileIntervalMs` keeps the poll cadence while time-based work is in flight (dispatcher with tracked tasks, Lead with open sessions). Idle reminders, lead idle-close, and startup grace are clock-driven transitions with no event behind them; stretching ticks to 60s would delay them. The slow interval applies when the machine is idle, which is where the polling cost was.
+  - `FsWatchSource` watches the parent directory (atomic `rename` replaces the inode). `prompts/` is not watched: both prompt templates are already read from disk at every spawn.
 
 ## Next Slice
 

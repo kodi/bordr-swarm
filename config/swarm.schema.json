@@ -119,9 +119,15 @@
         },
         "pollIntervalSeconds": {
           "default": 10,
-          "description": "Seconds between deterministic Lead Watcher checks for new #inbox messages, @lead mentions, and blocked tasks (0 LLM tokens while idle).",
+          "description": "Seconds between deterministic Lead Watcher checks for new #inbox messages, @lead mentions, and blocked tasks (0 LLM tokens while idle). With live Board events healthy this is used only while Lead sessions are open (for idle-close timing); otherwise it is the polling fallback.",
           "type": "integer",
           "minimum": 3,
+          "maximum": 9007199254740991
+        },
+        "reconcileIntervalSeconds": {
+          "description": "Seconds between full Lead Watcher reconciles (channel reads) while the live Board event stream is healthy. Events wake Lead immediately; this is the safety net. Default 60.",
+          "type": "integer",
+          "minimum": 5,
           "maximum": 9007199254740991
         },
         "maxConcurrentSessions": {
@@ -306,9 +312,15 @@
         },
         "pollIntervalSeconds": {
           "default": 15,
-          "description": "Seconds between dispatcher reconciliation and task-discovery ticks.",
+          "description": "Seconds between dispatcher reconciliation and task-discovery ticks when live Board/Herdr events are unavailable, and while workers are running (idle reminders and lease renewals are time-based).",
           "type": "integer",
           "minimum": 3,
+          "maximum": 9007199254740991
+        },
+        "reconcileIntervalSeconds": {
+          "description": "Seconds between full dispatcher reconciles on an idle machine while live Board and Herdr events are healthy (events wake the dispatcher immediately; this is the safety net). Default 60.",
+          "type": "integer",
+          "minimum": 5,
           "maximum": 9007199254740991
         },
         "idleTimeoutSeconds": {
@@ -328,6 +340,23 @@
       },
       "additionalProperties": false,
       "description": "Default behavior and selectable agent CLI profiles for ephemeral task workers."
+    },
+    "events": {
+      "type": "object",
+      "properties": {
+        "boardTail": {
+          "default": true,
+          "description": "Follow `vercel board tail --json` so Board activity wakes the daemons immediately. `false` uses polling only.",
+          "type": "boolean"
+        },
+        "herdr": {
+          "default": true,
+          "description": "Subscribe to the local Herdr socket for tab, pane, and agent-status events (only for `herdrTarget: \"local\"`). `false` uses CLI polling only.",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Live event sources. Events are hints that trigger an immediate reconcile; periodic polling remains the safety net."
     },
     "machines": {
       "type": "object",

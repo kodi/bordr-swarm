@@ -7,6 +7,7 @@ import {
   SwarmConfigSchema,
   type BoardConfig,
   type EffortLevel,
+  type EventsConfig,
   type LeadConfig,
   type MachineOs,
   type MachineRole,
@@ -19,6 +20,7 @@ import {
 export type {
   BoardConfig,
   EffortLevel,
+  EventsConfig,
   LeadConfig,
   MachineOs,
   MachineRole,
@@ -54,6 +56,8 @@ export interface WorkerDefaultsConfig {
   keepTabOnBlockedOrFailed: boolean;
   maxParkedTabs: number;
   pollIntervalSeconds: number;
+  /** Full-reconcile interval while live events are healthy (default 60). */
+  reconcileIntervalSeconds?: number;
   idleTimeoutSeconds: number;
   claimWaitSeconds: number;
 }
@@ -72,7 +76,17 @@ export interface SwarmConfig {
   board: BoardConfig;
   lead: LeadConfig;
   workerDefaults: WorkerDefaultsConfig;
+  /** Live event sources (both on when omitted). */
+  events?: EventsConfig;
   machines: Record<string, MachineConfig>;
+}
+
+/** Default for `lead.reconcileIntervalSeconds` and `workerDefaults.reconcileIntervalSeconds`. */
+export const DEFAULT_RECONCILE_INTERVAL_SECONDS = 60;
+
+/** Resolved live-event settings (`events` omitted means both sources on). */
+export function resolveEventsConfig(swarm: Pick<SwarmConfig, "events">): EventsConfig {
+  return { boardTail: swarm.events?.boardTail ?? true, herdr: swarm.events?.herdr ?? true };
 }
 
 export interface ResolvedWorkerRuntime {
@@ -233,6 +247,7 @@ export function parseSwarmConfig(input: unknown, sourceLabel = "swarm.json"): Sw
       agents: normalizedAgents,
       reviewer: normalizedReviewer,
     },
+    ...(parsed.events ? { events: parsed.events } : {}),
     machines,
   };
 }

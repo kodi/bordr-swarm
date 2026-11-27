@@ -20,6 +20,7 @@
     "permissionMode": "auto",
     "workspaceDir": "~/swarm-hq",
     "pollIntervalSeconds": 10,
+    "reconcileIntervalSeconds": 60,
     "maxConcurrentSessions": 1,
     "idleCloseSeconds": 15,
     "maxParkedTabs": 4
@@ -69,8 +70,13 @@
     "keepTabOnBlockedOrFailed": true,
     "maxParkedTabs": 4,
     "pollIntervalSeconds": 15,
+    "reconcileIntervalSeconds": 60,
     "idleTimeoutSeconds": 30,
     "claimWaitSeconds": 30
+  },
+  "events": {
+    "boardTail": true,
+    "herdr": true
   },
   "machines": {
     "main-machine": {

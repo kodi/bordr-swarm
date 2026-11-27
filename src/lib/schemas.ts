@@ -291,7 +291,15 @@ export const LeadConfigSchema = z
       .min(3)
       .default(10)
       .describe(
-        "Seconds between deterministic Lead Watcher checks for new #inbox messages, @lead mentions, and blocked tasks (0 LLM tokens while idle).",
+        "Seconds between deterministic Lead Watcher checks for new #inbox messages, @lead mentions, and blocked tasks (0 LLM tokens while idle). With live Board events healthy this is used only while Lead sessions are open (for idle-close timing); otherwise it is the polling fallback.",
+      ),
+    reconcileIntervalSeconds: z
+      .number()
+      .int()
+      .min(5)
+      .optional()
+      .describe(
+        "Seconds between full Lead Watcher reconciles (channel reads) while the live Board event stream is healthy. Events wake Lead immediately; this is the safety net. Default 60.",
       ),
     maxConcurrentSessions: z
       .number()
@@ -401,7 +409,17 @@ export const WorkerDefaultsConfigSchema = z
       .int()
       .min(3)
       .default(15)
-      .describe("Seconds between dispatcher reconciliation and task-discovery ticks."),
+      .describe(
+        "Seconds between dispatcher reconciliation and task-discovery ticks when live Board/Herdr events are unavailable, and while workers are running (idle reminders and lease renewals are time-based).",
+      ),
+    reconcileIntervalSeconds: z
+      .number()
+      .int()
+      .min(5)
+      .optional()
+      .describe(
+        "Seconds between full dispatcher reconciles on an idle machine while live Board and Herdr events are healthy (events wake the dispatcher immediately; this is the safety net). Default 60.",
+      ),
     idleTimeoutSeconds: z
       .number()
       .int()
@@ -462,12 +480,33 @@ export const MachineConfigSchema = z
   .strict()
   .describe("Configuration for a single physical or virtual machine in the swarm.");
 
+export const EventsConfigSchema = z
+  .object({
+    boardTail: z
+      .boolean()
+      .default(true)
+      .describe(
+        "Follow `vercel board tail --json` so Board activity wakes the daemons immediately. `false` uses polling only.",
+      ),
+    herdr: z
+      .boolean()
+      .default(true)
+      .describe(
+        'Subscribe to the local Herdr socket for tab, pane, and agent-status events (only for `herdrTarget: "local"`). `false` uses CLI polling only.',
+      ),
+  })
+  .strict()
+  .describe(
+    "Live event sources. Events are hints that trigger an immediate reconcile; periodic polling remains the safety net.",
+  );
+
 export const SwarmConfigSchema = z
   .object({
     $schema: z.string().optional().describe("Optional JSON Schema path for editor validation."),
     board: BoardConfigSchema.prefault({}),
     lead: LeadConfigSchema.prefault({}),
     workerDefaults: WorkerDefaultsConfigSchema.prefault({}),
+    events: EventsConfigSchema.optional(),
     machines: z
       .record(z.string().min(1), MachineConfigSchema)
       .refine(
@@ -1018,6 +1057,7 @@ export type LeadConfig = z.infer<typeof LeadConfigSchema>;
 export type RawWorkerDefaultsConfig = z.infer<typeof WorkerDefaultsConfigSchema>;
 export type RawMachineConfig = z.infer<typeof MachineConfigSchema>;
 export type RawSwarmConfig = z.infer<typeof SwarmConfigSchema>;
+export type EventsConfig = z.infer<typeof EventsConfigSchema>;
 export type ProjectConfig = z.infer<typeof ProjectConfigSchema>;
 export type ProjectsConfig = z.infer<typeof ProjectsConfigSchema>;
 export type BoardTaskState = z.infer<typeof BoardTaskStateSchema>;
