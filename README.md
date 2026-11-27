@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%E2%89%A524-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey)](#scale-out-to-multiple-machines)
-[![TypeScript](https://img.shields.io/badge/TypeScript-no_build_step-3178C6?logo=typescript&logoColor=white)](#engineering--toolchain)
+[![TypeScript](docs/assets/badge-typescript.svg)](#engineering--toolchain)
 
 **Turn your laptop, Mac Studio, and spare Linux box into one team of coding agents. Nothing burns tokens while it waits, and you only hear about work that needs you.**
 
