@@ -209,7 +209,7 @@ Status: `[x]` Done
 
 ### Slice 6: Reactor registry for built-in reactions
 
-Status: `[ ]` Not started
+Status: `[x]` Done
 
 - Goal: every built-in "when X, do Y" is a named reactor with its own tests.
 - Why here: the bus exists and both daemons use it, so this is a refactor with a stable target.
@@ -323,6 +323,9 @@ Status: `[ ]` Not started
   - Pruning: `seenThreadLastSeenMs` is refreshed by channel reads and live events; markers not refreshed for 14 days are dropped (legacy entries start their clock on first load). The loader is tolerant: a pre-bus state file loads unchanged.
   - Lead keeps the 10s poll cadence while sessions are open or events are queued (idle-close, startup grace); idle with a healthy stream it reconciles every `reconcileIntervalSeconds`. Herdr events for Lead's own panes or tabs wake it, and Lead session panes are watched for agent-status changes.
   - Manual check (dry run against the live board, inbox pointed at a scratch channel, intervals 120s): the post was detected less than a second after `vercel board post` returned, with no channel read; `SIGTERM` stopped it cleanly with no `board tail` child left.
+- 2026-11-27 (Slice 6): `src/bus/reactor.ts` holds the `Reactor` interface, `ReactorRegistry` (per-reactor isolation for both `matches` and `react`, duplicate names rejected), the `ReactorEffect` union, and `executeEffects` (one handler per effect type; failures and unsupported effect types are logged, never fatal). Built-ins: `src/reactors/dispatcher-wake.ts` (`dispatcher-wake`, `projects-reload`) and `src/reactors/lead.ts` (`inbox-ack`, `lead-wake`, `registry-sync`, `lead-session-wake`). Each daemon logs its reactor list at startup.
+  - Deviation from the interface sketch: configuration (channels, profile, paths) is bound when a reactor is created, and `ctx` carries only the daemon's live read-only view (tracked task, pane, and tab IDs; Lead session panes). That keeps `matches(event)` pure and usable at receipt time.
+  - Lead runs Board-event reactors when the tick drains its queue, after the replay/duplicate check, so a reactor never sees an already-handled message. At receipt it only asks `matchesAny` to decide whether to wake. Lead's own effects (`lead_event`, `react`, `registry_sync`) feed triage directly; other effects are deferred until after triage.
 
 ## Next Slice
 

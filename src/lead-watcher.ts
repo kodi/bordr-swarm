@@ -9,6 +9,14 @@ import {
   type DaemonEventWiring,
 } from "./bus/daemon-events.ts";
 import type { SwarmEvent } from "./bus/events.ts";
+import {
+  describeReactors,
+  executeEffects,
+  ReactorRegistry,
+  type CollectedEffect,
+  type EffectHandlers,
+  type Reactor,
+} from "./bus/reactor.ts";
 import { WakeScheduler, type WakeRunInfo } from "./bus/scheduler.ts";
 import { realTimers, type Timers } from "./bus/timers.ts";
 import { BoardClient, type BoardMessage, type BoardThreadSummary } from "./lib/board.ts";
@@ -28,11 +36,8 @@ import {
   collectLeadEvents,
   createEmptyLeadState,
   enqueueLeadEvents,
-  hasProfileReaction,
-  isHumanMessage,
   isMessageAlreadyHandled,
   LEAD_ACK_EMOJI,
-  leadWakeEventFromBoardEvent,
   selectMessagesToAcknowledge,
   selectThreadsNeedingRead,
   type LeadWakeEvent,
@@ -52,6 +57,7 @@ import {
   readAllMachineRegistryEntries,
 } from "./lib/registry.ts";
 import { assertNever } from "./lib/session-fsm.ts";
+import { createBuiltinLeadReactors, type LeadReactorContext } from "./reactors/lead.ts";
 
 const LEAD_STARTUP_GRACE_MS = 20_000;
 
@@ -182,6 +188,8 @@ export class LeadWatcher {
   private readonly events: DaemonEventWiring | null;
   private readonly timers: Timers;
   private scheduler: WakeScheduler | null = null;
+  /** Built-in (and configured) "when X, do Y" rules. */
+  readonly reactors: ReactorRegistry<LeadReactorContext>;
 
   constructor(params: {
     swarm: SwarmConfig;
@@ -195,6 +203,8 @@ export class LeadWatcher {
     /** Live Board/Herdr events; omitted, Lead Watcher polls exactly as before. */
     events?: DaemonEventWiring;
     timers?: Timers;
+    /** Additional reactors (config-driven ones), run after the built-ins. */
+    extraReactors?: Array<Reactor<LeadReactorContext>>;
   }) {
     this.swarm = params.swarm;
     this.board = params.board;
@@ -207,6 +217,26 @@ export class LeadWatcher {
     this.state = loadLeadWatcherState(params.statePath);
     this.events = params.events ?? null;
     this.timers = params.timers ?? realTimers;
+    this.reactors = new ReactorRegistry<LeadReactorContext>(
+      [
+        ...createBuiltinLeadReactors({
+          inboxChannel: this.swarm.board.inboxChannel,
+          projectChannelPrefix: this.swarm.board.projectChannelPrefix,
+          registryChannel: this.swarm.board.registryChannel,
+          leadProfile: this.swarm.lead.boardProfile,
+        }),
+        ...(params.extraReactors ?? []),
+      ],
+      log,
+    );
+  }
+
+  private reactorContext(): LeadReactorContext {
+    const sessions = [...this.sessions.values()];
+    return {
+      sessionPaneIds: new Set(sessions.map((s) => s.paneId)),
+      sessionTabIds: new Set(sessions.map((s) => s.tabId)),
+    };
   }
 
   /** Persisted Board tail cursor (resume point for `tail --after`). */
@@ -256,40 +286,22 @@ export class LeadWatcher {
       case "board.task":
       case "board.reaction":
       case "board.other":
+        // Effects for Board events are computed when the tick drains the queue (after
+        // de-duplication); here we only decide whether the event is worth waking for.
         this.liveQueue.push(event);
-        if (this.isRelevantBoardEvent(event)) this.scheduler?.wake(event.kind);
+        if (this.reactors.matchesAny(event)) this.scheduler?.wake(event.kind);
         return;
-      case "herdr.agent_status":
-      case "herdr.pane_exited":
-      case "herdr.pane_closed":
-        if ([...this.sessions.values()].some((s) => s.paneId === event.paneId)) {
-          this.scheduler?.wake(event.kind);
+      default: {
+        const effects = this.reactors.collect(event, this.reactorContext());
+        if (effects.length > 0) {
+          void executeEffects(
+            effects,
+            { wake: (effect) => this.scheduler?.wake(effect.reason) },
+            log,
+          );
         }
-        return;
-      case "herdr.tab_closed":
-        if ([...this.sessions.values()].some((s) => s.tabId === event.tabId)) {
-          this.scheduler?.wake(event.kind);
-        }
-        return;
-      case "fs.changed":
-      case "timer.reconcile":
-        return;
-      default:
-        assertNever(event);
+      }
     }
-  }
-
-  private isRelevantBoardEvent(event: SwarmEvent): boolean {
-    const board = this.swarm.board;
-    if (event.kind === "board.message") {
-      const channel = (event.message.channel ?? "").replace(/^#/, "");
-      return (
-        channel === board.inboxChannel ||
-        channel === board.registryChannel ||
-        channel.startsWith(board.projectChannelPrefix)
-      );
-    }
-    return event.kind === "board.task" && event.op === "blocked";
   }
 
   /**
@@ -299,60 +311,61 @@ export class LeadWatcher {
    */
   private drainLiveEvents(): {
     events: LeadWakeEvent[];
-    ackIds: string[];
+    acks: Array<{ messageId: string; threadId: string }>;
     registryChanged: boolean;
   } {
     const queued = this.liveQueue;
     this.liveQueue = [];
     const board = this.swarm.board;
-    const leadProfile = this.swarm.lead.boardProfile;
     const ctx = {
       inboxChannel: board.inboxChannel,
       projectChannelPrefix: board.projectChannelPrefix,
-      registryChannel: board.registryChannel,
-      leadProfile,
       nowMs: this.now(),
     };
     const events: LeadWakeEvent[] = [];
-    const ackIds: string[] = [];
+    const acks: Array<{ messageId: string; threadId: string }> = [];
     let registryChanged = false;
 
     for (const event of queued) {
-      if (event.kind === "board.message") {
-        const channel = (event.message.channel ?? "").replace(/^#/, "");
-        if (channel === board.registryChannel) registryChanged = true;
-        if (isMessageAlreadyHandled(event.message, this.state)) {
-          this.state = applyLiveBoardEventToState(this.state, event, ctx);
-          continue;
+      const duplicate =
+        (event.kind === "board.message" && isMessageAlreadyHandled(event.message, this.state)) ||
+        (event.kind === "board.task" &&
+          event.op === "blocked" &&
+          this.state.seenBlockedTaskIds.includes(event.task.id));
+      const effects: CollectedEffect[] = duplicate
+        ? []
+        : this.reactors.collect(event, this.reactorContext());
+
+      const handledIds: string[] = [];
+      for (const { reactor, effect } of effects) {
+        switch (effect.type) {
+          case "lead_event":
+            events.push(effect.event);
+            if (effect.event.latestMessageId) handledIds.push(effect.event.latestMessageId);
+            break;
+          case "react":
+            acks.push({ messageId: effect.messageId, threadId: effect.threadId });
+            break;
+          case "registry_sync":
+            registryChanged = true;
+            break;
+          case "wake":
+            break;
+          default:
+            this.deferredEffects.push({ reactor, effect });
         }
       }
-      if (
-        event.kind === "board.task" &&
-        event.op === "blocked" &&
-        this.state.seenBlockedTaskIds.includes(event.task.id)
-      ) {
-        this.state = applyLiveBoardEventToState(this.state, event, ctx);
-        continue;
-      }
-
-      const wake = leadWakeEventFromBoardEvent(event, ctx);
-      if (wake) events.push(wake);
-      if (
-        wake?.kind === "inbox" &&
-        event.kind === "board.message" &&
-        isHumanMessage(event.message, leadProfile) &&
-        !hasProfileReaction(event.message, leadProfile)
-      ) {
-        ackIds.push(event.message.id);
-      }
-      this.state = applyLiveBoardEventToState(
-        this.state,
-        event,
-        ctx,
-        wake?.latestMessageId ? [wake.latestMessageId] : [],
-      );
+      this.state = applyLiveBoardEventToState(this.state, event, ctx, handledIds);
     }
-    return { events, ackIds, registryChanged };
+    return { events, acks, registryChanged };
+  }
+
+  /** Effects other than Lead's own (commands, posts) run after the tick's triage. */
+  private deferredEffects: CollectedEffect[] = [];
+
+  /** Handlers for effects that are not part of Lead's triage (config-driven reactors). */
+  protected extraEffectHandlers(): EffectHandlers {
+    return {};
   }
 
   private async reactAck(messageId: string, threadId: string): Promise<void> {
@@ -809,9 +822,8 @@ export class LeadWatcher {
     }
 
     // 👀 first: acknowledge new human #inbox messages before any Lead session is spawned/prompted
-    for (const messageId of live.ackIds) {
-      const ev = live.events.find((e) => e.latestMessageId === messageId);
-      await this.reactAck(messageId, ev?.threadId ?? messageId);
+    for (const ack of live.acks) {
+      await this.reactAck(ack.messageId, ack.threadId);
     }
 
     const events: LeadWakeEvent[] = [...live.events];
@@ -842,6 +854,13 @@ export class LeadWatcher {
 
     await this.reconcileSessions();
     await this.dispatchQueuedThreads();
+    await this.runDeferredEffects();
+  }
+
+  private async runDeferredEffects(): Promise<void> {
+    const effects = this.deferredEffects;
+    this.deferredEffects = [];
+    if (effects.length > 0) await executeEffects(effects, this.extraEffectHandlers(), log);
   }
 
   /** Full poll of #inbox, project channels, and blocked tasks (the pre-bus detection path). */
@@ -914,6 +933,8 @@ export class LeadWatcher {
       "INFO",
       `Starting Lead Watcher (mode=ephemeral, inbox=#${this.swarm.board.inboxChannel}, prefix=${this.swarm.board.projectChannelPrefix}, profile=${this.swarm.lead.boardProfile}, maxConcurrent=${this.swarm.lead.maxConcurrentSessions}, idleClose=${this.swarm.lead.idleCloseSeconds}s, poll=${this.swarm.lead.pollIntervalSeconds}s, dryRun=${this.dryRun})`,
     );
+
+    if (!once) log("INFO", describeReactors("Lead Watcher", this.reactors.names));
 
     if (!this.dryRun) {
       await this.board

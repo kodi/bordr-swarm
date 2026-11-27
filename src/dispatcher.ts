@@ -9,6 +9,13 @@ import {
   type DaemonEventWiring,
 } from "./bus/daemon-events.ts";
 import type { SwarmEvent } from "./bus/events.ts";
+import {
+  describeReactors,
+  executeEffects,
+  ReactorRegistry,
+  type EffectHandlers,
+  type Reactor,
+} from "./bus/reactor.ts";
 import { WakeScheduler } from "./bus/scheduler.ts";
 import { realTimers, type Timers } from "./bus/timers.ts";
 import { BoardClient, type BoardTask } from "./lib/board.ts";
@@ -74,7 +81,11 @@ import {
   type ActiveTask,
   type ThreadSignal,
 } from "./lib/task-fsm.ts";
-import { shouldWakeDispatcher } from "./reactors/dispatcher-wake.ts";
+import {
+  createDispatcherWakeReactor,
+  createProjectsReloadReactor,
+  type DispatcherWakeContext,
+} from "./reactors/dispatcher-wake.ts";
 
 const STARTUP_GRACE_MS = 20_000;
 /** Page size for open-task discovery; `listTasks` follows the cursor across pages. */
@@ -158,6 +169,8 @@ export class SwarmDispatcher {
   private readonly events: DaemonEventWiring | null;
   private readonly timers: Timers;
   private scheduler: WakeScheduler | null = null;
+  /** Built-in (and configured) "when X, do Y" rules, run for every bus event. */
+  readonly reactors: ReactorRegistry<DispatcherWakeContext>;
 
   constructor(params: {
     repoRoot: string;
@@ -176,6 +189,8 @@ export class SwarmDispatcher {
     /** Live Board/Herdr events; omitted, the dispatcher polls exactly as before. */
     events?: DaemonEventWiring;
     timers?: Timers;
+    /** Additional reactors (config-driven ones), run after the built-ins. */
+    extraReactors?: Array<Reactor<DispatcherWakeContext>>;
   }) {
     this.repoRoot = params.repoRoot;
     this.swarm = params.swarm;
@@ -192,6 +207,16 @@ export class SwarmDispatcher {
     this.statePath = params.dryRun ? null : (params.statePath ?? null);
     this.events = params.events ?? null;
     this.timers = params.timers ?? realTimers;
+    this.reactors = new ReactorRegistry<DispatcherWakeContext>(
+      [
+        createDispatcherWakeReactor({
+          projectChannelPrefix: this.swarm.board.projectChannelPrefix,
+        }),
+        createProjectsReloadReactor({ projectsConfigPath: this.projectsConfigPath }),
+        ...(params.extraReactors ?? []),
+      ],
+      log,
+    );
     if (this.projectsConfigPath && existsSync(this.projectsConfigPath)) {
       this.lastProjectsMtimeMs = statSync(this.projectsConfigPath).mtimeMs;
     }
@@ -248,14 +273,21 @@ export class SwarmDispatcher {
       return;
     }
     const { panes, tabs } = this.getTrackedHerdrIds();
-    const wake = shouldWakeDispatcher(event, {
-      projectChannelPrefix: this.swarm.board.projectChannelPrefix,
+    const effects = this.reactors.collect(event, {
       trackedTaskIds: this.getTrackedTaskIds(),
       trackedPaneIds: panes,
       trackedTabIds: tabs,
-      projectsConfigPath: this.projectsConfigPath,
     });
-    if (wake) this.scheduler?.wake(event.kind);
+    if (effects.length > 0) void executeEffects(effects, this.effectHandlers(), log);
+  }
+
+  /** How this dispatcher runs reactor effects (Lead-only effects are not handled here). */
+  private effectHandlers(): EffectHandlers {
+    return {
+      wake: (effect) => this.scheduler?.wake(effect.reason),
+      // The tick's mtime check decides whether projects.json really changed.
+      projects_reload: () => this.scheduler?.wake("projects_reload"),
+    };
   }
 
   /** Keeps per-pane Herdr agent-status subscriptions in line with what is tracked. */
@@ -1024,6 +1056,8 @@ export class SwarmDispatcher {
       "INFO",
       `Starting Worker Dispatcher on "${this.machineName}" (herdrTarget=${machineCfg.herdrTarget}, maxWorkers=${machineCfg.maxWorkers}, defaultAgent=${this.swarm.workerDefaults.defaultAgent}, installedAgents=[${[...this.availableAgentKinds].join(",")}], dryRun=${this.dryRun})`,
     );
+
+    if (!once) log("INFO", describeReactors("Dispatcher", this.reactors.names));
 
     if (machineCfg.maxWorkers <= 0 && !this.dryRun) {
       log(

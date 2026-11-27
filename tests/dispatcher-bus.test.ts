@@ -244,7 +244,6 @@ describe("shouldWakeDispatcher", () => {
     trackedTaskIds: new Set(["msg_tracked_1"]),
     trackedPaneIds: new Set(["w1:p1"]),
     trackedTabIds: new Set(["w1:t1"]),
-    projectsConfigPath: "/cfg/projects.json",
   };
   const taskEvent = (id: string, op: string, channel = "projects/a"): SwarmEvent => ({
     kind: "board.task",
@@ -263,7 +262,7 @@ describe("shouldWakeDispatcher", () => {
     assert.equal(shouldWakeDispatcher(taskEvent("msg_tracked_1", "completed"), ctx), true);
   });
 
-  it("wakes for replies in tracked threads, tracked panes/tabs, and projects.json changes", () => {
+  it("wakes for replies in tracked threads and tracked panes/tabs", () => {
     const reply = (re: string): SwarmEvent => ({
       kind: "board.message",
       op: "posted",
@@ -274,11 +273,11 @@ describe("shouldWakeDispatcher", () => {
     assert.equal(shouldWakeDispatcher(reply("msg_other_1"), ctx), false);
     assert.equal(shouldWakeDispatcher({ kind: "herdr.pane_exited", paneId: "w1:p1" }, ctx), true);
     assert.equal(shouldWakeDispatcher({ kind: "herdr.tab_closed", tabId: "w1:t2" }, ctx), false);
+    // projects.json changes are the `projects-reload` reactor's job (tests/reactors.test.ts).
     assert.equal(
       shouldWakeDispatcher({ kind: "fs.changed", path: "/cfg/projects.json" }, ctx),
-      true,
+      false,
     );
-    assert.equal(shouldWakeDispatcher({ kind: "fs.changed", path: "/cfg/swarm.json" }, ctx), false);
     assert.equal(shouldWakeDispatcher({ kind: "timer.reconcile" }, ctx), false);
   });
 });
