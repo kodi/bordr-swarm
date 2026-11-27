@@ -192,7 +192,7 @@ Status: `[x]` Done
 
 ### Slice 5: Lead Watcher on the bus
 
-Status: `[ ]` Not started
+Status: `[x]` Done
 
 - Goal: no lost mentions, sub-second acknowledgement, and no per-channel polling.
 - Why here: it changes edge-triggered behavior, so it follows the lower-risk dispatcher move.
@@ -317,6 +317,12 @@ Status: `[ ]` Not started
   - Deviation: the `projects.json` mtime comparison stays as the reload decision; `FsWatchSource` only wakes the tick. A missed or spurious watch event then costs latency at most. Nothing new is persisted: the dispatcher is level-triggered and does not need a cursor.
   - A source that goes down or recovers logs one line (`Live events degraded (polling) [board=down, herdr=live]; periodic reconcile every 15s.`) and re-arms the periodic timer.
   - Manual check (dry run against the live board on a scratch prefix, intervals set to 120s): the tick for a newly created task ran about 4.5s after invoking `vercel board tasks create`, CLI round trip included, instead of up to 120s. `SIGTERM` stopped it at once and `pgrep` found no `board tail` child afterwards.
+- 2026-11-27 (Slice 5): Lead Watcher tails the whole board (unfiltered), resuming from `LeadWatcherState.tailCursor`. Board events are **queued** by the bus subscriber and drained, in order, at the start of the next tick, so live handling and the catch-up reads never interleave. An event-woken tick does no channel reads: it drains live events (👀 directly on the message ID, wake events, registry sync when the registry channel changed), then reconciles sessions and dispatches. A periodic tick (first tick, interval, `tick()` with no argument, any tick while the Board stream is down, or after a rejected cursor via `requestReconcile`) also runs the old full poll (`collectCatchUpEvents`). The existing `tests/lead-watcher.test.ts` passes unmodified.
+  - Missed-mention fix: state keeps `seenThreadReplyCount`. `selectThreadsNeedingRead` picks project threads whose reply count advanced by more than one and whose latest message does not already wake Lead; those threads are read in full and every message after the seen marker is checked. Regression tests in `tests/lead-bus.test.ts` show the old latest-only check returns 0 events for mention-then-reply, and the new path returns the mention.
+  - De-duplication: `handledMessageIds` (last 1000) plus the seen markers. A live message is skipped if it is already handled or is its thread's seen marker (a replay after `--after`). The catch-up path skips handled IDs and advances markers so it does not report what the live path handled.
+  - Pruning: `seenThreadLastSeenMs` is refreshed by channel reads and live events; markers not refreshed for 14 days are dropped (legacy entries start their clock on first load). The loader is tolerant: a pre-bus state file loads unchanged.
+  - Lead keeps the 10s poll cadence while sessions are open or events are queued (idle-close, startup grace); idle with a healthy stream it reconciles every `reconcileIntervalSeconds`. Herdr events for Lead's own panes or tabs wake it, and Lead session panes are watched for agent-status changes.
+  - Manual check (dry run against the live board, inbox pointed at a scratch channel, intervals 120s): the post was detected less than a second after `vercel board post` returned, with no channel read; `SIGTERM` stopped it cleanly with no `board tail` child left.
 
 ## Next Slice
 

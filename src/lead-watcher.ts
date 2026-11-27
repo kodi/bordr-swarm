@@ -2,9 +2,19 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, unlinkSync, writeFileSy
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { selectReconcileIntervalMs } from "./bus/bus.ts";
+import {
+  createDaemonEventSources,
+  describeHealth,
+  type DaemonEventWiring,
+} from "./bus/daemon-events.ts";
+import type { SwarmEvent } from "./bus/events.ts";
+import { WakeScheduler, type WakeRunInfo } from "./bus/scheduler.ts";
+import { realTimers, type Timers } from "./bus/timers.ts";
 import { BoardClient, type BoardMessage, type BoardThreadSummary } from "./lib/board.ts";
 import {
   buildAgentCliArgs,
+  DEFAULT_RECONCILE_INTERVAL_SECONDS,
   loadProjectsConfig,
   loadSwarmConfig,
   resolveCurrentMachineName,
@@ -13,12 +23,18 @@ import {
 } from "./lib/config.ts";
 import { HerdrClient, type HerdrAgent, type HerdrTab } from "./lib/herdr.ts";
 import {
+  applyLiveBoardEventToState,
   buildLeadWakePrompt,
   collectLeadEvents,
   createEmptyLeadState,
   enqueueLeadEvents,
+  hasProfileReaction,
+  isHumanMessage,
+  isMessageAlreadyHandled,
   LEAD_ACK_EMOJI,
+  leadWakeEventFromBoardEvent,
   selectMessagesToAcknowledge,
+  selectThreadsNeedingRead,
   type LeadWakeEvent,
   type LeadWatcherState,
 } from "./lib/lead-events.ts";
@@ -71,12 +87,6 @@ function log(level: "INFO" | "WARN" | "ERROR", message: string): void {
   else console.log(line);
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolvePromise) => {
-    setTimeout(resolvePromise, ms);
-  });
-}
-
 function parsePendingByThread(raw: unknown): Record<string, LeadWakeEvent[]> {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     return {};
@@ -101,7 +111,20 @@ function parsePendingByThread(raw: unknown): Record<string, LeadWakeEvent[]> {
   return out;
 }
 
-function loadState(statePath: string): LeadWatcherState {
+function parseNumberRecord(raw: unknown): Record<string, number> {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return {};
+  const out: Record<string, number> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof v === "number" && Number.isFinite(v)) out[k] = v;
+  }
+  return out;
+}
+
+/**
+ * Loads Lead Watcher state. Tolerant: unknown or malformed fields fall back to empty values, so
+ * a state file from before the event bus (no cursor, counts, or handled IDs) loads unchanged.
+ */
+export function loadLeadWatcherState(statePath: string): LeadWatcherState {
   if (!existsSync(statePath)) {
     return createEmptyLeadState();
   }
@@ -114,6 +137,14 @@ function loadState(statePath: string): LeadWatcherState {
           : {},
       seenBlockedTaskIds: Array.isArray(raw.seenBlockedTaskIds) ? raw.seenBlockedTaskIds : [],
       pendingByThread: parsePendingByThread(raw.pendingByThread),
+      seenThreadReplyCount: parseNumberRecord(raw.seenThreadReplyCount),
+      seenThreadLastSeenMs: parseNumberRecord(raw.seenThreadLastSeenMs),
+      handledMessageIds: Array.isArray(raw.handledMessageIds)
+        ? raw.handledMessageIds.filter((id): id is string => typeof id === "string")
+        : [],
+      ...(typeof raw.tailCursor === "string" && raw.tailCursor
+        ? { tailCursor: raw.tailCursor }
+        : {}),
     };
   } catch (err) {
     log(
@@ -142,8 +173,15 @@ export class LeadWatcher {
   private state: LeadWatcherState;
   private sessions = new Map<string, LeadSession>();
   private stopping = false;
+  private readonly stopWaiters: Array<() => void> = [];
   private parkedLimitWarned = false;
   private lastCatalogFingerprint = "";
+  private lastPersistedJson = "";
+  /** Live Board events waiting for the next tick (drained in order at its start). */
+  private liveQueue: SwarmEvent[] = [];
+  private readonly events: DaemonEventWiring | null;
+  private readonly timers: Timers;
+  private scheduler: WakeScheduler | null = null;
 
   constructor(params: {
     swarm: SwarmConfig;
@@ -154,6 +192,9 @@ export class LeadWatcher {
     localProjectsPath?: string | null;
     dryRun: boolean;
     now?: () => number;
+    /** Live Board/Herdr events; omitted, Lead Watcher polls exactly as before. */
+    events?: DaemonEventWiring;
+    timers?: Timers;
   }) {
     this.swarm = params.swarm;
     this.board = params.board;
@@ -163,7 +204,172 @@ export class LeadWatcher {
     this.localProjectsPath = params.localProjectsPath ?? null;
     this.dryRun = params.dryRun;
     this.now = params.now ?? (() => Date.now());
-    this.state = loadState(params.statePath);
+    this.state = loadLeadWatcherState(params.statePath);
+    this.events = params.events ?? null;
+    this.timers = params.timers ?? realTimers;
+  }
+
+  /** Persisted Board tail cursor (resume point for `tail --after`). */
+  get tailCursor(): string | undefined {
+    return this.state.tailCursor;
+  }
+
+  /** The tail rejected our cursor: forget it and run a full catch-up reconcile. */
+  onTailCursorRejected(): void {
+    const { tailCursor: _dropped, ...rest } = this.state;
+    this.state = rest;
+    this.persistState();
+    log("WARN", "Board tail rejected the saved cursor; running a full catch-up reconcile.");
+    this.scheduler?.requestReconcile("cursor_rejected");
+  }
+
+  /** Periodic reconcile interval for the current source health and open sessions. */
+  currentIntervalMs(): number {
+    const lead = this.swarm.lead;
+    const hasQueued = Object.values(this.state.pendingByThread).some((l) => l.length > 0);
+    return selectReconcileIntervalMs({
+      sourcesHealthy: this.events?.health.allHealthy ?? false,
+      // Idle-close, startup grace, and queued follow-ups are clock-driven.
+      timeSensitiveWork: this.sessions.size > 0 || hasQueued,
+      pollMs: lead.pollIntervalSeconds * 1000,
+      reconcileMs: (lead.reconcileIntervalSeconds ?? DEFAULT_RECONCILE_INTERVAL_SECONDS) * 1000,
+    });
+  }
+
+  /**
+   * Bus subscriber. Board events are queued for the next tick (so live and catch-up handling
+   * never interleave) and wake it when they can matter to Lead; Herdr events for Lead's own
+   * panes or tabs wake it too.
+   */
+  handleEvent(event: SwarmEvent): void {
+    switch (event.kind) {
+      case "source.health":
+        if (this.events?.health.apply(event)) {
+          log(
+            event.healthy ? "INFO" : "WARN",
+            describeHealth(this.events.health, this.currentIntervalMs()),
+          );
+          this.scheduler?.refreshInterval();
+        }
+        return;
+      case "board.message":
+      case "board.task":
+      case "board.reaction":
+      case "board.other":
+        this.liveQueue.push(event);
+        if (this.isRelevantBoardEvent(event)) this.scheduler?.wake(event.kind);
+        return;
+      case "herdr.agent_status":
+      case "herdr.pane_exited":
+      case "herdr.pane_closed":
+        if ([...this.sessions.values()].some((s) => s.paneId === event.paneId)) {
+          this.scheduler?.wake(event.kind);
+        }
+        return;
+      case "herdr.tab_closed":
+        if ([...this.sessions.values()].some((s) => s.tabId === event.tabId)) {
+          this.scheduler?.wake(event.kind);
+        }
+        return;
+      case "fs.changed":
+      case "timer.reconcile":
+        return;
+      default:
+        assertNever(event);
+    }
+  }
+
+  private isRelevantBoardEvent(event: SwarmEvent): boolean {
+    const board = this.swarm.board;
+    if (event.kind === "board.message") {
+      const channel = (event.message.channel ?? "").replace(/^#/, "");
+      return (
+        channel === board.inboxChannel ||
+        channel === board.registryChannel ||
+        channel.startsWith(board.projectChannelPrefix)
+      );
+    }
+    return event.kind === "board.task" && event.op === "blocked";
+  }
+
+  /**
+   * Applies queued live Board events in order: derives Lead wake events (skipping messages the
+   * catch-up path or a replay already handled), collects 👀 targets, and advances seen markers
+   * and the tail cursor.
+   */
+  private drainLiveEvents(): {
+    events: LeadWakeEvent[];
+    ackIds: string[];
+    registryChanged: boolean;
+  } {
+    const queued = this.liveQueue;
+    this.liveQueue = [];
+    const board = this.swarm.board;
+    const leadProfile = this.swarm.lead.boardProfile;
+    const ctx = {
+      inboxChannel: board.inboxChannel,
+      projectChannelPrefix: board.projectChannelPrefix,
+      registryChannel: board.registryChannel,
+      leadProfile,
+      nowMs: this.now(),
+    };
+    const events: LeadWakeEvent[] = [];
+    const ackIds: string[] = [];
+    let registryChanged = false;
+
+    for (const event of queued) {
+      if (event.kind === "board.message") {
+        const channel = (event.message.channel ?? "").replace(/^#/, "");
+        if (channel === board.registryChannel) registryChanged = true;
+        if (isMessageAlreadyHandled(event.message, this.state)) {
+          this.state = applyLiveBoardEventToState(this.state, event, ctx);
+          continue;
+        }
+      }
+      if (
+        event.kind === "board.task" &&
+        event.op === "blocked" &&
+        this.state.seenBlockedTaskIds.includes(event.task.id)
+      ) {
+        this.state = applyLiveBoardEventToState(this.state, event, ctx);
+        continue;
+      }
+
+      const wake = leadWakeEventFromBoardEvent(event, ctx);
+      if (wake) events.push(wake);
+      if (
+        wake?.kind === "inbox" &&
+        event.kind === "board.message" &&
+        isHumanMessage(event.message, leadProfile) &&
+        !hasProfileReaction(event.message, leadProfile)
+      ) {
+        ackIds.push(event.message.id);
+      }
+      this.state = applyLiveBoardEventToState(
+        this.state,
+        event,
+        ctx,
+        wake?.latestMessageId ? [wake.latestMessageId] : [],
+      );
+    }
+    return { events, ackIds, registryChanged };
+  }
+
+  private async reactAck(messageId: string, threadId: string): Promise<void> {
+    const leadProfile = this.swarm.lead.boardProfile;
+    if (this.dryRun) {
+      log("INFO", `[dry-run] Would react ${LEAD_ACK_EMOJI} on ${messageId} as "${leadProfile}".`);
+      return;
+    }
+    try {
+      await this.board.react(messageId, LEAD_ACK_EMOJI, { asProfile: leadProfile });
+      log("INFO", `Reacted ${LEAD_ACK_EMOJI} on ${messageId} (thread ${threadId}).`);
+    } catch (err) {
+      log(
+        "WARN",
+        `Could not react ${LEAD_ACK_EMOJI} on ${messageId} (thread ${threadId}); continuing with triage: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   /** Exposed for observability and tests. */
@@ -172,9 +378,11 @@ export class LeadWatcher {
   }
 
   private persistState(): void {
-    if (!this.dryRun) {
-      saveState(this.statePath, this.state);
-    }
+    if (this.dryRun) return;
+    const json = JSON.stringify(this.state);
+    if (json === this.lastPersistedJson) return;
+    saveState(this.statePath, this.state);
+    this.lastPersistedJson = json;
   }
 
   private consumeQueuedEvents(threadId: string, count: number): void {
@@ -249,6 +457,7 @@ export class LeadWatcher {
 
   requestStop(): void {
     this.stopping = true;
+    for (const resolveStop of this.stopWaiters.splice(0)) resolveStop();
   }
 
   private async applySessionEffects(effects: LeadSessionEffect[]): Promise<boolean> {
@@ -574,75 +783,50 @@ export class LeadWatcher {
 
     const ids = selectMessagesToAcknowledge({ messages, sinceMessageId: since, leadProfile });
     for (const messageId of ids) {
-      if (this.dryRun) {
-        log("INFO", `[dry-run] Would react ${LEAD_ACK_EMOJI} on ${messageId} as "${leadProfile}".`);
-        continue;
-      }
-      try {
-        await this.board.react(messageId, LEAD_ACK_EMOJI, { asProfile: leadProfile });
-        log("INFO", `Reacted ${LEAD_ACK_EMOJI} on ${messageId} (thread ${event.threadId}).`);
-      } catch (err) {
-        log(
-          "WARN",
-          `Could not react ${LEAD_ACK_EMOJI} on ${messageId} (thread ${event.threadId}); continuing with triage: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
+      await this.reactAck(messageId, event.threadId);
     }
   }
 
-  async tick(): Promise<void> {
-    await this.syncRegistryCatalog();
+  /**
+   * One Lead Watcher pass. Live Board events queued since the last pass are handled first (👀
+   * and wake events, no channel reads). A periodic pass (`tick()` with no argument, the first
+   * pass, the interval timer, or any pass while live events are down) also runs the full
+   * catch-up: registry sync, #inbox and every project channel, blocked tasks.
+   */
+  async tick(info: Pick<WakeRunInfo, "periodic"> = { periodic: true }): Promise<void> {
+    try {
+      await this.runTick(info.periodic || !(this.events?.health.isHealthy("board") ?? false));
+    } finally {
+      this.persistState();
+      this.events?.paneWatcher?.setWatchedPanes([...this.sessions.values()].map((s) => s.paneId));
+    }
+  }
 
-    const inboxChannel = this.swarm.board.inboxChannel;
-    const prefix = this.swarm.board.projectChannelPrefix;
-
-    const [inboxRes, projectChannels, blockedTasks] = await Promise.all([
-      this.board.readChannel(inboxChannel, { limit: 30 }),
-      this.board.listChannels(prefix).catch(() => [] as string[]),
-      this.board.listTasks(prefix, { state: "blocked", limit: 100 }),
-    ]);
-
-    const projectThreadsByChannel: Record<string, BoardThreadSummary[]> = {};
-    for (const ch of projectChannels) {
-      const res = await this.board.readChannel(ch, { limit: 25 });
-      projectThreadsByChannel[ch] = res.threads;
+  private async runTick(fullReconcile: boolean): Promise<void> {
+    const live = this.drainLiveEvents();
+    if (fullReconcile || live.registryChanged) {
+      await this.syncRegistryCatalog();
     }
 
-    const { events, nextState } = collectLeadEvents({
-      inboxChannel,
-      inboxThreads: inboxRes.threads,
-      projectThreadsByChannel,
-      blockedTasks,
-      leadProfile: this.swarm.lead.boardProfile,
-      state: this.state,
-    });
-
     // 👀 first: acknowledge new human #inbox messages before any Lead session is spawned/prompted
-    const inboxSummaries = new Map(inboxRes.threads.map((t) => [t.message.id, t]));
-    for (const ev of events) {
-      if (ev.kind !== "inbox") continue;
-      await this.acknowledgeInboxEvent(
-        ev,
-        inboxSummaries.get(ev.threadId),
-        this.state.seenThreadLatestMsgId[ev.threadId],
-      );
+    for (const messageId of live.ackIds) {
+      const ev = live.events.find((e) => e.latestMessageId === messageId);
+      await this.reactAck(messageId, ev?.threadId ?? messageId);
+    }
+
+    const events: LeadWakeEvent[] = [...live.events];
+    if (fullReconcile) {
+      events.push(...(await this.collectCatchUpEvents()));
     }
 
     if (events.length > 0) {
       log("INFO", `Detected ${events.length} new Board event(s) for Lead.`);
       this.state = {
-        ...nextState,
-        pendingByThread: enqueueLeadEvents(nextState.pendingByThread, events),
+        ...this.state,
+        pendingByThread: enqueueLeadEvents(this.state.pendingByThread, events),
       };
-      this.persistState();
-    } else if (
-      nextState.seenBlockedTaskIds.length !== this.state.seenBlockedTaskIds.length ||
-      Object.keys(nextState.seenThreadLatestMsgId).length !==
-        Object.keys(this.state.seenThreadLatestMsgId).length
-    ) {
-      this.state = nextState;
-      this.persistState();
     }
+    this.persistState();
 
     if (this.dryRun) {
       for (const [threadId, threadEvents] of Object.entries(this.state.pendingByThread)) {
@@ -660,7 +844,72 @@ export class LeadWatcher {
     await this.dispatchQueuedThreads();
   }
 
+  /** Full poll of #inbox, project channels, and blocked tasks (the pre-bus detection path). */
+  private async collectCatchUpEvents(): Promise<LeadWakeEvent[]> {
+    const inboxChannel = this.swarm.board.inboxChannel;
+    const prefix = this.swarm.board.projectChannelPrefix;
+    const leadProfile = this.swarm.lead.boardProfile;
+
+    const [inboxRes, projectChannels, blockedTasks] = await Promise.all([
+      this.board.readChannel(inboxChannel, { limit: 30 }),
+      this.board.listChannels(prefix).catch(() => [] as string[]),
+      this.board.listTasks(prefix, { state: "blocked", limit: 100 }),
+    ]);
+
+    const projectThreadsByChannel: Record<string, BoardThreadSummary[]> = {};
+    for (const ch of projectChannels) {
+      const res = await this.board.readChannel(ch, { limit: 25 });
+      projectThreadsByChannel[ch] = res.threads;
+    }
+
+    // Threads that advanced by more than one reply need a full read so no mention is skipped.
+    const threadMessages: Record<string, BoardMessage[]> = {};
+    for (const rootId of selectThreadsNeedingRead({
+      projectThreadsByChannel,
+      leadProfile,
+      state: this.state,
+    })) {
+      try {
+        const detail = await this.board.readThread(rootId);
+        threadMessages[rootId] = [detail.message, ...detail.replies];
+      } catch (err) {
+        log(
+          "WARN",
+          `Could not read thread ${rootId} to check skipped replies for @${leadProfile}; checking its latest message only: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+
+    const { events, nextState } = collectLeadEvents({
+      inboxChannel,
+      inboxThreads: inboxRes.threads,
+      projectThreadsByChannel,
+      blockedTasks,
+      leadProfile,
+      state: this.state,
+      threadMessages,
+      nowMs: this.now(),
+    });
+
+    const inboxSummaries = new Map(inboxRes.threads.map((t) => [t.message.id, t]));
+    for (const ev of events) {
+      if (ev.kind !== "inbox") continue;
+      await this.acknowledgeInboxEvent(
+        ev,
+        inboxSummaries.get(ev.threadId),
+        this.state.seenThreadLatestMsgId[ev.threadId],
+      );
+    }
+
+    this.state = { ...nextState, pendingByThread: this.state.pendingByThread };
+    return events;
+  }
+
   async runLoop(once: boolean): Promise<void> {
+    // Subscribe before any await so no health or Board event published at startup is missed.
+    const unsubscribe = once
+      ? undefined
+      : this.events?.bus.subscribe((event) => this.handleEvent(event));
     log(
       "INFO",
       `Starting Lead Watcher (mode=ephemeral, inbox=#${this.swarm.board.inboxChannel}, prefix=${this.swarm.board.projectChannelPrefix}, profile=${this.swarm.lead.boardProfile}, maxConcurrent=${this.swarm.lead.maxConcurrentSessions}, idleClose=${this.swarm.lead.idleCloseSeconds}s, poll=${this.swarm.lead.pollIntervalSeconds}s, dryRun=${this.dryRun})`,
@@ -677,7 +926,7 @@ export class LeadWatcher {
         });
     }
 
-    while (!this.stopping) {
+    if (once) {
       try {
         await this.tick();
       } catch (err) {
@@ -686,9 +935,28 @@ export class LeadWatcher {
           `Lead Watcher tick failed: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
-      if (once || this.stopping) break;
-      await sleep(this.swarm.lead.pollIntervalSeconds * 1000);
+    } else if (!this.stopping) {
+      const scheduler = new WakeScheduler({
+        run: (info) => this.tick(info),
+        intervalMs: () => this.currentIntervalMs(),
+        timers: this.timers,
+        onError: (err) =>
+          log(
+            "ERROR",
+            `Lead Watcher tick failed: ${err instanceof Error ? err.message : String(err)}`,
+          ),
+      });
+      this.scheduler = scheduler;
+      const stopped = new Promise<void>((resolveStop) => {
+        this.stopWaiters.push(resolveStop);
+        if (this.stopping) resolveStop();
+      });
+      scheduler.start();
+      await stopped;
+      await scheduler.stop();
+      this.scheduler = null;
     }
+    unsubscribe?.();
 
     log("INFO", "Lead Watcher stopped cleanly.");
   }
@@ -715,15 +983,30 @@ async function main(): Promise<void> {
     process.env.LEAD_WATCHER_STATE_PATH ??
     resolve(home, ".local/state/bordr-swarm/lead-watcher-state.json");
 
-  const watcher = new LeadWatcher({
+  const board = new BoardClient({
+    url: swarm.board.url,
+    scope: swarm.board.scope,
+    boardName: swarm.board.boardName,
+    binary: process.env.BOARD_CLI_BIN,
+    onWarn: (message) => log("WARN", message),
+  });
+  let watcher: LeadWatcher | null = null;
+  const sources = flags.once
+    ? null
+    : createDaemonEventSources({
+        swarm,
+        board,
+        herdrTarget: machineCfg.herdrTarget,
+        // Unfiltered: Lead needs #inbox, the project prefix, and the registry channel.
+        tailAfter: flags.dryRun ? undefined : loadLeadWatcherState(statePath).tailCursor,
+        onCursorRejected: () => watcher?.onTailCursorRejected(),
+        log,
+      });
+
+  watcher = new LeadWatcher({
     swarm,
-    board: new BoardClient({
-      url: swarm.board.url,
-      scope: swarm.board.scope,
-      boardName: swarm.board.boardName,
-      binary: process.env.BOARD_CLI_BIN,
-      onWarn: (message) => log("WARN", message),
-    }),
+    board,
+    events: sources ?? undefined,
     herdr: new HerdrClient({ target: machineCfg.herdrTarget }),
     statePath,
     leadWorkspaceDir,
@@ -738,8 +1021,15 @@ async function main(): Promise<void> {
   };
   process.on("SIGINT", onSignal);
   process.on("SIGTERM", onSignal);
+  // Never leave a `board tail` child behind, even on an unexpected exit.
+  process.on("exit", () => sources?.killNow());
 
-  await watcher.runLoop(flags.once);
+  sources?.start();
+  try {
+    await watcher.runLoop(flags.once);
+  } finally {
+    await sources?.stop();
+  }
 }
 
 const isMain =
