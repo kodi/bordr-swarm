@@ -121,7 +121,7 @@ Status: `[x]` Done
 
 ### Slice 2: Persisted state schema and store (pure)
 
-Status: `[ ]` Not started
+Status: `[x]` Done
 
 - Goal: a tested, versioned, serializable representation of dispatcher state.
 - Why here: establishes the contract before any behavior depends on it.
@@ -242,7 +242,8 @@ Status: `[ ]` Not started
   - Claim actors are `vercel:user:<id>+<profile>`. `normalizeBoardTask` now strips that to the profile (`claimProfileFromActor`) so `assignee` compares equal to our `--as` names. Before this, `stepParkedTab`'s "owned by someone else" check could never match our own profile and a resumed `[BLOCKED]` tab never unparked against a real board.
   - Implemented: `listTasks` follows `--after` until a short or empty page (it uses the raw page length, so entries that fail to normalize do not end paging early), dedupes by id, and stops at 20 pages with a `WARN` through `BoardClientOptions.onWarn`. The dispatcher lists `--state open` 100 per page and point-looks-up tracked ids missing from that list, logging `WARN` when a task still resolves to `unknown`. Lead Watcher's blocked listing paginates through the same `listTasks`.
   - **OQ5** (`herdr agent start` with a duplicate name) is not exercised by this plan: reclaiming in Slice 4 keeps the existing agent, so nothing starts a second agent under the same name. Left unverified.
+- 2026-11-27 (Slice 2): `PersistedDispatcherStateSchema` (strict, `version: 1`) lives in `src/lib/schemas.ts` and is not wired into `scripts/generate-schemas.ts`. `src/lib/dispatcher-state.ts` holds pure `toPersisted`/`fromPersisted` (ids and `phaseSeenReplyIds` sorted, so the output is deterministic), `dispatcherStateFingerprint` (everything except `savedAtMs`, used to skip unchanged writes), `resolveDispatcherStatePath`, `loadDispatcherState` (returns `missing` / `loaded` / `other_machine` / `quarantined`; a file for another machine is left in place, not quarantined), and `saveDispatcherState` (temp file + `rename`, mode `0600`). The types are checked both ways at compile time: `fromPersisted` must produce `ActiveTask` and `toPersisted` must accept it.
 
 ## Next Slice
 
-Start with **Slice 1**. Read `BoardClient.listTasks` in `src/lib/board.ts` and `SwarmDispatcher.tick` in `src/dispatcher.ts`. Before coding, run `vercel board tasks <prefix> --state open --json` and `vercel board read <taskId> --json` against a board to settle Open Questions 3 and 4, and record the answers above. Verification is the pagination unit tests plus `npm run check`. No blockers.
+**Slice 3**: wire `loadDispatcherState`/`saveDispatcherState` into `SwarmDispatcher` (load at construction, persist at the end of each tick when the fingerprint changed and on stop; skip in `--dry-run`), then `scripts/stop.ts --reset`.
