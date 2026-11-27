@@ -1435,4 +1435,89 @@ describe("SwarmDispatcher mocked lifecycle", () => {
       fx.cleanup();
     }
   });
+
+  it("restart after downtime longer than the lease: reclaims a lapsed task, orphans a taken one", async () => {
+    const fx = createLifecycleFixture();
+    try {
+      const statePath = join(fx.tmpBase, "dispatcher.json");
+      const board = createFakeBoard([
+        { id: "701", channel: "projects/repo-a", state: "ready", text: "Lapses", labels: {} },
+        { id: "702", channel: "projects/repo-b", state: "ready", text: "Taken", labels: {} },
+      ]);
+      const herdr = createFakeHerdr(FIXTURE_WORKSPACES);
+
+      const a = makeFixtureDispatcher(fx, board, herdr, { statePath });
+      await a.tick();
+      assert.equal(a.activeWorkers.size, 2);
+      a.requestStop();
+      await a.runLoop(true);
+
+      // Dispatcher is down past the lease: #701 lapses back to ready; #702 is taken elsewhere.
+      Object.assign(board.tasks.get("701")!, { state: "ready", assignee: undefined });
+      Object.assign(board.tasks.get("702")!, { state: "claimed", assignee: "worker-other-702" });
+
+      const b = makeFixtureDispatcher(fx, board, herdr, { statePath });
+      await b.tick();
+
+      // #701: re-claimed under the same profile, still tracked, tab untouched
+      const reclaims = board.callsFor("claim", "701");
+      assert.equal(reclaims.length, 2, "original claim + reclaim");
+      assert.equal(reclaims[1]![reclaims[1]!.indexOf("--as") + 1], "worker-worker-machine-701");
+      assert.equal(board.tasks.get("701")!.state, "claimed");
+      assert.ok(b.activeWorkers.has("701"));
+      assert.equal(herdr.agentByName("w-701")?.agent_status, "working");
+
+      // #702: orphaned, one reply, not tracked, state left to its new holder
+      assert.ok(!b.activeWorkers.has("702"));
+      assert.equal(herdr.openTabs.get("w2:t2")?.label, "[ORPHANED] task-702 (claude)");
+      const replies702 = board.tasks.get("702")!.replies;
+      assert.equal(replies702.length, 1);
+      assert.match(replies702[0]!.text, /worker-other-702/);
+      assert.equal(board.tasks.get("702")!.assignee, "worker-other-702");
+      for (const sub of ["release", "fail", "complete", "block", "renew"]) {
+        assert.equal(board.callsFor(sub, "702").length, 0, `no ${sub} on a lost claim`);
+      }
+
+      // Next tick: nothing more is said about #702, and #701 keeps renewing normally
+      await b.tick();
+      assert.equal(board.tasks.get("702")!.replies.length, 1);
+      assert.ok(b.activeWorkers.has("701"));
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it("orphans the tab when a lapsed task is re-claimed by someone else first", async () => {
+    const fx = createLifecycleFixture();
+    try {
+      const statePath = join(fx.tmpBase, "dispatcher.json");
+      const board = createFakeBoard([
+        { id: "801", channel: "projects/repo-a", state: "ready", text: "Race", labels: {} },
+      ]);
+      const herdr = createFakeHerdr(FIXTURE_WORKSPACES);
+      const a = makeFixtureDispatcher(fx, board, herdr, { statePath });
+      await a.tick();
+
+      Object.assign(board.tasks.get("801")!, { state: "ready", assignee: undefined });
+      // The open list says ready, but by the time we claim, another worker got it.
+      const racingRunner: ExecRunner = async (cmd, args, opts) => {
+        if (args[1] === "tasks" && args[2] === "claim" && args[3] === "801") {
+          Object.assign(board.tasks.get("801")!, { state: "claimed", assignee: "worker-fast-801" });
+        }
+        return board.runner(cmd, args, opts);
+      };
+
+      const b = makeFixtureDispatcher(fx, { runner: racingRunner }, herdr, { statePath });
+      await b.tick();
+      assert.ok(!b.activeWorkers.has("801"));
+      assert.equal(herdr.openTabs.get("w1:t1")?.label, "[ORPHANED] task-801 (claude)");
+      assert.equal(board.tasks.get("801")!.replies.length, 1);
+      assert.equal(board.tasks.get("801")!.assignee, "worker-fast-801");
+
+      const c = makeFixtureDispatcher(fx, board, herdr, { statePath });
+      assert.equal(c.activeWorkers.size, 0, "orphaning is persisted");
+    } finally {
+      fx.cleanup();
+    }
+  });
 });

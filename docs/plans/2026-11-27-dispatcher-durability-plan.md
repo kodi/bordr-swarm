@@ -154,7 +154,7 @@ Status: `[x]` Done
 
 ### Slice 4: Model lost claims and lapsed leases in the FSM
 
-Status: `[ ]` Not started
+Status: `[x]` Done
 
 - Goal: defined behavior when the dispatcher was down longer than the lease.
 - Why here: Slice 3 makes this state reachable in a controlled way; before it, the state was reachable only as silent corruption.
@@ -246,6 +246,12 @@ Status: `[ ]` Not started
 
 - 2026-11-27 (Slice 3): `SwarmDispatcher` takes `statePath` (ignored with `--dry-run`), restores at construction, and logs `Restored N active and M parked task(s) from <path>` (or why it started empty). `tick()` wraps the old body in `try/finally` so state is persisted at the end of every tick, including ticks that throw or return early, and only when the fingerprint changed. `runLoop` persists once more on stop and logs that tabs and claims were left in place. The poll sleep is now cut short by `requestStop()`, so `SIGTERM` exits within one tick instead of one tick plus a full poll interval (it was close to launchd's default 20s `ExitTimeOut`). `scripts/stop.ts --reset` already removed `~/.local/state/bordr-swarm` (both default state files); it now also removes `DISPATCHER_STATE_PATH`/`LEAD_WATCHER_STATE_PATH` when set. The lifecycle tests share new `createFakeBoard`/`createFakeHerdr` fakes in `tests/dispatcher.test.ts`. The fake Board honors `--state open`, `read <id>`, claim/renew ownership (`claim_lost`), and replies.
 
+- 2026-11-27 (Slice 4): Open Questions 1 and 2 were settled during Slice 1 (see above): a lapsed task is `ready` in the list, and the same profile must `claim` again because `renew` returns `claim_lost`. `TaskObservation.boardAssignee` is set from the normalized claim profile. `stepTask` classifies claim continuity as a small union (`held` / `lapsed` / `taken`) right after the terminal-state checks:
+  - `lapsed` (Board `ready`, and the active session's tab and agent are alive): stay active, reset `lastLeaseRenewMs`, and emit `reclaim_task`. Its `onLost` list holds the orphan effects, computed in the FSM. The executor runs them, and drops the task, only if the claim fails. If the agent is gone, we do not reclaim. The normal session step reports the exit with `boardClaimed: false`, so the task stays `ready` for any worker.
+  - `taken` (Board `claimed`, assignee is a different profile): rename our tab(s) `[ORPHANED]`, post one reply naming the new holder, and return `remove`. No renew, close, complete, block, or fail.
+  - In review, "alive" means the reviewer session, since that is the one that is working.
+  - Trade-off: an orphaned plain-tab task frees its repo lock as soon as tracking stops, even though its agent may still be running in that checkout. The reply asks a human to close the tab. A task that a worker agent `release`s itself now gets re-claimed (agents are told not to release, and nothing in the dispatcher releases a tracked task).
+
 ## Next Slice
 
-**Slice 4**: add `boardAssignee` to `TaskObservation` and model lease lapse (`ready` → `reclaim_task`) and claim lost to another profile (`[ORPHANED]`, one reply, stop tracking) in `stepTask`.
+**Slice 5**: orphan sweep for tasks `claimed` by `worker-<thisMachine>-*` that are not tracked (no or corrupt state file). Keep the decision in a pure function, adopt live `w-<shortId>` agents, and release the task when there is no agent.

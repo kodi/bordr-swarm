@@ -775,6 +775,7 @@ export class SwarmDispatcher {
 
       const outcome = stepTask(task, {
         boardState: boardTask?.state ?? "unknown",
+        boardAssignee: boardTask?.assignee,
         implTabExists: tabsById.has(implHandle.tabId),
         implAgentStatus: liveImpl?.agent_status ?? null,
         reviewerTabExists: revHandle ? tabsById.has(revHandle.tabId) : false,

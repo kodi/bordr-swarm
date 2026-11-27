@@ -267,10 +267,12 @@ export function shortTaskId(taskId: string): string {
   return taskId.replace(/^#/, "").slice(0, 12);
 }
 
+export type TabLabelPrefix = "BLOCKED" | "FAILED" | "ORPHANED";
+
 export function formatTabLabel(
   taskId: string,
   agentProfile: string,
-  prefix?: "BLOCKED" | "FAILED",
+  prefix?: TabLabelPrefix,
   tag?: string,
 ): string {
   const mid = tag ? ` ${tag}` : "";
@@ -282,7 +284,7 @@ export function formatReviewTabLabel(
   taskId: string,
   reviewerProfile: string,
   round: number,
-  prefix?: "BLOCKED" | "FAILED",
+  prefix?: TabLabelPrefix,
 ): string {
   const base = `review-${shortTaskId(taskId)} r${round} (${reviewerProfile})`;
   return prefix ? `[${prefix}] ${base}` : base;

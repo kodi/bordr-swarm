@@ -372,6 +372,29 @@ async function executeSingleEffect(
       return;
     }
 
+    case "reclaim_task": {
+      try {
+        await deps.board.claimTaskById(effect.taskId, {
+          asProfile: effect.boardProfile,
+          lease: deps.swarm.board.leaseDuration,
+        });
+        deps.log(
+          "WARN",
+          `Lease on task #${effect.taskId} had lapsed (Board reported ready); re-claimed it as ${effect.boardProfile}.`,
+        );
+      } catch (err) {
+        deps.log(
+          "WARN",
+          `Lease on task #${effect.taskId} lapsed and re-claiming as ${effect.boardProfile} failed (${err instanceof Error ? err.message : String(err)}); treating it as claimed by another worker and orphaning its tab.`,
+        );
+        deps.activeWorkers.delete(effect.taskId);
+        for (const lost of effect.onLost) {
+          await executeSingleEffect(deps, previousTask, lost, nowMs);
+        }
+      }
+      return;
+    }
+
     case "rename_tab":
       await safeRenameTab(deps.herdr, effect.tabId, effect.label, deps.log);
       return;

@@ -2,7 +2,7 @@ import type { BoardTaskState } from "./board.ts";
 import type { ResolvedReviewerConfig } from "./config.ts";
 import type { HerdrAgentStatus } from "./herdr.ts";
 import type { ReviewVerdict } from "./review.ts";
-import { formatReviewTabLabel, formatTabLabel } from "./routing.ts";
+import { formatReviewTabLabel, formatTabLabel, type TabLabelPrefix } from "./routing.ts";
 import {
   assertNever,
   stepSession,
@@ -63,6 +63,8 @@ export type ThreadSignal =
 
 export interface TaskObservation {
   boardState: BoardTaskState;
+  /** Board profile currently holding the claim (normalized from the claim actor), if any. */
+  boardAssignee?: string;
   implTabExists: boolean;
   implAgentStatus: HerdrAgentStatus | null;
   reviewerTabExists: boolean;
@@ -76,6 +78,17 @@ export interface TaskObservation {
 
 export type TaskEffect =
   | { type: "renew_lease"; taskId: string; boardProfile: string }
+  | {
+      /**
+       * Lease lapsed while the dispatcher was away and nobody else took the task: claim it again
+       * under the same profile. If that fails, the task was taken meanwhile; the executor stops
+       * tracking it and runs `onLost` (the same effects as a claim lost to another profile).
+       */
+      type: "reclaim_task";
+      taskId: string;
+      boardProfile: string;
+      onLost: TaskEffect[];
+    }
   | { type: "rename_tab"; tabId: string; label: string }
   | { type: "close_tab"; tabId: string; taskId: string; reason: string }
   | {
@@ -160,11 +173,7 @@ export function getReviewerHandle(phase: TaskPhase): SessionHandle | null {
   return phase.kind === "reviewing" ? phase.reviewer.handle : null;
 }
 
-function getImplTabLabel(
-  ctx: TaskContext,
-  phase: TaskPhase,
-  prefix?: "BLOCKED" | "FAILED",
-): string {
+function getImplTabLabel(ctx: TaskContext, phase: TaskPhase, prefix?: TabLabelPrefix): string {
   const impl = getImplHandle(phase);
   const tag =
     prefix !== undefined
@@ -328,6 +337,78 @@ function applySessionStep(params: {
   }
 }
 
+type ClaimLoss =
+  | { kind: "held" }
+  /** Board says `ready`: our lease ran out and nobody else claimed it (yet). */
+  | { kind: "lapsed" }
+  /** Board says `claimed` by a different profile. */
+  | { kind: "taken"; holder: string };
+
+/**
+ * Only a live session can usefully reclaim: if the agent is gone, the normal session step
+ * reports the exit and the task stays `ready` for any worker to pick up.
+ */
+function isActiveSessionAlive(task: ActiveTask, obs: TaskObservation): boolean {
+  return task.phase.kind === "reviewing"
+    ? obs.reviewerTabExists && obs.reviewerAgentStatus !== null
+    : obs.implTabExists && obs.implAgentStatus !== null;
+}
+
+function classifyClaimLoss(task: ActiveTask, obs: TaskObservation): ClaimLoss {
+  if (obs.boardState === "ready" && isActiveSessionAlive(task, obs)) {
+    return { kind: "lapsed" };
+  }
+  if (
+    obs.boardState === "claimed" &&
+    obs.boardAssignee !== undefined &&
+    obs.boardAssignee !== "" &&
+    obs.boardAssignee !== task.ctx.boardProfile
+  ) {
+    return { kind: "taken", holder: obs.boardAssignee };
+  }
+  return { kind: "held" };
+}
+
+/**
+ * We no longer hold the claim: rename our tabs `[ORPHANED]` and explain once on the thread.
+ * The task's Board state belongs to whoever holds it now, so nothing here touches it.
+ */
+function buildOrphanEffects(
+  task: ActiveTask,
+  obs: TaskObservation,
+  holder: string | undefined,
+): TaskEffect[] {
+  const { ctx, phase } = task;
+  const implHandle = getImplHandle(phase);
+  const reviewerHandle = getReviewerHandle(phase);
+  const effects: TaskEffect[] = [];
+  const orphanedLabel = getImplTabLabel(ctx, phase, "ORPHANED");
+
+  if (obs.implTabExists) {
+    effects.push({ type: "rename_tab", tabId: implHandle.tabId, label: orphanedLabel });
+  }
+  if (reviewerHandle && phase.kind === "reviewing" && obs.reviewerTabExists) {
+    effects.push({
+      type: "rename_tab",
+      tabId: reviewerHandle.tabId,
+      label: formatReviewTabLabel(
+        ctx.taskId,
+        reviewerHandle.runtime.profileName,
+        phase.round,
+        "ORPHANED",
+      ),
+    });
+  }
+  const who = holder ? `\`${holder}\`` : "another worker";
+  effects.push({
+    type: "reply_board",
+    taskId: ctx.taskId,
+    boardProfile: ctx.boardProfile,
+    text: `Dispatcher on \`${ctx.machineName}\` lost its claim on this task (lease ran out while it was offline; now held by ${who}). It stopped tracking its tab \`${orphanedLabel}\` in workspace \`${ctx.projectSlug}\` and left the task's state alone. The agent there may still be running: close the tab in Sheprd once it is no longer needed.`,
+  });
+  return effects;
+}
+
 /**
  * Pure, deterministic outer Task FSM.
  * Given the current ActiveTask and a TickObservation, computes the exact next state
@@ -382,7 +463,31 @@ export function stepTask(task: ActiveTask, obs: TaskObservation): TaskStepOutcom
     return { status: "remove", effects };
   }
 
-  // 2. Lease heartbeat (independent of phase)
+  // 2. Claim continuity: the dispatcher may have been down for longer than the lease.
+  const claimLoss = classifyClaimLoss(task, obs);
+  switch (claimLoss.kind) {
+    case "held":
+      break;
+    case "lapsed":
+      return {
+        status: "active",
+        next: { ...task, lastLeaseRenewMs: obs.nowMs },
+        effects: [
+          {
+            type: "reclaim_task",
+            taskId: ctx.taskId,
+            boardProfile: ctx.boardProfile,
+            onLost: buildOrphanEffects(task, obs, undefined),
+          },
+        ],
+      };
+    case "taken":
+      return { status: "remove", effects: buildOrphanEffects(task, obs, claimLoss.holder) };
+    default:
+      return assertNever(claimLoss);
+  }
+
+  // 3. Lease heartbeat (independent of phase)
   let currentTask = task;
   if (
     obs.boardState === "claimed" &&
@@ -392,7 +497,7 @@ export function stepTask(task: ActiveTask, obs: TaskObservation): TaskStepOutcom
     currentTask = { ...task, lastLeaseRenewMs: obs.nowMs };
   }
 
-  // 3. Phase-specific transitions (exhaustive switch)
+  // 4. Phase-specific transitions (exhaustive switch)
   const phase = currentTask.phase;
   switch (phase.kind) {
     case "implementing":
