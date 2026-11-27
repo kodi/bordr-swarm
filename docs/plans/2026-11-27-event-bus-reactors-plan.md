@@ -146,7 +146,7 @@ Status: `[x]` Done
 
 ### Slice 2: Herdr event source
 
-Status: `[ ]` Not started
+Status: `[x]` Done
 
 - Goal: live tab, pane and agent-status events from the local Herdr server.
 - Why here: independent of Slice 1; isolates the unstable private protocol behind one module.
@@ -301,6 +301,12 @@ Status: `[ ]` Not started
   - **OQ2:** a rejected `--after` (a bogus string or a malformed `x1.` cursor) makes the CLI exit with code 2 and print a _pretty-printed_ (multi-line) JSON error on stdout with `"reason": "invalid_cursor"` (`after: <value> isn't a cursor here or a message's ID`). A message ID is accepted as `--after` too. An old message ID from many hours earlier was still accepted and replayed what followed it; how long a cursor stays valid was not determined beyond that. The supervisor detects the error line, calls `onCursorRejected`, and restarts without `--after`.
   - **OQ1:** not verified (no way to cut the network safely on this host). The supervisor restarts the child with capped exponential backoff (1s doubling to 60s, reset once the stream has been up for 3s or delivers an event) and has a stall watchdog (default 10 min without output): it restarts the stream quietly, without a health transition, resuming from the last cursor.
   - Stop sends `SIGTERM` to the process group (spawned `detached: true`), escalates to `SIGKILL` after 3s, and never restarts afterwards. A manual run against the live board printed the reply posted from another shell about 2s after posting, and `pgrep` found no `board tail` process after stop.
+- 2026-11-27 (Slice 2): `src/bus/herdr-event-source.ts` (`HerdrEventSource`). Socket path from `herdr status server` (`socket: <path>`), falling back to `~/.config/herdr/herdr.sock`; re-discovered on every reconnect of the main connection.
+  - Event lines on Herdr 0.9.5 are `{ "event": "tab_closed", "data": { "type": "tab_closed", "tab_id", "workspace_id" } }`: names use **underscores**, not the dotted subscription names. The parser accepts both. Closing a tab whose shell is alive emitted `tab_closed` but no `pane_closed`; a shell that exits emitted `pane_exited`.
+  - **OQ4:** `herdr api schema --json` lists only `events.subscribe` and `events.wait`; there is no unsubscribe. Subscriptions are per connection, so each watched pane gets its own connection (`setWatchedPanes`), and dropping a pane closes it. The main connection holds `tab.closed`, `pane.exited`, `pane.closed`.
+  - Health follows the main connection: healthy on `subscription_started`, unhealthy (logged once until it recovers) on connect failure, a rejected or unanswered subscribe (10s), an unparseable line, or a close. Every connection reconnects with capped backoff and re-subscribes. A non-local `herdrTarget` disables the source.
+  - **OQ5:** not verified (needs a live agent in a `--no-focus` pane). The CLI reconcile still covers it.
+  - Manual check: the source against the local server printed `herdr.tab_closed` for a scratch tab closed from another shell.
 
 ## Next Slice
 
