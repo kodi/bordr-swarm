@@ -116,6 +116,264 @@ function createTestSwarmConfig(): SwarmConfig {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Shared fakes for the SwarmDispatcher mocked lifecycle suite
+// ---------------------------------------------------------------------------
+
+interface FakeBoardTask {
+  id: string;
+  channel: string;
+  state: BoardTask["state"];
+  text: string;
+  labels: Record<string, string>;
+  assignee?: string;
+  replies: { id: string; text: string; profile: string }[];
+}
+
+/** States `vercel board tasks --state open` returns (verified on a live board, 2026-11-27). */
+const FAKE_OPEN_STATES = new Set(["waiting", "ready", "claimed", "blocked"]);
+
+function fakeAsProfile(args: string[]): string {
+  const idx = args.indexOf("--as");
+  return idx >= 0 ? (args[idx + 1] ?? "") : "";
+}
+
+function fakeBoardOk(body: unknown = { ok: true }): { stdout: string; stderr: string } {
+  return { stdout: JSON.stringify(body), stderr: "" };
+}
+
+function fakeClaimLost(id: string): Error {
+  return Object.assign(new Error(`claim_lost on ${id}`), {
+    stdout: JSON.stringify({ status: "error", reason: "claim_lost" }),
+    stderr: "",
+  });
+}
+
+function fakeHerdrOk(result: unknown = { ok: true }): { stdout: string; stderr: string } {
+  return { stdout: JSON.stringify({ result }), stderr: "" };
+}
+
+function createFakeBoard(initial: Omit<FakeBoardTask, "replies">[]) {
+  const tasks = new Map<string, FakeBoardTask>();
+  for (const t of initial) tasks.set(t.id, { ...t, replies: [] });
+  const calls: string[][] = [];
+  let replySeq = 0;
+
+  const toWire = (t: FakeBoardTask) => ({
+    message: {
+      id: t.id,
+      channel: t.channel,
+      text: t.text,
+      labels: t.labels,
+      task: {
+        state: t.state,
+        claim: t.assignee ? { actor: `vercel:user:u1+${t.assignee}`, until: "later" } : null,
+      },
+    },
+    replies: t.replies.length,
+  });
+  const runner: ExecRunner = async (_cmd, args) => {
+    calls.push(args);
+    const [, group, sub, id] = args;
+    const profile = fakeAsProfile(args);
+    if (group === "tasks" && sub?.endsWith("/")) {
+      const stateIdx = args.indexOf("--state");
+      const state = stateIdx >= 0 ? args[stateIdx + 1] : "open";
+      const list = [...tasks.values()].filter((t) =>
+        state === "all"
+          ? true
+          : state === "open"
+            ? FAKE_OPEN_STATES.has(t.state)
+            : t.state === state,
+      );
+      return fakeBoardOk({ tasks: list.map(toWire), cursor: null });
+    }
+    if (group === "tasks" && id) {
+      const t = tasks.get(id);
+      if (!t) throw new Error(`no task ${id}`);
+      switch (sub) {
+        case "claim":
+          if (t.state !== "ready") throw fakeClaimLost(id);
+          t.state = "claimed";
+          t.assignee = profile;
+          return fakeBoardOk(toWire(t));
+        case "renew":
+          if (t.state !== "claimed" || t.assignee !== profile) throw fakeClaimLost(id);
+          return fakeBoardOk();
+        case "release":
+          t.state = "ready";
+          t.assignee = undefined;
+          return fakeBoardOk();
+        case "complete":
+          t.state = "completed";
+          t.assignee = undefined;
+          return fakeBoardOk();
+        case "fail":
+          t.state = "failed";
+          t.assignee = undefined;
+          return fakeBoardOk();
+        case "block":
+          t.state = "blocked";
+          t.assignee = undefined;
+          return fakeBoardOk();
+        default:
+          return fakeBoardOk();
+      }
+    }
+    if (group === "read" && sub) {
+      const t = tasks.get(sub);
+      if (!t) return fakeBoardOk({ threads: [], cursor: null });
+      return fakeBoardOk({
+        ...toWire(t),
+        replies: t.replies.map((r) => ({ id: r.id, text: r.text, by: { profile: r.profile } })),
+        cursor: null,
+      });
+    }
+    if (group === "reply" && sub && id !== undefined) {
+      const t = tasks.get(sub);
+      if (t) t.replies.push({ id: `r${++replySeq}`, text: id, profile });
+      return fakeBoardOk();
+    }
+    return fakeBoardOk();
+  };
+
+  return {
+    tasks,
+    calls,
+    runner,
+    /** Simulate another actor (implementer/reviewer agent) posting on a thread. */
+    postReply(taskId: string, text: string, profile: string): void {
+      tasks.get(taskId)?.replies.push({ id: `r${++replySeq}`, text, profile });
+    },
+    callsFor(sub: string, taskId?: string): string[][] {
+      return calls.filter((c) => c[1] === "tasks" && c[2] === sub && (!taskId || c[3] === taskId));
+    },
+  };
+}
+
+interface FakeAgent {
+  pane_id: string;
+  tab_id: string;
+  workspace_id: string;
+  agent_status: string;
+  name: string;
+}
+
+function createFakeHerdr(workspaces: { workspace_id: string; label: string }[]) {
+  let nextTabSeq = 1;
+  const openTabs = new Map<string, { tab_id: string; workspace_id: string; label: string }>();
+  const paneToTab = new Map<string, { tab_id: string; workspace_id: string }>();
+  const liveAgents = new Map<string, FakeAgent>();
+  const calls: string[][] = [];
+
+  const runner: ExecRunner = async (_cmd, args) => {
+    calls.push(args);
+    const [group, sub] = args;
+    if (group === "workspace" && sub === "list") return fakeHerdrOk({ workspaces });
+    if (group === "tab" && sub === "create") {
+      const wsId = args[args.indexOf("--workspace") + 1]!;
+      const label = args[args.indexOf("--label") + 1]!;
+      const seq = nextTabSeq++;
+      const tabId = `${wsId}:t${seq}`;
+      const paneId = `${wsId}:p${seq}`;
+      openTabs.set(tabId, { tab_id: tabId, workspace_id: wsId, label });
+      paneToTab.set(paneId, { tab_id: tabId, workspace_id: wsId });
+      return fakeHerdrOk({
+        tab: { tab_id: tabId, workspace_id: wsId },
+        root_pane: { pane_id: paneId },
+      });
+    }
+    if (group === "tab" && sub === "list") return fakeHerdrOk({ tabs: [...openTabs.values()] });
+    if (group === "tab" && sub === "close") {
+      const tabId = args[2]!;
+      openTabs.delete(tabId);
+      for (const [paneId, agent] of liveAgents) {
+        if (agent.tab_id === tabId) liveAgents.delete(paneId);
+      }
+      return fakeHerdrOk();
+    }
+    if (group === "tab" && sub === "rename") {
+      const tab = openTabs.get(args[2]!);
+      if (tab) tab.label = args[3]!;
+      return fakeHerdrOk();
+    }
+    if (group === "agent" && sub === "start") {
+      const name = args[2]!;
+      const paneId = args[args.indexOf("--pane") + 1]!;
+      const loc = paneToTab.get(paneId) ?? { tab_id: "", workspace_id: "" };
+      liveAgents.set(paneId, { pane_id: paneId, ...loc, agent_status: "working", name });
+      return fakeHerdrOk();
+    }
+    if (group === "agent" && sub === "list")
+      return fakeHerdrOk({ agents: [...liveAgents.values()] });
+    return fakeHerdrOk();
+  };
+
+  return {
+    openTabs,
+    liveAgents,
+    calls,
+    runner,
+    agentByName(name: string): FakeAgent | undefined {
+      return [...liveAgents.values()].find((a) => a.name === name);
+    },
+    setAgentStatus(name: string, status: string): void {
+      const agent = [...liveAgents.values()].find((a) => a.name === name);
+      if (agent) agent.agent_status = status;
+    },
+  };
+}
+
+function createLifecycleFixture(opts?: { reviewer?: boolean; statePath?: string }): {
+  tmpBase: string;
+  swarm: SwarmConfig;
+  projects: ProjectsConfig;
+  cleanup: () => void;
+} {
+  const tmpBase = mkdtempSync(join(tmpdir(), "swarm-fixture-"));
+  const repoA = join(tmpBase, "repo-a");
+  const repoB = join(tmpBase, "repo-b");
+  mkdirSync(repoA);
+  mkdirSync(repoB);
+  const swarm = createTestSwarmConfig();
+  if (opts?.reviewer) {
+    swarm.workerDefaults.reviewer = {
+      enabled: true,
+      agent: "claude",
+      model: "",
+      maxRounds: 2,
+      skipIfNoDiff: false,
+    };
+  }
+  const projects: ProjectsConfig = {
+    projects: {
+      "repo-a": {
+        defaultMachine: "worker-machine",
+        baseBranch: "main",
+        useWorktree: false,
+        paths: { "worker-machine": repoA },
+      },
+      "repo-b": {
+        defaultMachine: "worker-machine",
+        baseBranch: "main",
+        useWorktree: false,
+        paths: { "worker-machine": repoB },
+      },
+    },
+  };
+  return {
+    tmpBase,
+    swarm,
+    projects,
+    cleanup: () => rmSync(tmpBase, { recursive: true, force: true }),
+  };
+}
+
+const FIXTURE_WORKSPACES = [
+  { workspace_id: "w1", label: "repo-a" },
+  { workspace_id: "w2", label: "repo-b" },
+];
+
 describe("config & worker agent selection", () => {
   it("defaults to claude opus medium auto when no agent label is set", () => {
     const swarm = createTestSwarmConfig();
@@ -366,6 +624,96 @@ describe("board & herdr helpers", () => {
     const board = new BoardClient({}, channelNotFoundRunner);
     const tasks = await board.listTasks("projects/", { state: "all" });
     assert.deepEqual(tasks, []);
+  });
+
+  it("paginates listTasks with --after until a short page, ignoring a non-null cursor on it", async () => {
+    const pages: Record<string, { tasks: unknown[]; cursor: string | null }> = {
+      first: { tasks: [{ id: "t1" }, { id: "t2" }], cursor: "c1" },
+      c1: { tasks: [{ id: "t3" }, { id: "t4" }], cursor: "c2" },
+      // Short final page still carries a cursor, as observed on a live board
+      c2: { tasks: [{ id: "t5" }], cursor: "c3" },
+    };
+    const calls: string[][] = [];
+    const runner: ExecRunner = async (_cmd, args) => {
+      calls.push(args);
+      const afterIdx = args.indexOf("--after");
+      const key = afterIdx >= 0 ? args[afterIdx + 1]! : "first";
+      const page = pages[key];
+      if (!page) throw new Error(`unexpected page ${key}`);
+      return { stdout: JSON.stringify(page), stderr: "" };
+    };
+    const board = new BoardClient({}, runner);
+    const tasks = await board.listTasks("projects/", { state: "open", limit: 2 });
+    assert.deepEqual(
+      tasks.map((t) => t.id),
+      ["t1", "t2", "t3", "t4", "t5"],
+    );
+    assert.equal(calls.length, 3);
+    assert.ok(calls.every((c) => c[c.indexOf("--state") + 1] === "open"));
+    assert.ok(calls.every((c) => c[c.indexOf("--limit") + 1] === "2"));
+    assert.equal(calls[0]!.indexOf("--after"), -1);
+    assert.equal(calls[2]![calls[2]!.indexOf("--after") + 1], "c2");
+  });
+
+  it("stops listTasks on an empty page", async () => {
+    let n = 0;
+    const runner: ExecRunner = async () => {
+      n += 1;
+      const body =
+        n === 1 ? { tasks: [{ id: "a" }, { id: "b" }], cursor: "c1" } : { tasks: [], cursor: "c2" };
+      return { stdout: JSON.stringify(body), stderr: "" };
+    };
+    const tasks = await new BoardClient({}, runner).listTasks("projects/", { limit: 2 });
+    assert.deepEqual(
+      tasks.map((t) => t.id),
+      ["a", "b"],
+    );
+    assert.equal(n, 2);
+  });
+
+  it("honors the listTasks page cap and warns when it is hit", async () => {
+    let n = 0;
+    const runner: ExecRunner = async () => {
+      n += 1;
+      return {
+        stdout: JSON.stringify({ tasks: [{ id: `x${n}` }], cursor: `c${n}` }),
+        stderr: "",
+      };
+    };
+    const warnings: string[] = [];
+    const board = new BoardClient({ onWarn: (m) => warnings.push(m) }, runner);
+    const tasks = await board.listTasks("projects/", { limit: 1, maxPages: 3 });
+    assert.equal(n, 3);
+    assert.equal(tasks.length, 3);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0]!, /stopped after 3 page/);
+  });
+
+  it("looks up a single task via read --json and normalizes the claim actor to a profile", async () => {
+    const runner: ExecRunner = async (_cmd, args) => {
+      assert.deepEqual(args.slice(0, 3), ["board", "read", "msg_1"]);
+      return {
+        stdout: JSON.stringify({
+          message: {
+            id: "msg_1",
+            channel: "projects/example-app",
+            text: "Task",
+            task: {
+              state: "claimed",
+              claim: { actor: "vercel:user:abc123+worker-worker-machine-msg1", until: "x" },
+            },
+          },
+          replies: [{ id: "r1" }, { id: "r2" }],
+          cursor: null,
+        }),
+        stderr: "",
+      };
+    };
+    const task = await new BoardClient({}, runner).getTask("msg_1");
+    assert.ok(task);
+    assert.equal(task.state, "claimed");
+    assert.equal(task.assignee, "worker-worker-machine-msg1");
+    assert.equal(task.replyCount, 2);
   });
 
   it("normalizes task objects with string-array or record labels", () => {
@@ -893,6 +1241,44 @@ describe("SwarmDispatcher mocked lifecycle", () => {
       assert.ok(!dispatcher.activeWorkers.has("203"));
     } finally {
       rmSync(tmpBase, { recursive: true, force: true });
+    }
+  });
+
+  it("lists only open tasks and cleans up a tracked task that completed and left the open list", async () => {
+    const fx = createLifecycleFixture();
+    try {
+      const board = createFakeBoard([
+        { id: "301", channel: "projects/repo-a", state: "ready", text: "Do it", labels: {} },
+      ]);
+      const herdr = createFakeHerdr(FIXTURE_WORKSPACES);
+      const dispatcher = new SwarmDispatcher({
+        repoRoot: fx.tmpBase,
+        swarm: fx.swarm,
+        projects: fx.projects,
+        machineName: "worker-machine",
+        board: new BoardClient({ scope: "test-team" }, board.runner),
+        herdr: new HerdrClient({ target: "local" }, herdr.runner),
+        promptTemplate: "Work on {{TASK_ID}}",
+        availableAgentKinds: new Set(["claude"]),
+        dryRun: false,
+      });
+
+      await dispatcher.tick();
+      assert.ok(dispatcher.activeWorkers.has("301"));
+      const listCalls = board.calls.filter((c) => c[1] === "tasks" && c[2] === "projects/");
+      assert.ok(listCalls.length > 0);
+      assert.ok(listCalls.every((c) => c[c.indexOf("--state") + 1] === "open"));
+
+      // Task completes: it drops out of the open list, so only a point lookup can see it.
+      board.tasks.get("301")!.state = "completed";
+      await dispatcher.tick();
+
+      const reads = board.calls.filter((c) => c[1] === "read" && c[2] === "301");
+      assert.ok(reads.length > 0, "tracked task missing from open list should be point-looked-up");
+      assert.equal(dispatcher.activeWorkers.size, 0);
+      assert.equal(herdr.openTabs.size, 0, "completed task tab should be closed");
+    } finally {
+      fx.cleanup();
     }
   });
 });

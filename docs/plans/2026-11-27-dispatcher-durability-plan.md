@@ -101,7 +101,7 @@ Serialization: introduce a `PersistedDispatcherState` type (`version: 1`, `machi
 
 ### Slice 1: Paginated, open-only task discovery
 
-Status: `[ ]` Not started
+Status: `[x]` Done
 
 - Goal: task discovery is correct at any board size.
 - Why here: smallest change, independent of everything else, and it is a live time bomb.
@@ -234,6 +234,14 @@ Status: `[ ]` Not started
 ## Working Notes
 
 - 2026-11-27: Plan written from a code review. Listing order, completed-task inclusion, and the non-null cursor on a short page were checked against a live board. Lease-expiry behavior was _not_ checked. No code has been changed.
+- 2026-11-27 (Slice 1, empirical, scratch channel with a 30s lease, probe tasks canceled afterwards):
+  - **OQ3:** `--state open` returns `ready`, `claimed`, and `blocked` tasks (and, per the CLI help, `waiting`). `failed`, `completed`, and `canceled` are **not** open. So a tracked task that fails also needs the point lookup.
+  - **OQ4:** `vercel board read <id> --json` returns `{ message: { …, task: { state, claim: { actor, until }, blocked, epoch } }, replies: [...], cursor }`. `normalizeBoardTask` handles it as-is; `BoardClient.getTask` reuses it. Empty task lists come back with `cursor: "0"`, and our fakes use `cursor: null`, so the envelope schema now accepts a nullable cursor.
+  - **OQ1:** when a lease runs out, the task-list view reports it `ready` with no distinct event. The single-thread `read` view can lag: it kept reporting `claimed` with the stale `claim.until` until the next write touched the task (the failed `renew`), after which it reported `ready`, `claim: null`. Do not rely on `read` alone to detect a lapse.
+  - **OQ2:** `renew` after expiry fails with `{"status":"error","reason":"claim_lost"}`. The same profile can then `claim` again (the task's `epoch` increments). A different profile cannot `claim` while the task is held, and cannot `renew` someone else's claim.
+  - Claim actors are `vercel:user:<id>+<profile>`. `normalizeBoardTask` now strips that to the profile (`claimProfileFromActor`) so `assignee` compares equal to our `--as` names. Before this, `stepParkedTab`'s "owned by someone else" check could never match our own profile and a resumed `[BLOCKED]` tab never unparked against a real board.
+  - Implemented: `listTasks` follows `--after` until a short or empty page (it uses the raw page length, so entries that fail to normalize do not end paging early), dedupes by id, and stops at 20 pages with a `WARN` through `BoardClientOptions.onWarn`. The dispatcher lists `--state open` 100 per page and point-looks-up tracked ids missing from that list, logging `WARN` when a task still resolves to `unknown`. Lead Watcher's blocked listing paginates through the same `listTasks`.
+  - **OQ5** (`herdr agent start` with a duplicate name) is not exercised by this plan: reclaiming in Slice 4 keeps the existing agent, so nothing starts a second agent under the same name. Left unverified.
 
 ## Next Slice
 

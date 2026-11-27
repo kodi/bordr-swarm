@@ -711,6 +711,7 @@ async function main(): Promise<void> {
     board: new BoardClient({
       scope: swarm.board.scope,
       boardName: swarm.board.boardName,
+      onWarn: (message) => log("WARN", message),
     }),
     herdr: new HerdrClient({ target: machineCfg.herdrTarget }),
     statePath,

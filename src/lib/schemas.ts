@@ -605,7 +605,7 @@ export const BoardTaskListEnvelopeSchema = z.union([
   z
     .object({
       tasks: z.array(z.record(z.string(), z.unknown())),
-      cursor: z.union([z.string(), z.number()]).optional(),
+      cursor: z.union([z.string(), z.number()]).nullable().optional(),
     })
     .passthrough(),
 ]);

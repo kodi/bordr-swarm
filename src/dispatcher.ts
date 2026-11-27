@@ -50,6 +50,8 @@ import {
 } from "./lib/task-fsm.ts";
 
 const STARTUP_GRACE_MS = 20_000;
+/** Page size for open-task discovery; `listTasks` follows the cursor across pages. */
+const TASK_PAGE_SIZE = 100;
 
 interface CliFlags {
   machine?: string;
@@ -266,9 +268,10 @@ export class SwarmDispatcher {
     await this.maybeReloadProjectsAndPublishRegistry();
 
     const prefix = this.swarm.board.projectChannelPrefix;
-    const allTasks = await this.board.listTasks(prefix, { state: "all", limit: 200 });
+    const openTasks = await this.board.listTasks(prefix, { state: "open", limit: TASK_PAGE_SIZE });
     const tasksById = new Map<string, BoardTask>();
-    for (const t of allTasks) tasksById.set(t.id, t);
+    for (const t of openTasks) tasksById.set(t.id, t);
+    await this.lookupTrackedTasksMissingFromOpenList(tasksById);
 
     if (this.activeWorkers.size > 0 || this.parkedTabs.size > 0) {
       await this.reconcileRunningWorkers(tasksById);
@@ -290,7 +293,7 @@ export class SwarmDispatcher {
       return;
     }
 
-    const readyTasks = allTasks.filter((t) => t.state === "ready");
+    const readyTasks = openTasks.filter((t) => t.state === "ready");
     if (readyTasks.length === 0) return;
 
     const { candidates, skips } = selectEligibleTasks({
@@ -343,6 +346,39 @@ export class SwarmDispatcher {
         slotsLeft -= 1;
         if (!candidate.useWorktree) claimedProjectsThisTick.add(candidate.projectSlug);
       }
+    }
+  }
+
+  /**
+   * The open-task list omits terminal tasks (completed/canceled/failed), so a tracked task that
+   * dropped out of it is resolved with a point lookup. Without this, a finished task would sit
+   * forever as `unknown` with its tab open and its repo lock held.
+   */
+  private async lookupTrackedTasksMissingFromOpenList(
+    tasksById: Map<string, BoardTask>,
+  ): Promise<void> {
+    const missing = [...this.getTrackedTaskIds()].filter((id) => !tasksById.has(id));
+    if (missing.length === 0) return;
+
+    const results = await Promise.all(
+      missing.map(async (id) => {
+        try {
+          return { id, task: await this.board.getTask(id), error: null };
+        } catch (err) {
+          return { id, task: null, error: err instanceof Error ? err.message : String(err) };
+        }
+      }),
+    );
+
+    for (const { id, task, error } of results) {
+      if (task && task.state !== "unknown") {
+        tasksById.set(id, task);
+        continue;
+      }
+      log(
+        "WARN",
+        `Tracked task #${id} is not in the open-task list and its state could not be resolved (${error ?? "lookup returned no task state"}); treating it as unknown this tick.`,
+      );
     }
   }
 
@@ -721,7 +757,11 @@ async function main(): Promise<void> {
     projects,
     projectsConfigPath,
     machineName,
-    board: new BoardClient({ scope: swarm.board.scope, boardName: swarm.board.boardName }),
+    board: new BoardClient({
+      scope: swarm.board.scope,
+      boardName: swarm.board.boardName,
+      onWarn: (message) => log("WARN", message),
+    }),
     herdr: new HerdrClient({ target: machineCfg.herdrTarget }),
     promptTemplate,
     reviewerPromptTemplate,

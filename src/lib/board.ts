@@ -39,6 +39,25 @@ export interface BoardClientOptions {
   boardName?: string;
   binary?: string;
   timeoutMs?: number;
+  /** Sink for non-fatal warnings (for example, hitting the task-list page cap). */
+  onWarn?: (message: string) => void;
+}
+
+/** Default page size for `vercel board tasks` (matches the CLI's own default). */
+export const DEFAULT_TASK_PAGE_SIZE = 50;
+/** Hard cap on pages fetched by one `listTasks` call, so a misbehaving cursor cannot loop forever. */
+export const DEFAULT_TASK_MAX_PAGES = 20;
+
+/**
+ * Board claim actors look like `vercel:user:<id>+<profile>`; return just the profile part so it
+ * can be compared with the `--as` profile names the dispatcher uses. Plain values pass through.
+ */
+export function claimProfileFromActor(actor: string): string {
+  const plusIdx = actor.lastIndexOf("+");
+  if (plusIdx >= 0 && actor.startsWith("vercel:")) {
+    return actor.slice(plusIdx + 1);
+  }
+  return actor;
 }
 
 export interface ExecRunner {
@@ -176,7 +195,11 @@ export function normalizeBoardTask(raw: unknown): BoardTask | null {
         : undefined;
 
   const replyCount =
-    typeof obj.replies === "number" && Number.isFinite(obj.replies) ? obj.replies : undefined;
+    typeof obj.replies === "number" && Number.isFinite(obj.replies)
+      ? obj.replies
+      : Array.isArray(obj.replies)
+        ? obj.replies.length
+        : undefined;
 
   return {
     id: String(rawId).replace(/^#/, ""),
@@ -184,10 +207,22 @@ export function normalizeBoardTask(raw: unknown): BoardTask | null {
     state,
     text,
     labels: mergedLabels,
-    assignee: assignee || undefined,
+    assignee: assignee ? claimProfileFromActor(assignee) : undefined,
     ...(replyCount !== undefined ? { replyCount } : {}),
     raw: obj,
   };
+}
+
+function describeExecError(err: unknown): string {
+  const stdout =
+    typeof err === "object" && err !== null && "stdout" in err
+      ? String((err as { stdout?: unknown }).stdout ?? "")
+      : "";
+  const stderr =
+    typeof err === "object" && err !== null && "stderr" in err
+      ? String((err as { stderr?: unknown }).stderr ?? "")
+      : "";
+  return `${stdout}\n${stderr}`;
 }
 
 export class BoardClient {
@@ -196,8 +231,10 @@ export class BoardClient {
   readonly binary: string;
   readonly timeoutMs: number;
   readonly runner: ExecRunner;
+  readonly onWarn: (message: string) => void;
 
   constructor(options: BoardClientOptions = {}, runner: ExecRunner = defaultRunner) {
+    this.onWarn = options.onWarn ?? ((message) => console.warn(message));
     this.scope = options.scope?.trim() ?? "";
     this.boardName = options.boardName?.trim() ?? "";
     this.binary = options.binary ?? "vercel";
@@ -242,39 +279,78 @@ export class BoardClient {
     return parsed.success ? parsed.data : {};
   }
 
+  /**
+   * Lists tasks, following the cursor with `--after` until a page comes back shorter than the
+   * page size (or empty). A non-null cursor alone is not trusted as "more pages": the Board has
+   * been observed returning one on a short final page. `limit` is the page size.
+   */
   async listTasks(
     channelPrefix?: string,
-    opts?: { state?: string; labels?: string[]; limit?: number; asProfile?: string },
+    opts?: {
+      state?: string;
+      labels?: string[];
+      limit?: number;
+      maxPages?: number;
+      asProfile?: string;
+    },
   ): Promise<BoardTask[]> {
+    const pageSize = opts?.limit && opts.limit > 0 ? opts.limit : DEFAULT_TASK_PAGE_SIZE;
+    const maxPages = opts?.maxPages && opts.maxPages > 0 ? opts.maxPages : DEFAULT_TASK_MAX_PAGES;
+    const tasks: BoardTask[] = [];
+    const seen = new Set<string>();
+    let after: string | undefined;
+
+    for (let page = 1; ; page += 1) {
+      const { items, rawCount, cursor } = await this.listTasksPage(channelPrefix, {
+        ...opts,
+        limit: pageSize,
+        after,
+      });
+      for (const task of items) {
+        if (seen.has(task.id)) continue;
+        seen.add(task.id);
+        tasks.push(task);
+      }
+
+      if (rawCount === 0 || rawCount < pageSize || !cursor || cursor === after) {
+        return tasks;
+      }
+      if (page >= maxPages) {
+        this.onWarn(
+          `vercel board tasks ${channelPrefix ?? ""} --state ${opts?.state ?? "open"}: stopped after ${maxPages} page(s) of ${pageSize} (${tasks.length} task(s)); results may be incomplete.`,
+        );
+        return tasks;
+      }
+      after = cursor;
+    }
+  }
+
+  private async listTasksPage(
+    channelPrefix: string | undefined,
+    opts: { state?: string; labels?: string[]; limit: number; after?: string; asProfile?: string },
+  ): Promise<{ items: BoardTask[]; rawCount: number; cursor: string | null }> {
     const args = ["tasks"];
     if (channelPrefix) {
       args.push(channelPrefix);
     }
-    if (opts?.state) {
+    if (opts.state) {
       args.push("--state", opts.state);
     }
-    if (opts?.limit) {
-      args.push("--limit", String(opts.limit));
+    args.push("--limit", String(opts.limit));
+    if (opts.after) {
+      args.push("--after", opts.after);
     }
-    for (const label of opts?.labels ?? []) {
+    for (const label of opts.labels ?? []) {
       args.push("--label", label);
     }
 
     let data: unknown;
     try {
-      data = await this.runJson(args, { asProfile: opts?.asProfile });
+      data = await this.runJson(args, { asProfile: opts.asProfile });
     } catch (err) {
-      const stdout =
-        typeof err === "object" && err !== null && "stdout" in err
-          ? String((err as { stdout?: unknown }).stdout ?? "")
-          : "";
-      const stderr =
-        typeof err === "object" && err !== null && "stderr" in err
-          ? String((err as { stderr?: unknown }).stderr ?? "")
-          : "";
-      const combined = `${stdout}\n${stderr}`;
+      const combined = describeExecError(err);
       if (combined.includes("channel_not_found")) {
-        return [];
+        return { items: [], rawCount: 0, cursor: null };
       }
       throw new Error(
         `vercel board tasks failed: ${combined.trim() || (err instanceof Error ? err.message : String(err))}`,
@@ -290,12 +366,27 @@ export class BoardClient {
     }
 
     const list = Array.isArray(envelope.data) ? envelope.data : envelope.data.tasks;
-    const tasks: BoardTask[] = [];
+    const rawCursor = Array.isArray(envelope.data) ? undefined : envelope.data.cursor;
+    const items: BoardTask[] = [];
     for (const item of list) {
       const normalized = normalizeBoardTask(item);
-      if (normalized) tasks.push(normalized);
+      if (normalized) items.push(normalized);
     }
-    return tasks;
+    return {
+      items,
+      rawCount: list.length,
+      cursor: rawCursor === undefined || rawCursor === null ? null : String(rawCursor),
+    };
+  }
+
+  /**
+   * Point lookup of one task via `vercel board read <id> --json`, whose `message.task` carries the
+   * task state and claim (state is `unknown` when the message is not a task).
+   */
+  async getTask(taskId: string): Promise<BoardTask | null> {
+    const cleanId = taskId.replace(/^#/, "");
+    const data = await this.runJson(["read", cleanId]);
+    return normalizeBoardTask(data);
   }
 
   async claimTaskById(
