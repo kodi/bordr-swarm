@@ -1,7 +1,12 @@
 import type { BoardClient } from "./board.ts";
 import type { SwarmConfig } from "./config.ts";
 import { buildFixRoundPrompt, renderReviewerPrompt } from "./review.ts";
-import { formatReviewTabLabel, formatTabLabel, shortTaskId } from "./routing.ts";
+import {
+  formatReviewTabLabel,
+  formatTabLabel,
+  reviewerBoardProfile,
+  shortTaskId,
+} from "./routing.ts";
 import {
   buildSessionRef,
   sanitizeAgentName,
@@ -178,7 +183,7 @@ async function executeSpawnReviewer(
   const shortId = shortTaskId(ctx.taskId);
   const implHandle = getImplHandle(task.phase);
   const implRef = handleToRef(deps.runtime, ctx.workspaceId, implHandle);
-  const reviewerBoardProfile = `reviewer-${deps.machineName}-${shortId}`;
+  const reviewerBoardProfileName = reviewerBoardProfile(deps.machineName, ctx.taskId);
   const reviewerAgentName = sanitizeAgentName(`r${nextRound}`, shortId);
   const reviewTabLabel = formatReviewTabLabel(ctx.taskId, reviewRuntime.profileName, nextRound);
   const ui = deps.runtime.uiName;
@@ -188,7 +193,7 @@ async function executeSpawnReviewer(
       taskId: ctx.taskId,
       channel: ctx.channel,
       project: ctx.projectSlug,
-      boardProfile: reviewerBoardProfile,
+      boardProfile: reviewerBoardProfileName,
       baseRef: ctx.startHeadSha ?? ctx.baseBranch,
       branch: ctx.branch,
       round: nextRound,
@@ -202,7 +207,7 @@ async function executeSpawnReviewer(
       groupId: ctx.workspaceId,
       cwd: reviewCwd,
       label: reviewTabLabel,
-      env: buildBoardEnv(deps.swarm, reviewerBoardProfile),
+      env: buildBoardEnv(deps.swarm, reviewerBoardProfileName),
       agent: {
         name: reviewerAgentName,
         kind: reviewRuntime.kind,
@@ -212,7 +217,7 @@ async function executeSpawnReviewer(
     });
 
     const reviewerHandle: SessionHandle = {
-      boardProfile: reviewerBoardProfile,
+      boardProfile: reviewerBoardProfileName,
       runtime: reviewRuntime,
       tabId: spawnRes.ref.tabId,
       paneId: spawnRes.ref.paneId,
@@ -264,7 +269,7 @@ async function executeSpawnReviewer(
         .reply(
           ctx.taskId,
           `Reviewer (${reviewRuntime.profileName}, round ${nextRound}/${ctx.reviewConfig.maxRounds}) paused on startup prompt in ${ui} on \`${deps.machineName}\` (workspace \`${ctx.projectSlug}\`). Approve/dismiss it in ${ui} to continue.`,
-          { asProfile: reviewerBoardProfile },
+          { asProfile: reviewerBoardProfileName },
         )
         .catch(() => {});
     } else if (spawnRes.promptNow) {

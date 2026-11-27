@@ -4,7 +4,7 @@ import { delimiter, isAbsolute, join } from "node:path";
 import { messageLabels, threadRootId, type SwarmEvent } from "../bus/events.ts";
 import type { EffectHandlers, Reactor, ReactorEffect } from "../bus/reactor.ts";
 import type { LogFn } from "../bus/timers.ts";
-import type { BoardClient } from "../lib/board.ts";
+import { buildBoardProfile, type BoardClient } from "../lib/board.ts";
 import { getMessageAuthorLabel, isAuthoredByProfile } from "../lib/lead-events.ts";
 import type { ConfiguredReactor, ReactorEventSelector } from "../lib/schemas.ts";
 
@@ -56,7 +56,9 @@ export function channelMatches(filter: string, channel: string): boolean {
 
 /** Board profile a `post` reactor writes as (also the profile it never reacts to). */
 export function reactorProfile(cfg: ConfiguredReactor): string {
-  return "post" in cfg.run && cfg.run.post.profile ? cfg.run.post.profile : `reactor-${cfg.name}`;
+  return "post" in cfg.run && cfg.run.post.profile
+    ? cfg.run.post.profile
+    : buildBoardProfile("reactor", cfg.name);
 }
 
 function truncate(text: string, max: number): string {

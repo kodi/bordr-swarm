@@ -24,6 +24,13 @@ import { matchesMachineLabels } from "../src/lib/routing.ts";
 import { parseSwarmAgentNameFromWindowLabel, RexRuntime } from "../src/lib/runtimes/rex-runtime.ts";
 import { createGitWorktreeManager, resolveWorktreePath } from "../src/lib/worktree.ts";
 import { shouldWakeDispatcher } from "../src/reactors/dispatcher-wake.ts";
+import {
+  buildWorkerServicePath,
+  MACOS_REX_BIN_DIR_REL,
+  renderLaunchdPlist,
+  renderSystemdWorkerUnit,
+  resolveRuntimeBinaryDir,
+} from "../scripts/apply-worker.ts";
 import { normalizeRuntimeAnswer, parseInitFlags } from "../scripts/init.ts";
 import { ManualTimers } from "./helpers/bus-fakes.ts";
 
@@ -700,5 +707,81 @@ describe("Slice 10: RexEventSource and Rex NDJSON event parser", () => {
     await src.stop();
     assert.equal(killed.length, 2);
     assert.ok(killed.every((k) => k.sig === "SIGTERM"));
+  });
+});
+
+describe("apply:worker service PATH for Rex runtime", () => {
+  it("resolves runtime binary directory from PATH or explicit path", () => {
+    assert.equal(
+      resolveRuntimeBinaryDir("/custom/dir/rex", { exists: () => false }),
+      "/custom/dir",
+    );
+    const macRexDir = `/Users/alice/${MACOS_REX_BIN_DIR_REL}`;
+    assert.equal(
+      resolveRuntimeBinaryDir("rex", {
+        pathEnv: `/usr/bin:${macRexDir}:/bin`,
+        exists: (p) => p === `${macRexDir}/rex`,
+      }),
+      macRexDir,
+    );
+    assert.equal(
+      resolveRuntimeBinaryDir("rex", { pathEnv: "/usr/bin:/bin", exists: () => false }),
+      null,
+    );
+  });
+
+  it("includes macOS Rex Server.app CLI dir and extra resolved dirs in launchd plist PATH", () => {
+    const macRexDir = `/Users/alice/${MACOS_REX_BIN_DIR_REL}`;
+    const plist = renderLaunchdPlist({
+      label: "dev.swarm.dispatcher",
+      repoRoot: "/repo",
+      home: "/Users/alice",
+      machine: "mac-worker",
+      nodeBin: "/Users/alice/.local/share/mise/shims/node",
+      vercelScope: "",
+      boardName: "",
+      runtimeKind: "rex",
+      extraPathDirs: [macRexDir, "/opt/custom/bin"],
+    });
+    assert.ok(plist.includes(macRexDir));
+    assert.ok(plist.includes("/opt/custom/bin"));
+    // Deduplicated: macRexDir appears once in PATH
+    assert.equal(plist.split(macRexDir).length - 1, 1);
+
+    const herdrPath = buildWorkerServicePath({
+      home: "/Users/alice",
+      os: "macos",
+      runtimeKind: "herdr",
+    });
+    assert.ok(!herdrPath.includes(MACOS_REX_BIN_DIR_REL));
+  });
+
+  it("includes extra runtime dir in Linux systemd unit and quotes PATH if needed", () => {
+    const plainUnit = renderSystemdWorkerUnit({
+      repoRoot: "/repo",
+      machine: "linux-worker",
+      vercelScope: "",
+      boardName: "",
+      runtimeKind: "rex",
+      home: "/home/alice",
+      extraPathDirs: ["/home/alice/.local/bin", "/opt/rex/bin"],
+    });
+    assert.ok(
+      plainUnit.includes(
+        "Environment=PATH=%h/.local/share/mise/shims:%h/.local/bin:/usr/local/bin:/usr/bin:/bin:/opt/rex/bin",
+      ),
+    );
+
+    const spacedUnit = renderSystemdWorkerUnit({
+      repoRoot: "/repo",
+      machine: "linux-worker",
+      vercelScope: "",
+      boardName: "",
+      runtimeKind: "rex",
+      home: "/home/alice",
+      extraPathDirs: ["/opt/Rex App/bin"],
+    });
+    assert.ok(spacedUnit.includes('Environment="PATH='));
+    assert.ok(spacedUnit.includes("/opt/Rex App/bin"));
   });
 });

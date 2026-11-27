@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   loadProjectsConfigOptional,
@@ -59,7 +59,79 @@ function resolveNodeExecutable(home: string): string {
   return process.execPath;
 }
 
-function renderLaunchdPlist(params: {
+/** Standard macOS install directory for the Rex CLI bundled inside Rex Server.app. */
+export const MACOS_REX_BIN_DIR_REL =
+  "Library/Application Support/com.superlogical.rex/RexServer/Versions/Current/Rex Server.app/Contents/MacOS";
+
+/**
+ * Resolves the directory containing a runtime binary (`rex`, `herdr`, or an explicit path)
+ * from `PATH`, so background services (launchd/systemd) inherit the same binary location as
+ * the interactive shell that ran `apply:worker`.
+ */
+export function resolveRuntimeBinaryDir(
+  binary: string,
+  opts?: { pathEnv?: string; exists?: (path: string) => boolean },
+): string | null {
+  const trimmed = binary.trim();
+  if (!trimmed) return null;
+  if (trimmed.includes("/")) {
+    return dirname(trimmed);
+  }
+  const checkExists = opts?.exists ?? existsSync;
+  const pathEnv = opts?.pathEnv ?? process.env.PATH ?? "";
+  for (const dir of pathEnv.split(delimiter)) {
+    const cleanDir = dir.trim();
+    if (!cleanDir) continue;
+    if (checkExists(join(cleanDir, trimmed))) {
+      return cleanDir;
+    }
+  }
+  return null;
+}
+
+export function buildWorkerServicePath(params: {
+  home: string;
+  os: "macos" | "linux";
+  runtimeKind?: "herdr" | "rex";
+  extraDirs?: readonly string[];
+}): string {
+  const baseDirs =
+    params.os === "macos"
+      ? [
+          `${params.home}/.local/share/mise/shims`,
+          `${params.home}/.local/bin`,
+          "/opt/homebrew/bin",
+          "/usr/local/bin",
+          "/usr/bin",
+          "/bin",
+        ]
+      : ["%h/.local/share/mise/shims", "%h/.local/bin", "/usr/local/bin", "/usr/bin", "/bin"];
+
+  const ordered: string[] = [];
+  const seen = new Set<string>();
+  const add = (dir: string | undefined): void => {
+    const clean = dir?.trim();
+    if (!clean || seen.has(clean)) return;
+    seen.add(clean);
+    ordered.push(clean);
+  };
+
+  for (const dir of baseDirs) add(dir);
+  if (params.os === "macos" && params.runtimeKind === "rex") {
+    add(join(params.home, MACOS_REX_BIN_DIR_REL));
+  }
+  for (const dir of params.extraDirs ?? []) {
+    // Avoid duplicating `~/.local/bin` vs `%h/.local/bin` on Linux systemd units
+    if (params.os === "linux" && params.home && dir.startsWith(`${params.home}/`)) {
+      add(`%h/${dir.slice(params.home.length + 1)}`);
+    } else {
+      add(dir);
+    }
+  }
+  return ordered.join(":");
+}
+
+export function renderLaunchdPlist(params: {
   label: string;
   repoRoot: string;
   home: string;
@@ -67,15 +139,15 @@ function renderLaunchdPlist(params: {
   nodeBin: string;
   vercelScope: string;
   boardName: string;
+  runtimeKind?: "herdr" | "rex";
+  extraPathDirs?: readonly string[];
 }): string {
-  const pathEnv = [
-    `${params.home}/.local/share/mise/shims`,
-    `${params.home}/.local/bin`,
-    "/opt/homebrew/bin",
-    "/usr/local/bin",
-    "/usr/bin",
-    "/bin",
-  ].join(":");
+  const pathEnv = buildWorkerServicePath({
+    home: params.home,
+    os: "macos",
+    runtimeKind: params.runtimeKind,
+    extraDirs: params.extraPathDirs,
+  });
 
   const envEntries: Array<[string, string]> = [
     ["PATH", pathEnv],
@@ -127,15 +199,26 @@ ${envXml}
 `;
 }
 
-function renderSystemdWorkerUnit(params: {
+export function renderSystemdWorkerUnit(params: {
   repoRoot: string;
   machine: string;
   vercelScope: string;
   boardName: string;
   runtimeKind?: "herdr" | "rex";
+  home?: string;
+  extraPathDirs?: readonly string[];
 }): string {
+  const pathEnv = buildWorkerServicePath({
+    home: params.home ?? "",
+    os: "linux",
+    runtimeKind: params.runtimeKind,
+    extraDirs: params.extraPathDirs,
+  });
+  const pathLine = /\s/.test(pathEnv)
+    ? `Environment="PATH=${pathEnv}"`
+    : `Environment=PATH=${pathEnv}`;
   const envLines = [
-    "Environment=PATH=%h/.local/share/mise/shims:%h/.local/bin:/usr/local/bin:/usr/bin:/bin",
+    pathLine,
     `Environment=SWARM_MACHINE=${params.machine}`,
     "Environment=NODE_NO_WARNINGS=1",
   ];
@@ -272,6 +355,9 @@ function main(): void {
   }
 
   const machineRuntime = resolveMachineRuntime(machineCfg);
+  const runtimeBinName = machineRuntime.kind === "rex" ? (machineRuntime.binary ?? "rex") : "herdr";
+  const detectedRuntimeDir = resolveRuntimeBinaryDir(runtimeBinName);
+  const extraPathDirs = detectedRuntimeDir ? [detectedRuntimeDir] : [];
 
   if (machineCfg.os === "macos") {
     const label = "dev.swarm.dispatcher";
@@ -296,7 +382,10 @@ function main(): void {
     );
 
     if (machineRuntime.kind === "rex" && !flags.dryRun) {
-      const rexBin = machineRuntime.binary ?? "rex";
+      const macRexFallback = join(home, MACOS_REX_BIN_DIR_REL, "rex");
+      const rexBin =
+        machineRuntime.binary ??
+        (!detectedRuntimeDir && existsSync(macRexFallback) ? macRexFallback : "rex");
       const check = runQuickCommand(rexBin, ["whoami", "--json"], 5_000);
       if (!check.ok) {
         console.warn(
@@ -313,6 +402,8 @@ function main(): void {
       nodeBin: resolveNodeExecutable(home),
       vercelScope: swarm.board.scope,
       boardName: swarm.board.boardName,
+      runtimeKind: machineRuntime.kind,
+      extraPathDirs,
     });
 
     const existing = existsSync(plistPath) ? readFileSync(plistPath, "utf8") : null;
@@ -400,6 +491,8 @@ function main(): void {
     vercelScope: swarm.board.scope,
     boardName: swarm.board.boardName,
     runtimeKind: machineRuntime.kind,
+    home,
+    extraPathDirs,
   });
 
   const existing = existsSync(unitPath) ? readFileSync(unitPath, "utf8") : null;
@@ -432,4 +525,9 @@ function main(): void {
   }
 }
 
-main();
+const isMain =
+  process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url));
+
+if (isMain) {
+  main();
+}

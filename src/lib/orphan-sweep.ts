@@ -3,6 +3,7 @@ import type { HerdrAgent } from "./herdr.ts";
 import {
   formatTabLabel,
   shortTaskId,
+  workerBoardProfile,
   type CandidateTask,
   type TaskRoutingResult,
 } from "./routing.ts";
@@ -27,13 +28,11 @@ export interface OrphanCandidate {
   implAgentName: string;
 }
 
-export function workerBoardProfile(machineName: string, taskId: string): string {
-  return `worker-${machineName}-${shortTaskId(taskId)}`;
-}
+export { workerBoardProfile };
 
 /**
- * Open tasks claimed by `worker-<machineName>-<shortId>` (an exact match, so a machine whose name
- * is a prefix of another's never picks up the other's work) that nothing tracks.
+ * Open tasks claimed by this machine's deterministic worker profile (an exact match, so a machine
+ * whose name is a prefix of another's never picks up the other's work) that nothing tracks.
  */
 export function findUntrackedOwnClaims(
   tasks: readonly BoardTask[],

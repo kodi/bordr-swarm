@@ -13,8 +13,10 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import { SwarmDispatcher } from "../src/dispatcher.ts";
 import {
+  BOARD_PROFILE_REGEX,
   BoardClient,
   extractJsonPayload,
+  MAX_BOARD_PROFILE_LENGTH,
   normalizeBoardTask,
   type BoardTask,
   type ExecRunner,
@@ -1675,6 +1677,112 @@ describe("SwarmDispatcher mocked lifecycle", () => {
       assert.ok(herdr.agentByName("w-951"), "agent is still alive");
       assert.equal(d.activeWorkers.size, 0, "completed task is not re-adopted by the sweep");
       assert.equal(board.callsFor("release", "951").length, 0);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it("uses <=32-char Board-valid profiles for long machine names and logs real claim errors", async () => {
+    const fx = createLifecycleFixture();
+    const longMachine = "example-macbook-pro";
+    const taskId = "msg_0a3e4c6e-f4ed-4d2c-bef5-beed17baf5c8_1";
+    try {
+      fx.swarm.machines[longMachine] = {
+        ...fx.swarm.machines["worker-machine"]!,
+        hostname: longMachine,
+        labels: [`machine=${longMachine}`, "os=macos"],
+      };
+      fx.projects.projects["repo-a"]!.defaultMachine = longMachine;
+      fx.projects.projects["repo-a"]!.paths[longMachine] =
+        fx.projects.projects["repo-a"]!.paths["worker-machine"]!;
+
+      const board = createFakeBoard([
+        {
+          id: taskId,
+          channel: "projects/repo-a",
+          state: "ready",
+          text: "Check git log",
+          labels: {},
+        },
+      ]);
+      const herdr = createFakeHerdr(FIXTURE_WORKSPACES);
+
+      // 1) Long machine name claims with a <=32-char profile matching Board rules
+      const d = new SwarmDispatcher({
+        repoRoot: fx.tmpBase,
+        swarm: fx.swarm,
+        projects: fx.projects,
+        machineName: longMachine,
+        board: new BoardClient({ scope: "test-team" }, board.runner),
+        herdr: new HerdrClient({ target: "local" }, herdr.runner),
+        promptTemplate: "Task {{TASK_ID}} as {{BOARD_PROFILE}}",
+        availableAgentKinds: new Set(["claude"]),
+        dryRun: false,
+      });
+      await d.tick();
+
+      const claims = board.callsFor("claim", taskId);
+      assert.equal(claims.length, 1);
+      const usedProfile = claims[0]![claims[0]!.indexOf("--as") + 1]!;
+      assert.ok(
+        usedProfile.length <= MAX_BOARD_PROFILE_LENGTH,
+        `expected <=32 chars, got ${usedProfile.length}: ${usedProfile}`,
+      );
+      assert.match(usedProfile, BOARD_PROFILE_REGEX);
+      assert.equal(d.activeWorkers.get(taskId)?.ctx.boardProfile, usedProfile);
+
+      // 2) Non-conflict claim failure logs ERROR with actual API detail (not "claimed by another host")
+      const board2 = createFakeBoard([
+        { id: taskId, channel: "projects/repo-a", state: "ready", text: "Fail 400", labels: {} },
+      ]);
+      const failingRunner: ExecRunner = async (cmd, args, opts) => {
+        if (args[1] === "tasks" && args[2] === "claim") {
+          const err = new Error("Command failed: vercel board tasks claim") as Error & {
+            stdout?: string;
+            stderr?: string;
+          };
+          err.stdout = JSON.stringify({
+            status: "error",
+            reason: "invalid_arguments",
+            data: { error: { code: "invalid_request", message: "bad profile", status: 400 } },
+          });
+          err.stderr = "";
+          throw err;
+        }
+        return board2.runner(cmd, args, opts);
+      };
+
+      const errors: string[] = [];
+      const infos: string[] = [];
+      const origError = console.error;
+      const origLog = console.log;
+      console.error = (...args: unknown[]) => errors.push(args.map(String).join(" "));
+      console.log = (...args: unknown[]) => infos.push(args.map(String).join(" "));
+      try {
+        const dErr = new SwarmDispatcher({
+          repoRoot: fx.tmpBase,
+          swarm: fx.swarm,
+          projects: fx.projects,
+          machineName: longMachine,
+          board: new BoardClient({ scope: "test-team" }, failingRunner),
+          herdr: new HerdrClient({ target: "local" }, herdr.runner),
+          promptTemplate: "x",
+          availableAgentKinds: new Set(["claude"]),
+          dryRun: false,
+        });
+        await dErr.tick();
+      } finally {
+        console.error = origError;
+        console.log = origLog;
+      }
+
+      assert.ok(
+        errors.some(
+          (line) => line.includes("Failed to claim task") && line.includes("bad profile"),
+        ),
+        `expected ERROR log with API message, got errors=${JSON.stringify(errors)} infos=${JSON.stringify(infos)}`,
+      );
+      assert.ok(!infos.some((line) => line.includes("claimed by another host")));
     } finally {
       fx.cleanup();
     }

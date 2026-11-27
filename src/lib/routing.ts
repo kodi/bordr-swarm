@@ -1,4 +1,4 @@
-import type { BoardTask } from "./board.ts";
+import { buildBoardProfile, type BoardTask } from "./board.ts";
 import {
   resolveReviewerConfig,
   resolveWorkerRuntime,
@@ -297,6 +297,16 @@ export function shortTaskId(taskId: string): string {
   const msgUuid = /^msg_([a-zA-Z0-9]{8})/.exec(taskId);
   if (msgUuid?.[1]) return msgUuid[1];
   return taskId.replace(/^#/, "").slice(0, 12);
+}
+
+/** Deterministic, Board-safe `--as` profile for an implementer worker on a machine/task. */
+export function workerBoardProfile(machineName: string, taskId: string): string {
+  return buildBoardProfile("worker", machineName, shortTaskId(taskId));
+}
+
+/** Deterministic, Board-safe `--as` profile for a reviewer agent on a machine/task. */
+export function reviewerBoardProfile(machineName: string, taskId: string): string {
+  return buildBoardProfile("reviewer", machineName, shortTaskId(taskId));
 }
 
 export type TabLabelPrefix = "BLOCKED" | "FAILED" | "ORPHANED";

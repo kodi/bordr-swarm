@@ -7,6 +7,7 @@ import {
   buildParkedAdoption,
   decideOrphan,
   findUntrackedOwnClaims,
+  workerBoardProfile,
 } from "../src/lib/orphan-sweep.ts";
 import type { CandidateTask, TaskRoutingResult } from "../src/lib/routing.ts";
 
@@ -126,5 +127,25 @@ describe("orphan sweep (pure)", () => {
     assert.equal(parked.reason, "blocked");
     assert.equal(parked.tabId, "t-w-1");
     assert.equal(parked.projectSlug, "app");
+  });
+
+  it("matches long machine names via the same <=32-char deterministic profile without prefix collisions", () => {
+    const taskId = "msg_0a3e4c6e-f4ed-4d2c-bef5-beed17baf5c8_1";
+    const ownProfile = workerBoardProfile("example-macbook-pro-1", taskId);
+    const otherProfile = workerBoardProfile("example-macbook-pro-2", taskId);
+    assert.ok(ownProfile.length <= 32);
+    assert.notEqual(ownProfile, otherProfile);
+
+    const found = findUntrackedOwnClaims(
+      [
+        task(taskId, { assignee: ownProfile }),
+        task("msg_11111111-f4ed-4d2c-bef5-beed17baf5c8_1", { assignee: otherProfile }),
+      ],
+      new Set(),
+      "example-macbook-pro-1",
+    );
+    assert.equal(found.length, 1);
+    assert.equal(found[0]?.boardProfile, ownProfile);
+    assert.equal(found[0]?.implAgentName, "w-0a3e4c6e");
   });
 });

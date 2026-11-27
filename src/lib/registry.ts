@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import type { BoardClient } from "./board.ts";
+import { registryBoardProfile, type BoardClient } from "./board.ts";
 import { resolveReviewerConfig, type ProjectsConfig, type SwarmConfig } from "./config.ts";
 import {
   GitHubRepoSchema,
@@ -201,7 +201,7 @@ export async function publishMachineRegistry(params: {
   entry: MachineRegistryEntry;
   asProfile?: string;
 }): Promise<{ action: "created" | "updated" | "unchanged"; messageId: string }> {
-  const profile = params.asProfile ?? `registry-${params.entry.machine}`;
+  const profile = params.asProfile ?? registryBoardProfile(params.entry.machine);
   await params.board.ensureChannel(params.registryChannel, { asProfile: profile });
 
   const { threads } = await params.board.readChannel(params.registryChannel, { limit: 100 });

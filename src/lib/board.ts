@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { basename } from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
@@ -49,6 +50,67 @@ export interface BoardClientOptions {
 export const DEFAULT_TASK_PAGE_SIZE = 50;
 /** Hard cap on pages fetched by one `listTasks` call, so a misbehaving cursor cannot loop forever. */
 export const DEFAULT_TASK_MAX_PAGES = 20;
+
+/** Maximum length enforced by Vercel Board for `--as` profile names. */
+export const MAX_BOARD_PROFILE_LENGTH = 32;
+/** Vercel Board profile format: starts with a letter, up to 32 letters/numbers/hyphens. */
+export const BOARD_PROFILE_REGEX = /^[a-zA-Z][a-zA-Z0-9-]{0,31}$/;
+
+function sanitizeProfileToken(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+/**
+ * Builds a Vercel Board `--as` profile name guaranteed to match Board's profile rules
+ * (`^[a-z][a-z0-9-]{0,31}$`).
+ *
+ * When `<prefix>-<name>` (or `<prefix>-<name>-<suffix>`) is already valid and within 32 chars,
+ * it is returned unchanged. Otherwise, the middle `<name>` segment is shortened with a
+ * deterministic 6-char SHA-256 hash of the raw `name` so distinct long or non-ASCII machine
+ * names never collide.
+ */
+export function buildBoardProfile(prefix: string, name: string, suffix?: string): string {
+  let cleanPrefix = sanitizeProfileToken(prefix);
+  if (!cleanPrefix || !/^[a-z]/.test(cleanPrefix)) {
+    cleanPrefix = cleanPrefix ? `p-${cleanPrefix}` : "p";
+  }
+  cleanPrefix = cleanPrefix.slice(0, 12).replace(/-+$/, "") || "p";
+
+  const rawSuffix = suffix ? sanitizeProfileToken(suffix) : "";
+  const cleanSuffix = rawSuffix.slice(0, 12).replace(/-+$/, "");
+
+  const cleanName = sanitizeProfileToken(name);
+  const fixedOverhead = cleanPrefix.length + 1 + (cleanSuffix ? cleanSuffix.length + 1 : 0);
+  const nameBudget = Math.max(0, MAX_BOARD_PROFILE_LENGTH - fixedOverhead);
+
+  const nameLossless = cleanName.length > 0 && cleanName === name.toLowerCase();
+  let namePart: string;
+  if (nameLossless && cleanName.length <= nameBudget) {
+    namePart = cleanName;
+  } else if (nameBudget === 0) {
+    namePart = "";
+  } else {
+    const hash = createHash("sha256").update(name).digest("hex").slice(0, 6);
+    if (nameBudget <= hash.length) {
+      namePart = hash.slice(0, nameBudget);
+    } else {
+      const headBudget = nameBudget - hash.length - 1;
+      const head = cleanName.slice(0, headBudget).replace(/-+$/, "");
+      namePart = head ? `${head}-${hash}` : hash;
+    }
+  }
+
+  const parts = [cleanPrefix, namePart, cleanSuffix].filter(Boolean);
+  return parts.join("-").slice(0, MAX_BOARD_PROFILE_LENGTH).replace(/-+$/, "");
+}
+
+export function registryBoardProfile(machineName: string): string {
+  return buildBoardProfile("registry", machineName);
+}
 
 /**
  * Board claim actors look like `<scheme>:user:<id>+<profile>` (e.g. `vercel:user:123+worker-1`
@@ -216,7 +278,125 @@ export function normalizeBoardTask(raw: unknown): BoardTask | null {
   };
 }
 
-function describeExecError(err: unknown): string {
+export interface ParsedBoardError {
+  code?: string;
+  httpStatus?: number;
+  message?: string;
+}
+
+export function parseBoardErrorOutput(stdout: string, stderr: string): ParsedBoardError | null {
+  for (const raw of [stdout, stderr]) {
+    if (!raw.trim()) continue;
+    try {
+      const payload = extractJsonPayload(raw);
+      const rootRes = RecordSchema.safeParse(payload);
+      if (!rootRes.success) continue;
+      const root = rootRes.data;
+      const dataRes = RecordSchema.safeParse(root.data);
+      const nestedErrRes = RecordSchema.safeParse(
+        (dataRes.success ? dataRes.data.error : undefined) ?? root.error,
+      );
+      const nestedErr = nestedErrRes.success ? nestedErrRes.data : null;
+
+      const code =
+        typeof nestedErr?.code === "string"
+          ? nestedErr.code
+          : typeof root.code === "string"
+            ? root.code
+            : typeof root.reason === "string"
+              ? root.reason
+              : undefined;
+      const httpStatus =
+        typeof nestedErr?.status === "number"
+          ? nestedErr.status
+          : typeof root.statusCode === "number"
+            ? root.statusCode
+            : undefined;
+      const message =
+        typeof nestedErr?.message === "string" && nestedErr.message.trim()
+          ? nestedErr.message.trim()
+          : typeof root.message === "string" && root.message.trim()
+            ? root.message.trim()
+            : undefined;
+
+      if (code || httpStatus !== undefined || message) {
+        return { code, httpStatus, message };
+      }
+    } catch {
+      // Output is not JSON; fall back to plain text
+    }
+  }
+  return null;
+}
+
+export class BoardCommandError extends Error {
+  readonly subcommand: string;
+  readonly code?: string;
+  readonly httpStatus?: number;
+  readonly stdout: string;
+  readonly stderr: string;
+
+  constructor(params: {
+    message: string;
+    subcommand: string;
+    code?: string;
+    httpStatus?: number;
+    stdout: string;
+    stderr: string;
+    cause?: unknown;
+  }) {
+    super(params.message, { cause: params.cause });
+    this.name = "BoardCommandError";
+    this.subcommand = params.subcommand;
+    this.code = params.code;
+    this.httpStatus = params.httpStatus;
+    this.stdout = params.stdout;
+    this.stderr = params.stderr;
+  }
+}
+
+export function isClaimConflictError(err: unknown): boolean {
+  if (err instanceof BoardCommandError) {
+    if (err.httpStatus === 409) return true;
+    if (
+      err.code &&
+      /^(already_claimed|task_already_claimed|conflict|not_ready|claim_conflict)$/i.test(err.code)
+    ) {
+      return true;
+    }
+  }
+  const combined =
+    `${describeExecError(err)}\n${err instanceof Error ? err.message : String(err)}`.toLowerCase();
+  return (
+    combined.includes("already claimed") ||
+    combined.includes("already_claimed") ||
+    combined.includes("not ready") ||
+    combined.includes("not_ready") ||
+    combined.includes("claim conflict")
+  );
+}
+
+const SUBCOMMANDS_WITH_ACTION = new Set(["tasks", "channels"]);
+const KNOWN_SUBACTIONS = new Set([
+  "claim",
+  "renew",
+  "complete",
+  "fail",
+  "block",
+  "release",
+  "create",
+]);
+
+function formatSubcommandLabel(binary: string, subcommandArgs: string[]): string {
+  const isVercelCli = basename(binary) === "vercel";
+  const head = subcommandArgs[0] ?? "";
+  const second = subcommandArgs[1] ?? "";
+  const sub =
+    SUBCOMMANDS_WITH_ACTION.has(head) && KNOWN_SUBACTIONS.has(second) ? `${head} ${second}` : head;
+  return isVercelCli ? `vercel board ${sub}`.trim() : `${basename(binary)} ${sub}`.trim();
+}
+
+function extractExecStreams(err: unknown): { stdout: string; stderr: string } {
   const stdout =
     typeof err === "object" && err !== null && "stdout" in err
       ? String((err as { stdout?: unknown }).stdout ?? "")
@@ -225,7 +405,19 @@ function describeExecError(err: unknown): string {
     typeof err === "object" && err !== null && "stderr" in err
       ? String((err as { stderr?: unknown }).stderr ?? "")
       : "";
+  return { stdout, stderr };
+}
+
+function describeExecError(err: unknown): string {
+  const { stdout, stderr } = extractExecStreams(err);
   return `${stdout}\n${stderr}`;
+}
+
+function isChannelNotFoundError(err: unknown): boolean {
+  if (err instanceof BoardCommandError && err.code === "channel_not_found") {
+    return true;
+  }
+  return describeExecError(err).includes("channel_not_found");
 }
 
 export class BoardClient {
@@ -293,9 +485,35 @@ export class BoardClient {
     opts?: { asProfile?: string; timeoutMs?: number },
   ): Promise<unknown> {
     const args = this.buildArgs(subcommandArgs, { asProfile: opts?.asProfile, json: true });
-    const { stdout } = await this.runner(this.binary, args, {
-      timeoutMs: opts?.timeoutMs ?? this.timeoutMs,
-    });
+    let stdout: string;
+    try {
+      const res = await this.runner(this.binary, args, {
+        timeoutMs: opts?.timeoutMs ?? this.timeoutMs,
+      });
+      stdout = res.stdout;
+    } catch (err) {
+      if (err instanceof BoardCommandError) throw err;
+      const { stdout: errStdout, stderr: errStderr } = extractExecStreams(err);
+      const parsed = parseBoardErrorOutput(errStdout, errStderr);
+      const cmdLabel = formatSubcommandLabel(this.binary, subcommandArgs);
+      const tagParts = [
+        parsed?.httpStatus !== undefined ? String(parsed.httpStatus) : "",
+        parsed?.code ?? "",
+      ].filter(Boolean);
+      const tag = tagParts.length > 0 ? ` (${tagParts.join(" ")})` : "";
+      const rawOutput = [errStderr.trim(), errStdout.trim()].filter(Boolean).join(" | ");
+      const fallback = err instanceof Error ? err.message : String(err);
+      const detail = parsed?.message ?? (rawOutput ? rawOutput.slice(0, 600) : fallback);
+      throw new BoardCommandError({
+        message: `${cmdLabel} failed${tag}: ${detail}`,
+        subcommand: cmdLabel,
+        code: parsed?.code,
+        httpStatus: parsed?.httpStatus,
+        stdout: errStdout,
+        stderr: errStderr,
+        cause: err,
+      });
+    }
     return extractJsonPayload(stdout);
   }
 
@@ -374,14 +592,10 @@ export class BoardClient {
     try {
       data = await this.runJson(args, { asProfile: opts.asProfile });
     } catch (err) {
-      const combined = describeExecError(err);
-      if (combined.includes("channel_not_found")) {
+      if (isChannelNotFoundError(err)) {
         return { items: [], rawCount: 0, cursor: null };
       }
-      throw new Error(
-        `vercel board tasks failed: ${combined.trim() || (err instanceof Error ? err.message : String(err))}`,
-        { cause: err },
-      );
+      throw err;
     }
 
     const envelope = BoardTaskListEnvelopeSchema.safeParse(data);
@@ -524,22 +738,10 @@ export class BoardClient {
     try {
       data = await this.runJson(args);
     } catch (err) {
-      const stdout =
-        typeof err === "object" && err !== null && "stdout" in err
-          ? String((err as { stdout?: unknown }).stdout ?? "")
-          : "";
-      const stderr =
-        typeof err === "object" && err !== null && "stderr" in err
-          ? String((err as { stderr?: unknown }).stderr ?? "")
-          : "";
-      const combined = `${stdout}\n${stderr}`;
-      if (combined.includes("channel_not_found")) {
+      if (isChannelNotFoundError(err)) {
         return { threads: [], cursor: null };
       }
-      throw new Error(
-        `vercel board read ${clean} failed: ${combined.trim() || (err instanceof Error ? err.message : String(err))}`,
-        { cause: err },
-      );
+      throw err;
     }
 
     const parsed = BoardReadChannelEnvelopeSchema.parse(data);

@@ -18,7 +18,7 @@ import {
 } from "./bus/reactor.ts";
 import { WakeScheduler } from "./bus/scheduler.ts";
 import { realTimers, type Timers } from "./bus/timers.ts";
-import { BoardClient, type BoardTask } from "./lib/board.ts";
+import { BoardClient, isClaimConflictError, type BoardTask } from "./lib/board.ts";
 import {
   BUILTIN_AGENT_KINDS,
   DEFAULT_RECONCILE_INTERVAL_SECONDS,
@@ -67,8 +67,10 @@ import {
   formatTabLabel,
   renderWorkerPrompt,
   resolveTaskRouting,
+  reviewerBoardProfile,
   selectEligibleTasks,
   shortTaskId,
+  workerBoardProfile,
   type CandidateTask,
 } from "./lib/routing.ts";
 import {
@@ -824,7 +826,7 @@ export class SwarmDispatcher {
   private async claimAndSpawn(candidate: CandidateTask): Promise<boolean> {
     const { task, projectSlug, project, repoPath, useWorktree, runtime, reviewer } = candidate;
     const shortId = shortTaskId(task.id);
-    const boardProfile = `worker-${this.machineName}-${shortId}`;
+    const boardProfile = workerBoardProfile(this.machineName, task.id);
 
     try {
       await this.board.claimTaskById(task.id, {
@@ -832,10 +834,12 @@ export class SwarmDispatcher {
         lease: this.swarm.board.leaseDuration,
       });
     } catch (err) {
-      log(
-        "WARN",
-        `Could not claim task #${task.id} (likely claimed by another host): ${err instanceof Error ? err.message : String(err)}`,
-      );
+      const detail = err instanceof Error ? err.message : String(err);
+      if (isClaimConflictError(err)) {
+        log("WARN", `Could not claim task #${task.id} (claimed by another host): ${detail}`);
+      } else {
+        log("ERROR", `Failed to claim task #${task.id} as ${boardProfile}: ${detail}`);
+      }
       return false;
     }
 
@@ -1064,7 +1068,7 @@ export class SwarmDispatcher {
     });
     if (!thread) return { kind: "none" };
 
-    const reviewerProfileName = `reviewer-${this.machineName}-${shortTaskId(task.ctx.taskId)}`;
+    const reviewerProfileName = reviewerBoardProfile(this.machineName, task.ctx.taskId);
     const readyMatch = findReadyForReviewReply(
       thread.replies,
       task.phaseSeenReplyIds,
