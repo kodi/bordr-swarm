@@ -215,9 +215,12 @@ export function parseSwarmConfig(input: unknown, sourceLabel = "swarm.json"): Sw
         skipIfNoDiff: true,
       };
 
+  const resolvedBoardUrl = (process.env.BOARD_URL || parsed.board.url || "").trim();
+
   return {
     board: {
       ...parsed.board,
+      ...(resolvedBoardUrl ? { url: resolvedBoardUrl } : {}),
       scope: (process.env.VERCEL_SCOPE || parsed.board.scope).trim(),
       boardName: (process.env.VERCEL_BOARD_NAME || parsed.board.boardName).trim(),
     },

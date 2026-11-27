@@ -1015,8 +1015,10 @@ async function main(): Promise<void> {
     projectsConfigPath,
     machineName,
     board: new BoardClient({
+      url: swarm.board.url,
       scope: swarm.board.scope,
       boardName: swarm.board.boardName,
+      binary: process.env.BOARD_CLI_BIN,
       onWarn: (message) => log("WARN", message),
     }),
     herdr: new HerdrClient({ target: machineCfg.herdrTarget }),

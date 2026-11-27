@@ -11,6 +11,10 @@
       "default": {},
       "type": "object",
       "properties": {
+        "url": {
+          "description": "Optional self-hosted or custom Board URL passed via `--url` / `BOARD_URL` (overridden by `BOARD_URL` env var). When set, `--scope` is omitted.",
+          "type": "string"
+        },
         "scope": {
           "default": "",
           "description": "Optional Vercel team slug passed as `--scope` (or overridden by VERCEL_SCOPE env var). Leave empty (\"\") to use the default team from `vercel login`.",

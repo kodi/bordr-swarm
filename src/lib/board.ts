@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { basename } from "node:path";
 import { promisify } from "node:util";
 import { z } from "zod";
 import {
@@ -35,6 +36,7 @@ export interface BoardTask {
 }
 
 export interface BoardClientOptions {
+  url?: string;
   scope?: string;
   boardName?: string;
   binary?: string;
@@ -49,12 +51,13 @@ export const DEFAULT_TASK_PAGE_SIZE = 50;
 export const DEFAULT_TASK_MAX_PAGES = 20;
 
 /**
- * Board claim actors look like `vercel:user:<id>+<profile>`; return just the profile part so it
- * can be compared with the `--as` profile names the dispatcher uses. Plain values pass through.
+ * Board claim actors look like `<scheme>:user:<id>+<profile>` (e.g. `vercel:user:123+worker-1`
+ * or `local:user:test+worker-1`); return just the profile part so it can be compared with the
+ * `--as` profile names the dispatcher uses. Plain values pass through.
  */
 export function claimProfileFromActor(actor: string): string {
   const plusIdx = actor.lastIndexOf("+");
-  if (plusIdx >= 0 && actor.startsWith("vercel:")) {
+  if (plusIdx >= 0 && actor.includes(":")) {
     return actor.slice(plusIdx + 1);
   }
   return actor;
@@ -226,6 +229,7 @@ function describeExecError(err: unknown): string {
 }
 
 export class BoardClient {
+  readonly url: string;
   readonly scope: string;
   readonly boardName: string;
   readonly binary: string;
@@ -235,9 +239,10 @@ export class BoardClient {
 
   constructor(options: BoardClientOptions = {}, runner: ExecRunner = defaultRunner) {
     this.onWarn = options.onWarn ?? ((message) => console.warn(message));
+    this.url = options.url?.trim() ?? "";
     this.scope = options.scope?.trim() ?? "";
     this.boardName = options.boardName?.trim() ?? "";
-    this.binary = options.binary ?? "vercel";
+    this.binary = options.binary?.trim() || "vercel";
     this.timeoutMs = options.timeoutMs ?? 30_000;
     this.runner = runner;
   }
@@ -246,18 +251,23 @@ export class BoardClient {
     subcommandArgs: string[],
     opts?: { asProfile?: string; json?: boolean },
   ): string[] {
-    const args = ["board", ...subcommandArgs];
+    const isVercelCli = basename(this.binary) === "vercel";
+    const args = isVercelCli ? ["board", ...subcommandArgs] : [...subcommandArgs];
     if (opts?.json !== false) {
       args.push("--json");
     }
     if (opts?.asProfile) {
       args.push("--as", opts.asProfile);
     }
-    if (this.boardName) {
-      args.push("--name", this.boardName);
-    }
-    if (this.scope) {
-      args.push("--scope", this.scope);
+    if (this.url) {
+      args.push("--url", this.url);
+    } else {
+      if (this.boardName) {
+        args.push("--name", this.boardName);
+      }
+      if (this.scope) {
+        args.push("--scope", this.scope);
+      }
     }
     return args;
   }

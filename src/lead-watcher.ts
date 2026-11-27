@@ -420,8 +420,17 @@ export class LeadWatcher {
     const env: Record<string, string> = {
       BOARD_PROFILE: this.swarm.lead.boardProfile,
     };
-    if (this.swarm.board.scope) env.VERCEL_SCOPE = this.swarm.board.scope;
-    if (this.swarm.board.boardName) env.VERCEL_BOARD_NAME = this.swarm.board.boardName;
+    const boardUrl = (this.swarm.board.url || process.env.BOARD_URL || "").trim();
+    if (boardUrl) {
+      env.BOARD_URL = boardUrl;
+    } else {
+      if (this.swarm.board.scope) env.VERCEL_SCOPE = this.swarm.board.scope;
+      if (this.swarm.board.boardName) env.VERCEL_BOARD_NAME = this.swarm.board.boardName;
+    }
+    const boardToken = (process.env.BOARD_TOKEN || "").trim();
+    if (boardToken) {
+      env.BOARD_TOKEN = boardToken;
+    }
 
     const leadArgs = buildAgentCliArgs({
       kind: "claude",
@@ -709,8 +718,10 @@ async function main(): Promise<void> {
   const watcher = new LeadWatcher({
     swarm,
     board: new BoardClient({
+      url: swarm.board.url,
       scope: swarm.board.scope,
       boardName: swarm.board.boardName,
+      binary: process.env.BOARD_CLI_BIN,
       onWarn: (message) => log("WARN", message),
     }),
     herdr: new HerdrClient({ target: machineCfg.herdrTarget }),

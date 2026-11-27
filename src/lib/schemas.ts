@@ -173,6 +173,12 @@ export const ProjectReviewerOverrideSchema = z
 
 export const BoardConfigSchema = z
   .object({
+    url: z
+      .string()
+      .optional()
+      .describe(
+        "Optional self-hosted or custom Board URL passed via `--url` / `BOARD_URL` (overridden by `BOARD_URL` env var). When set, `--scope` is omitted.",
+      ),
     scope: z
       .string()
       .default("")

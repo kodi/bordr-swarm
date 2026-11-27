@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# A newer push replaces a run in progress, except on main, where the full suite always finishes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Checks on Node ${{ matrix.node }}
+    # A branch in this repository already runs on push, so only pull requests from forks run here.
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["24", "26"]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run check
+      - run: npm --prefix tests/e2e ci
+      - run: npm --prefix tests/e2e run typecheck
+
+  e2e:
+    name: Docker Compose E2E
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: tests/e2e/package-lock.json
+      - run: npm --prefix tests/e2e ci
+      - name: Run Docker Compose E2E suite
+        env:
+          SWARM_E2E_FRESH: "1"
+        run: npm --prefix tests/e2e run e2e

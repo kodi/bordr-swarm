@@ -33,10 +33,23 @@ export interface EffectExecutorDeps {
   log: LogFn;
 }
 
-export function buildBoardEnv(swarm: SwarmConfig, boardProfile: string): Record<string, string> {
+export function buildBoardEnv(
+  swarm: SwarmConfig,
+  boardProfile: string,
+  processEnv: NodeJS.ProcessEnv = process.env,
+): Record<string, string> {
   const env: Record<string, string> = { BOARD_PROFILE: boardProfile };
-  if (swarm.board.scope) env.VERCEL_SCOPE = swarm.board.scope;
-  if (swarm.board.boardName) env.VERCEL_BOARD_NAME = swarm.board.boardName;
+  const boardUrl = (swarm.board.url || processEnv.BOARD_URL || "").trim();
+  if (boardUrl) {
+    env.BOARD_URL = boardUrl;
+  } else {
+    if (swarm.board.scope) env.VERCEL_SCOPE = swarm.board.scope;
+    if (swarm.board.boardName) env.VERCEL_BOARD_NAME = swarm.board.boardName;
+  }
+  const boardToken = (processEnv.BOARD_TOKEN || "").trim();
+  if (boardToken) {
+    env.BOARD_TOKEN = boardToken;
+  }
   return env;
 }
 
