@@ -137,3 +137,20 @@ run = "vercel board whoami"
 [tasks."board:ui"]
 description = "Run the Vercel Board viewer locally on 127.0.0.1:4747"
 run = "board inspect --port 4747 --no-open"
+
+[tasks.e2e]
+description = "Run Docker Compose end-to-end swarm tests (reuses warm stack via vitecompose)"
+run = "npm --prefix tests/e2e run e2e"
+
+[tasks."e2e:one"]
+description = "Run one Docker Compose E2E test by name filter (pass -t pattern)"
+run = "npm --prefix tests/e2e exec -- vitest run -t \"{{arg(name='pattern')}}\""
+
+[tasks."e2e:fresh"]
+description = "Run Docker Compose E2E tests on a fresh stack (deleted afterward)"
+env = { SWARM_E2E_FRESH = "1", VITECOMPOSE_PROJECT = "bordr-swarm-e2e-fresh" }
+run = "npm --prefix tests/e2e run e2e"
+
+[tasks."e2e:down"]
+description = "Tear down the kept Docker Compose E2E stack and volumes"
+run = "docker compose -p bordr-swarm-e2e down -v --remove-orphans"

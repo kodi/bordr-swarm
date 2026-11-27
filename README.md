@@ -134,7 +134,7 @@ Every machine has the same commands, so you never need to remember `systemctl --
 | `mise run status`                | Shows running services, Board UI health, and active agents on this machine.                           |
 | `mise run logs -- -f`            | Follows the logs (`lead-watcher`, `ui`, or `dispatcher`).                                             |
 | `mise run doctor`                | Checks tools, config, Vercel login, Herdr, and Tailscale, with a one-line fix for each problem.       |
-| `mise run update`                | Pulls the latest version, syncs tools, and restarts what changed.                                     |
+| `mise run update`                | Pulls the latest version, syncs tools, and restarts what changed. Safe with tasks in flight.          |
 | `mise run stop`                  | Stops all swarm services. Add `-- --reset` to start from a clean slate.                               |
 
 <details>

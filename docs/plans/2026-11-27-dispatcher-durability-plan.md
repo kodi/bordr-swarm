@@ -101,7 +101,7 @@ Serialization: introduce a `PersistedDispatcherState` type (`version: 1`, `machi
 
 ### Slice 1: Paginated, open-only task discovery
 
-Status: `[ ]` Not started
+Status: `[x]` Done
 
 - Goal: task discovery is correct at any board size.
 - Why here: smallest change, independent of everything else, and it is a live time bomb.
@@ -121,7 +121,7 @@ Status: `[ ]` Not started
 
 ### Slice 2: Persisted state schema and store (pure)
 
-Status: `[ ]` Not started
+Status: `[x]` Done
 
 - Goal: a tested, versioned, serializable representation of dispatcher state.
 - Why here: establishes the contract before any behavior depends on it.
@@ -135,7 +135,7 @@ Status: `[ ]` Not started
 
 ### Slice 3: Wire persistence into the dispatcher
 
-Status: `[ ]` Not started
+Status: `[x]` Done
 
 - Goal: a restarted dispatcher resumes tracking the same tasks and tabs.
 - Why here: needs the store from Slice 2 and correct Board lookups from Slice 1.
@@ -154,7 +154,7 @@ Status: `[ ]` Not started
 
 ### Slice 4: Model lost claims and lapsed leases in the FSM
 
-Status: `[ ]` Not started
+Status: `[x]` Done
 
 - Goal: defined behavior when the dispatcher was down longer than the lease.
 - Why here: Slice 3 makes this state reachable in a controlled way; before it, the state was reachable only as silent corruption.
@@ -171,7 +171,7 @@ Status: `[ ]` Not started
 
 ### Slice 5: Orphan sweep for the no-state case
 
-Status: `[ ]` Not started
+Status: `[x]` Done
 
 - Goal: recover sensibly when there is no usable state file (first deploy of this change, corrupted file, manual wipe).
 - Why here: a fallback for the path Slices 3 and 4 make primary; lowest value, so last among code slices.
@@ -185,7 +185,7 @@ Status: `[ ]` Not started
 
 ### Slice 6: Docs and operational polish
 
-Status: `[ ]` Not started
+Status: `[x]` Done (docs, `update` restart skip, and a dry-run against the live board; the manual restart check in the Testing Plan has not been run yet, see Working Notes)
 
 - Goal: docs match behavior.
 - This slice should implement:
@@ -234,7 +234,40 @@ Status: `[ ]` Not started
 ## Working Notes
 
 - 2026-11-27: Plan written from a code review. Listing order, completed-task inclusion, and the non-null cursor on a short page were checked against a live board. Lease-expiry behavior was _not_ checked. No code has been changed.
+- 2026-11-27 (Slice 1, empirical, scratch channel with a 30s lease, probe tasks canceled afterwards):
+  - **OQ3:** `--state open` returns `ready`, `claimed`, and `blocked` tasks (and, per the CLI help, `waiting`). `failed`, `completed`, and `canceled` are **not** open. So a tracked task that fails also needs the point lookup.
+  - **OQ4:** `vercel board read <id> --json` returns `{ message: { …, task: { state, claim: { actor, until }, blocked, epoch } }, replies: [...], cursor }`. `normalizeBoardTask` handles it as-is; `BoardClient.getTask` reuses it. Empty task lists come back with `cursor: "0"`, and our fakes use `cursor: null`, so the envelope schema now accepts a nullable cursor.
+  - **OQ1:** when a lease runs out, the task-list view reports it `ready` with no distinct event. The single-thread `read` view can lag: it kept reporting `claimed` with the stale `claim.until` until the next write touched the task (the failed `renew`), after which it reported `ready`, `claim: null`. Do not rely on `read` alone to detect a lapse.
+  - **OQ2:** `renew` after expiry fails with `{"status":"error","reason":"claim_lost"}`. The same profile can then `claim` again (the task's `epoch` increments). A different profile cannot `claim` while the task is held, and cannot `renew` someone else's claim.
+  - Claim actors are `vercel:user:<id>+<profile>`. `normalizeBoardTask` now strips that to the profile (`claimProfileFromActor`) so `assignee` compares equal to our `--as` names. Before this, `stepParkedTab`'s "owned by someone else" check could never match our own profile and a resumed `[BLOCKED]` tab never unparked against a real board.
+  - Implemented: `listTasks` follows `--after` until a short or empty page (it uses the raw page length, so entries that fail to normalize do not end paging early), dedupes by id, and stops at 20 pages with a `WARN` through `BoardClientOptions.onWarn`. The dispatcher lists `--state open` 100 per page and point-looks-up tracked ids missing from that list, logging `WARN` when a task still resolves to `unknown`. Lead Watcher's blocked listing paginates through the same `listTasks`.
+  - **OQ5** (`herdr agent start` with a duplicate name) is not exercised by this plan: reclaiming in Slice 4 keeps the existing agent, so nothing starts a second agent under the same name. Left unverified.
+- 2026-11-27 (Slice 2): `PersistedDispatcherStateSchema` (strict, `version: 1`) lives in `src/lib/schemas.ts` and is not wired into `scripts/generate-schemas.ts`. `src/lib/dispatcher-state.ts` holds pure `toPersisted`/`fromPersisted` (ids and `phaseSeenReplyIds` sorted, so the output is deterministic), `dispatcherStateFingerprint` (everything except `savedAtMs`, used to skip unchanged writes), `resolveDispatcherStatePath`, `loadDispatcherState` (returns `missing` / `loaded` / `other_machine` / `quarantined`; a file for another machine is left in place, not quarantined), and `saveDispatcherState` (temp file + `rename`, mode `0600`). The types are checked both ways at compile time: `fromPersisted` must produce `ActiveTask` and `toPersisted` must accept it.
+
+- 2026-11-27 (Slice 3): `SwarmDispatcher` takes `statePath` (ignored with `--dry-run`), restores at construction, and logs `Restored N active and M parked task(s) from <path>` (or why it started empty). `tick()` wraps the old body in `try/finally` so state is persisted at the end of every tick, including ticks that throw or return early, and only when the fingerprint changed. `runLoop` persists once more on stop and logs that tabs and claims were left in place. The poll sleep is now cut short by `requestStop()`, so `SIGTERM` exits within one tick instead of one tick plus a full poll interval (it was close to launchd's default 20s `ExitTimeOut`). `scripts/stop.ts --reset` already removed `~/.local/state/bordr-swarm` (both default state files); it now also removes `DISPATCHER_STATE_PATH`/`LEAD_WATCHER_STATE_PATH` when set. The lifecycle tests share new `createFakeBoard`/`createFakeHerdr` fakes in `tests/dispatcher.test.ts`. The fake Board honors `--state open`, `read <id>`, claim/renew ownership (`claim_lost`), and replies.
+
+- 2026-11-27 (Slice 4): Open Questions 1 and 2 were settled during Slice 1 (see above): a lapsed task is `ready` in the list, and the same profile must `claim` again because `renew` returns `claim_lost`. `TaskObservation.boardAssignee` is set from the normalized claim profile. `stepTask` classifies claim continuity as a small union (`held` / `lapsed` / `taken`) right after the terminal-state checks:
+  - `lapsed` (Board `ready`, and the active session's tab and agent are alive): stay active, reset `lastLeaseRenewMs`, and emit `reclaim_task`. Its `onLost` list holds the orphan effects, computed in the FSM. The executor runs them, and drops the task, only if the claim fails. If the agent is gone, we do not reclaim. The normal session step reports the exit with `boardClaimed: false`, so the task stays `ready` for any worker.
+  - `taken` (Board `claimed`, assignee is a different profile): rename our tab(s) `[ORPHANED]`, post one reply naming the new holder, and return `remove`. No renew, close, complete, block, or fail.
+  - In review, "alive" means the reviewer session, since that is the one that is working.
+  - Trade-off: an orphaned plain-tab task frees its repo lock as soon as tracking stops, even though its agent may still be running in that checkout. The reply asks a human to close the tab. A task that a worker agent `release`s itself now gets re-claimed (agents are told not to release, and nothing in the dispatcher releases a tracked task).
+
+- 2026-11-27 (Slice 5): the pure logic is in `src/lib/orphan-sweep.ts` and the I/O wrapper is `SwarmDispatcher.sweepOrphans`/`applyOrphanDecision`. It runs every tick, after reconcile and before claiming, and reuses the open-task list.
+  - Matching uses the **exact** profile `worker-<machine>-<shortId>`, not a prefix, so a machine named `mac` never sweeps `worker-mac-studio-…`.
+  - Decisions: `adopt` (live `w-<shortId>`), `park_in_review` (a live `r<N>-<shortId>` too), `release` (no live implementer), and `skip`. `skip` covers a live agent that we cannot route (unknown project or path) or that has no tab or pane id: we leave it alone and never release live work.
+  - To route an adopted task, the per-task half of `selectEligibleTasks` was extracted as `resolveTaskRouting` (no behavior change).
+  - An adopted task gets `lastLeaseRenewMs: 0` so the next reconcile renews right away, and every existing reply is marked seen, so an old `READY_FOR_REVIEW` is not replayed.
+  - `park_in_review` **blocks** the task on the Board (`needs_input`) before parking. A parked `blocked` tab whose task is still `claimed` would be unparked on the next tick by `stepParkedTab`. If the block fails, nothing is parked and the sweep retries next tick.
+  - If `herdr agent list` fails, the sweep skips that tick rather than releasing.
+  - Ids tracked at tick start are excluded. Otherwise a task that reconcile completed this tick, which still reads `claimed` in the list fetched before reconcile, would be re-adopted. A mutation check confirms the lifecycle test fails without this guard.
+  - Follow-up, out of scope (it applies to every parked `[BLOCKED]` tab): `tasks unblock` returns a task to `ready`, not `claimed`, so `stepParkedTab`'s unpark-on-`claimed` path only fires when someone re-claims under our profile. An unblocked parked task waits until its tab is closed.
+
+- 2026-11-27 (Slice 6): docs updated. `docs/architecture.md` gains "Restart and Recovery" and corrects the listing command to `--state open` with pagination. `docs/worker-machine-setup.md` and the README command table note that `mise run update` is safe with tasks in flight. `AGENTS.md` records the durable-state decision.
+  - `scripts/apply-worker.ts` gains `--keep-running`, which leaves a running dispatcher alone when its service file is unchanged. `scripts/update.ts` passes it when the pull brought no `src/`, `scripts/`, `prompts/`, or dependency changes.
+  - Without that flag, `apply:worker` now restarts the dispatcher on Linux too (`systemctl --user restart`). Previously `enable --now` never restarted a running unit, so `mise run update` on Linux kept running the old dispatcher code.
+  - Real-world check (read-only): `node src/dispatcher.ts --once --dry-run` on the worker host running this very task. With no state file, it reported `Orphan sweep would adopt task #<this task>`. That confirms open-only listing, claim-actor normalization to `worker-<machine>-<shortId>`, live-agent lookup, and routing against the live board and Herdr.
+  - **Not done:** the Testing Plan's manual end-to-end restart (`mise run apply:worker` mid-task, during review, and after a lease lapse). It means restarting the live dispatcher that supervises in-flight tasks, including the task that implemented this plan, so it is left for a human to run after merge.
 
 ## Next Slice
 
-Start with **Slice 1**. Read `BoardClient.listTasks` in `src/lib/board.ts` and `SwarmDispatcher.tick` in `src/dispatcher.ts`. Before coding, run `vercel board tasks <prefix> --state open --json` and `vercel board read <taskId> --json` against a board to settle Open Questions 3 and 4, and record the answers above. Verification is the pagination unit tests plus `npm run check`. No blockers.
+All slices are implemented. What remains is the manual end-to-end check in the **Testing Plan**, on a worker host after merge. Then continue with Plan B (`2026-11-27-event-bus-reactors-plan.md`). Candidate follow-up: let a parked `[BLOCKED]` tab resume when its task is unblocked to `ready` (see the Slice 5 notes).

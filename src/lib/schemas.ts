@@ -173,6 +173,12 @@ export const ProjectReviewerOverrideSchema = z
 
 export const BoardConfigSchema = z
   .object({
+    url: z
+      .string()
+      .optional()
+      .describe(
+        "Optional self-hosted or custom Board URL passed via `--url` / `BOARD_URL` (overridden by `BOARD_URL` env var). When set, `--scope` is omitted.",
+      ),
     scope: z
       .string()
       .default("")
@@ -605,7 +611,7 @@ export const BoardTaskListEnvelopeSchema = z.union([
   z
     .object({
       tasks: z.array(z.record(z.string(), z.unknown())),
-      cursor: z.union([z.string(), z.number()]).optional(),
+      cursor: z.union([z.string(), z.number()]).nullable().optional(),
     })
     .passthrough(),
 ]);
@@ -860,6 +866,135 @@ export const HerdrCreatedTabResultSchema = z
   .passthrough();
 
 // ---------------------------------------------------------------------------
+// Worker Dispatcher persisted state (internal; NOT exported to config/*.schema.json)
+// Mirrors ActiveTask / ParkedTab in src/lib/task-fsm.ts with Sets stored as arrays.
+// ---------------------------------------------------------------------------
+
+const PersistedWorkerRuntimeSchema = z
+  .object({
+    profileName: z.string(),
+    kind: z.string(),
+    model: z.string(),
+    effort: z.string(),
+    permissionMode: z.string(),
+    cliArgs: z.array(z.string()),
+  })
+  .strict();
+
+const PersistedReviewerConfigSchema = z
+  .object({
+    enabled: z.boolean(),
+    required: z.boolean(),
+    maxRounds: z.number().int(),
+    skipIfNoDiff: z.boolean(),
+    runtime: PersistedWorkerRuntimeSchema.nullable(),
+  })
+  .strict();
+
+const PersistedSessionHandleSchema = z
+  .object({
+    boardProfile: z.string(),
+    runtime: PersistedWorkerRuntimeSchema,
+    tabId: z.string(),
+    paneId: z.string(),
+    agentName: z.string(),
+    startedAtMs: z.number(),
+  })
+  .strict();
+
+const PersistedSessionLifecycleSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("awaiting_prompt"),
+      promptText: z.string(),
+      uiBlockedNotified: z.boolean(),
+    })
+    .strict(),
+  z.object({ kind: z.literal("running") }).strict(),
+  z.object({ kind: z.literal("ui_blocked") }).strict(),
+  z.object({ kind: z.literal("idle_grace"), sinceMs: z.number() }).strict(),
+  z.object({ kind: z.literal("idle_reminded"), remindedAtMs: z.number() }).strict(),
+]);
+
+const PersistedManagedSessionSchema = z
+  .object({
+    handle: PersistedSessionHandleSchema,
+    lifecycle: PersistedSessionLifecycleSchema,
+  })
+  .strict();
+
+const PersistedTaskContextSchema = z
+  .object({
+    taskId: z.string().min(1),
+    channel: z.string(),
+    projectSlug: z.string(),
+    repoPath: z.string(),
+    baseBranch: z.string(),
+    branch: z.string(),
+    useWorktree: z.boolean(),
+    workspaceId: z.string(),
+    boardProfile: z.string(),
+    reviewConfig: PersistedReviewerConfigSchema,
+    startHeadSha: z.string().nullable(),
+    machineName: z.string(),
+    humanHandle: z.string(),
+  })
+  .strict();
+
+const PersistedTaskPhaseSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("implementing"), impl: PersistedManagedSessionSchema }).strict(),
+  z
+    .object({
+      kind: z.literal("reviewing"),
+      round: z.number().int(),
+      impl: PersistedSessionHandleSchema,
+      reviewer: PersistedManagedSessionSchema,
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("fixing"),
+      round: z.number().int(),
+      impl: PersistedManagedSessionSchema,
+    })
+    .strict(),
+]);
+
+export const PersistedActiveTaskSchema = z
+  .object({
+    ctx: PersistedTaskContextSchema,
+    phase: PersistedTaskPhaseSchema,
+    lastLeaseRenewMs: z.number(),
+    phaseSeenReplyIds: z.array(z.string()),
+    lastImplSummary: z.string(),
+  })
+  .strict();
+
+export const PersistedParkedTabSchema = z
+  .object({
+    taskId: z.string().min(1),
+    projectSlug: z.string(),
+    useWorktree: z.boolean(),
+    workspaceId: z.string(),
+    tabId: z.string(),
+    reason: z.enum(["blocked", "failed"]),
+    parkedAtMs: z.number(),
+    task: PersistedActiveTaskSchema,
+  })
+  .strict();
+
+export const PersistedDispatcherStateSchema = z
+  .object({
+    version: z.literal(1),
+    machine: z.string().min(1),
+    savedAtMs: z.number(),
+    activeWorkers: z.record(z.string(), PersistedActiveTaskSchema),
+    parkedTabs: z.record(z.string(), PersistedParkedTabSchema),
+  })
+  .strict()
+  .describe("Worker Dispatcher state persisted across restarts (internal, versioned).");
+
+// ---------------------------------------------------------------------------
 // Exported TypeScript types inferred directly from Zod schemas
 // ---------------------------------------------------------------------------
 
@@ -887,3 +1022,6 @@ export type HerdrAgentStatus = z.infer<typeof HerdrAgentStatusSchema>;
 export type HerdrWorkspace = z.infer<typeof HerdrWorkspaceSchema>;
 export type HerdrTab = z.infer<typeof HerdrTabSchema>;
 export type HerdrAgent = z.infer<typeof HerdrAgentSchema>;
+export type PersistedActiveTask = z.infer<typeof PersistedActiveTaskSchema>;
+export type PersistedParkedTab = z.infer<typeof PersistedParkedTabSchema>;
+export type PersistedDispatcherState = z.infer<typeof PersistedDispatcherStateSchema>;

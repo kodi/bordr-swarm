@@ -13,6 +13,8 @@ interface WorkerApplyFlags {
   dryRun: boolean;
   noLoad: boolean;
   unload: boolean;
+  /** Leave an already-running dispatcher alone when its service file is unchanged. */
+  keepRunning: boolean;
   machine?: string;
 }
 
@@ -20,6 +22,7 @@ function parseFlags(argv: string[]): WorkerApplyFlags {
   let dryRun = false;
   let noLoad = false;
   let unload = false;
+  let keepRunning = false;
   let machine: string | undefined;
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -27,6 +30,7 @@ function parseFlags(argv: string[]): WorkerApplyFlags {
     if (arg === "--dry-run") dryRun = true;
     else if (arg === "--no-load") noLoad = true;
     else if (arg === "--unload") unload = true;
+    else if (arg === "--keep-running") keepRunning = true;
     else if (arg === "--machine" && argv[i + 1]) {
       machine = argv[i + 1];
       i += 1;
@@ -34,7 +38,7 @@ function parseFlags(argv: string[]): WorkerApplyFlags {
       machine = arg.slice("--machine=".length);
     }
   }
-  return { dryRun, noLoad, unload, machine };
+  return { dryRun, noLoad, unload, keepRunning, machine };
 }
 
 function xmlEscape(value: string): string {
@@ -183,9 +187,10 @@ function reloadLaunchdService(params: {
   label: string;
   plistPath: string;
   changed: boolean;
+  keepRunning: boolean;
   dryRun: boolean;
 }): void {
-  const { uid, label, plistPath, changed, dryRun } = params;
+  const { uid, label, plistPath, changed, keepRunning, dryRun } = params;
   const serviceTarget = `gui/${uid}/${label}`;
 
   if (dryRun) {
@@ -194,7 +199,12 @@ function reloadLaunchdService(params: {
   }
 
   const loaded = isLaunchdLoaded(uid, label);
+  if (loaded && !changed && keepRunning) {
+    console.log(`[apply:worker] ${label} already running with an unchanged plist; left as is.`);
+    return;
+  }
   if (loaded && !changed) {
+    // Safe with tasks in flight: the dispatcher persists its state and adopts them on boot.
     runLaunchctl(["kickstart", "-k", serviceTarget], false, false);
     console.log(`[apply:worker] Restarted ${label} via launchctl kickstart.`);
     return;
@@ -305,7 +315,14 @@ function main(): void {
     }
 
     if (!flags.noLoad) {
-      reloadLaunchdService({ uid, label, plistPath, changed, dryRun: flags.dryRun });
+      reloadLaunchdService({
+        uid,
+        label,
+        plistPath,
+        changed,
+        keepRunning: flags.keepRunning,
+        dryRun: flags.dryRun,
+      });
     }
 
     console.log("[apply:worker] Logs:");
@@ -366,7 +383,15 @@ function main(): void {
 
   if (!flags.noLoad) {
     runSystemctlUser(["daemon-reload"], flags.dryRun);
-    runSystemctlUser(["enable", "--now", unitName], flags.dryRun);
+    if (flags.keepRunning && !changed) {
+      // Starts it if stopped; leaves a running dispatcher alone.
+      runSystemctlUser(["enable", "--now", unitName], flags.dryRun);
+    } else {
+      // `enable --now` alone never restarts a running unit, so new code would not load.
+      // Restarting is safe with tasks in flight: the dispatcher persists and re-adopts them.
+      runSystemctlUser(["enable", unitName], flags.dryRun);
+      runSystemctlUser(["restart", unitName], flags.dryRun);
+    }
   }
 }
 

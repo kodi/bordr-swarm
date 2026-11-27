@@ -118,6 +118,11 @@ function main(): void {
   if (isWorker) {
     const workerArgs = [resolve(repoRoot, "scripts/apply-worker.ts"), "--machine", machineName];
     if (flags.dryRun) workerArgs.push("--dry-run");
+    // Restarting is safe with tasks in flight (state persists), but pointless without new code.
+    const depsChanged = ["mise.toml", "package.json", "package-lock.json"].some((f) =>
+      changedFiles.includes(f),
+    );
+    if (!codeChanged && !depsChanged) workerArgs.push("--keep-running");
     console.log(`[update] Applying worker machine "${machineName}"...`);
     runStep(nodeBin, workerArgs, repoRoot, false);
   }

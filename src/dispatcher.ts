@@ -20,11 +20,26 @@ import {
   type ParkedTab,
 } from "./lib/dispatcher-effects.ts";
 import {
+  dispatcherStateFingerprint,
+  loadDispatcherState,
+  resolveDispatcherStatePath,
+  saveDispatcherState,
+  toPersisted,
+} from "./lib/dispatcher-state.ts";
+import {
   HerdrClient,
   sanitizeHerdrAgentName,
   type HerdrAgent,
   type HerdrTab,
 } from "./lib/herdr.ts";
+import {
+  blockedAdoptionLabel,
+  buildAdoptedTask,
+  buildParkedAdoption,
+  decideOrphan,
+  findUntrackedOwnClaims,
+  type OrphanDecision,
+} from "./lib/orphan-sweep.ts";
 import { buildMachineRegistryEntry, publishMachineRegistry } from "./lib/registry.ts";
 import {
   defaultGitChangeDetector,
@@ -35,11 +50,12 @@ import {
 import {
   formatTabLabel,
   renderWorkerPrompt,
+  resolveTaskRouting,
   selectEligibleTasks,
   shortTaskId,
   type CandidateTask,
 } from "./lib/routing.ts";
-import { createManagedSession, type SessionHandle } from "./lib/session-fsm.ts";
+import { assertNever, createManagedSession, type SessionHandle } from "./lib/session-fsm.ts";
 import {
   getImplHandle,
   getReviewerHandle,
@@ -50,6 +66,8 @@ import {
 } from "./lib/task-fsm.ts";
 
 const STARTUP_GRACE_MS = 20_000;
+/** Page size for open-task discovery; `listTasks` follows the cursor across pages. */
+const TASK_PAGE_SIZE = 100;
 
 interface CliFlags {
   machine?: string;
@@ -84,9 +102,19 @@ function log(level: "INFO" | "WARN" | "ERROR", message: string): void {
   else console.log(line);
 }
 
-function sleep(ms: number): Promise<void> {
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolvePromise) => {
-    setTimeout(resolvePromise, ms);
+    if (signal?.aborted) {
+      resolvePromise();
+      return;
+    }
+    const timer = setTimeout(done, ms);
+    function done(): void {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolvePromise();
+    }
+    signal?.addEventListener("abort", done, { once: true });
   });
 }
 
@@ -121,10 +149,14 @@ export class SwarmDispatcher {
   readonly gitDetector: GitChangeDetector;
   readonly availableAgentKinds: Set<string>;
   readonly dryRun: boolean;
+  /** Where tracked tasks are persisted across restarts; null disables persistence. */
+  readonly statePath: string | null;
 
   readonly activeWorkers = new Map<string, ActiveTask>();
   readonly parkedTabs = new Map<string, ParkedTab>();
   private stopping = false;
+  private readonly stopController = new AbortController();
+  private lastPersistedFingerprint: string | null = null;
   private lastProjectsMtimeMs = 0;
   private registryPublishedOnce = false;
 
@@ -141,6 +173,7 @@ export class SwarmDispatcher {
     gitDetector?: GitChangeDetector;
     availableAgentKinds: Set<string>;
     dryRun: boolean;
+    statePath?: string;
   }) {
     this.repoRoot = params.repoRoot;
     this.swarm = params.swarm;
@@ -154,13 +187,79 @@ export class SwarmDispatcher {
     this.gitDetector = params.gitDetector ?? defaultGitChangeDetector;
     this.availableAgentKinds = params.availableAgentKinds;
     this.dryRun = params.dryRun;
+    this.statePath = params.dryRun ? null : (params.statePath ?? null);
     if (this.projectsConfigPath && existsSync(this.projectsConfigPath)) {
       this.lastProjectsMtimeMs = statSync(this.projectsConfigPath).mtimeMs;
     }
+    this.restoreState();
   }
 
   requestStop(): void {
     this.stopping = true;
+    this.stopController.abort();
+  }
+
+  /**
+   * Loads persisted tracking. Loading never closes tabs or touches Board tasks: restored entries
+   * go through the normal reconcile on the next tick, where the FSMs decide what to do.
+   */
+  private restoreState(): void {
+    if (!this.statePath) return;
+    let res: ReturnType<typeof loadDispatcherState>;
+    try {
+      res = loadDispatcherState(this.statePath, { machine: this.machineName });
+    } catch (err) {
+      log(
+        "WARN",
+        `Could not load dispatcher state ${this.statePath}; starting empty: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return;
+    }
+
+    switch (res.kind) {
+      case "missing":
+        log("INFO", `No dispatcher state at ${this.statePath}; starting empty.`);
+        break;
+      case "other_machine":
+        log(
+          "WARN",
+          `Ignoring dispatcher state ${this.statePath}: written for machine "${res.machine}", not "${this.machineName}". It will be overwritten on the next save; give each machine its own DISPATCHER_STATE_PATH.`,
+        );
+        break;
+      case "quarantined":
+        log(
+          "WARN",
+          `Dispatcher state ${this.statePath} was invalid; moved it to ${res.quarantinePath} and starting empty:\n${res.error}`,
+        );
+        break;
+      case "loaded":
+        for (const [id, task] of res.state.activeWorkers) this.activeWorkers.set(id, task);
+        for (const [id, parked] of res.state.parkedTabs) this.parkedTabs.set(id, parked);
+        log(
+          "INFO",
+          `Restored ${this.activeWorkers.size} active and ${this.parkedTabs.size} parked task(s) from ${this.statePath} (saved ${new Date(res.savedAtMs).toISOString()}).`,
+        );
+        break;
+      default:
+        assertNever(res);
+    }
+    this.lastPersistedFingerprint = dispatcherStateFingerprint(this, this.machineName);
+  }
+
+  /** Atomically writes tracked state when it changed since the last write. */
+  persistState(): void {
+    if (!this.statePath) return;
+    const fingerprint = dispatcherStateFingerprint(this, this.machineName);
+    if (fingerprint === this.lastPersistedFingerprint) return;
+    try {
+      saveDispatcherState(this.statePath, toPersisted(this, this.machineName, Date.now()));
+      this.lastPersistedFingerprint = fingerprint;
+    } catch (err) {
+      log(
+        "WARN",
+        `Failed to persist dispatcher state to ${this.statePath}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   private getEffectDeps(): EffectExecutorDeps {
@@ -258,6 +357,14 @@ export class SwarmDispatcher {
   }
 
   async tick(): Promise<void> {
+    try {
+      await this.runTick();
+    } finally {
+      this.persistState();
+    }
+  }
+
+  private async runTick(): Promise<void> {
     const machineCfg = this.swarm.machines[this.machineName];
     if (!machineCfg) {
       throw new Error(`Missing machine config for "${this.machineName}"`);
@@ -266,13 +373,19 @@ export class SwarmDispatcher {
     await this.maybeReloadProjectsAndPublishRegistry();
 
     const prefix = this.swarm.board.projectChannelPrefix;
-    const allTasks = await this.board.listTasks(prefix, { state: "all", limit: 200 });
+    const openTasks = await this.board.listTasks(prefix, { state: "open", limit: TASK_PAGE_SIZE });
     const tasksById = new Map<string, BoardTask>();
-    for (const t of allTasks) tasksById.set(t.id, t);
+    for (const t of openTasks) tasksById.set(t.id, t);
+    await this.lookupTrackedTasksMissingFromOpenList(tasksById);
 
+    // Tasks reconcile finishes this tick still look `claimed` in the (pre-reconcile) list;
+    // remember them so the orphan sweep does not mistake them for orphans.
+    const trackedAtTickStart = this.getTrackedTaskIds();
     if (this.activeWorkers.size > 0 || this.parkedTabs.size > 0) {
       await this.reconcileRunningWorkers(tasksById);
     }
+
+    await this.sweepOrphans(openTasks, trackedAtTickStart);
 
     if (this.stopping) return;
 
@@ -290,7 +403,7 @@ export class SwarmDispatcher {
       return;
     }
 
-    const readyTasks = allTasks.filter((t) => t.state === "ready");
+    const readyTasks = openTasks.filter((t) => t.state === "ready");
     if (readyTasks.length === 0) return;
 
     const { candidates, skips } = selectEligibleTasks({
@@ -343,6 +456,182 @@ export class SwarmDispatcher {
         slotsLeft -= 1;
         if (!candidate.useWorktree) claimedProjectsThisTick.add(candidate.projectSlug);
       }
+    }
+  }
+
+  /**
+   * The open-task list omits terminal tasks (completed/canceled/failed), so a tracked task that
+   * dropped out of it is resolved with a point lookup. Without this, a finished task would sit
+   * forever as `unknown` with its tab open and its repo lock held.
+   */
+  private async lookupTrackedTasksMissingFromOpenList(
+    tasksById: Map<string, BoardTask>,
+  ): Promise<void> {
+    const missing = [...this.getTrackedTaskIds()].filter((id) => !tasksById.has(id));
+    if (missing.length === 0) return;
+
+    const results = await Promise.all(
+      missing.map(async (id) => {
+        try {
+          return { id, task: await this.board.getTask(id), error: null };
+        } catch (err) {
+          return { id, task: null, error: err instanceof Error ? err.message : String(err) };
+        }
+      }),
+    );
+
+    for (const { id, task, error } of results) {
+      if (task && task.state !== "unknown") {
+        tasksById.set(id, task);
+        continue;
+      }
+      log(
+        "WARN",
+        `Tracked task #${id} is not in the open-task list and its state could not be resolved (${error ?? "lookup returned no task state"}); treating it as unknown this tick.`,
+      );
+    }
+  }
+
+  /**
+   * Recovers tasks the Board says this machine holds but nothing tracks (no or corrupt state
+   * file). Decisions come from the pure `decideOrphan`; this only runs the I/O.
+   */
+  private async sweepOrphans(
+    openTasks: readonly BoardTask[],
+    trackedAtTickStart: ReadonlySet<string>,
+  ): Promise<void> {
+    const tracked = new Set([...trackedAtTickStart, ...this.getTrackedTaskIds()]);
+    const orphans = findUntrackedOwnClaims(openTasks, tracked, this.machineName);
+    if (orphans.length === 0) return;
+
+    const machineConfig = this.swarm.machines[this.machineName];
+    if (!machineConfig) return;
+
+    let agents: HerdrAgent[];
+    try {
+      agents = await this.herdr.listAgents();
+    } catch (err) {
+      // Never release work because Herdr was briefly unreachable
+      log(
+        "WARN",
+        `Orphan sweep skipped: could not list Herdr agents (${err instanceof Error ? err.message : String(err)}); ${orphans.length} untracked claim(s) left for next tick.`,
+      );
+      return;
+    }
+
+    for (const orphan of orphans) {
+      if (this.stopping) return;
+      const routing = resolveTaskRouting({
+        task: orphan.task,
+        swarm: this.swarm,
+        projects: this.projects,
+        machineName: this.machineName,
+        machineConfig,
+        availableAgentKinds: this.availableAgentKinds,
+      });
+      const decision = decideOrphan(orphan, agents, routing);
+      if (this.dryRun) {
+        log("INFO", `[dry-run] Orphan sweep would ${decision.kind} task #${orphan.task.id}.`);
+        continue;
+      }
+      await this.applyOrphanDecision(decision);
+    }
+  }
+
+  private async applyOrphanDecision(decision: OrphanDecision): Promise<void> {
+    const { orphan } = decision;
+    const taskId = orphan.task.id;
+    const nowMs = Date.now();
+
+    switch (decision.kind) {
+      case "skip":
+        log("WARN", `Orphan sweep left task #${taskId} alone: ${decision.reason}.`);
+        return;
+
+      case "release": {
+        log(
+          "WARN",
+          `Task #${taskId} is claimed by ${orphan.boardProfile} but untracked and no live ${orphan.implAgentName} agent exists; releasing it.`,
+        );
+        await this.board
+          .reply(
+            taskId,
+            `Dispatcher on \`${this.machineName}\` restarted without a record of this task and found no live \`${orphan.implAgentName}\` agent, so it released the task so it can be claimed again.`,
+            { asProfile: orphan.boardProfile },
+          )
+          .catch(() => {});
+        await this.board.releaseTask(taskId, { asProfile: orphan.boardProfile }).catch((err) => {
+          log(
+            "WARN",
+            `Failed to release orphaned task #${taskId}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        });
+        return;
+      }
+
+      case "adopt":
+      case "park_in_review": {
+        const thread = await this.board.readThread(taskId).catch((err) => {
+          log(
+            "WARN",
+            `Orphan sweep could not read thread #${taskId} (${err instanceof Error ? err.message : String(err)}); retrying next tick.`,
+          );
+          return null;
+        });
+        if (!thread) return;
+
+        const task = buildAdoptedTask({
+          orphan,
+          routing: decision.routing,
+          impl: decision.impl,
+          replyIds: thread.replies.map((r) => r.id),
+          machineName: this.machineName,
+          humanHandle: this.swarm.board.humanHandle,
+          nowMs,
+        });
+
+        if (decision.kind === "adopt") {
+          this.activeWorkers.set(taskId, task);
+          log(
+            "INFO",
+            `Adopted orphaned task #${taskId}: live agent ${decision.impl.name} in ${decision.impl.tabId} (implementing, ${thread.replies.length} existing repl(ies) marked seen).`,
+          );
+          return;
+        }
+
+        // A reviewer is live too, and we cannot know the round: hand it to a human.
+        try {
+          await this.board.blockTask(
+            taskId,
+            `Dispatcher on ${this.machineName} restarted mid-review without state; inspect tabs in Sheprd.`,
+            { asProfile: orphan.boardProfile, kind: "needs_input" },
+          );
+        } catch (err) {
+          log(
+            "WARN",
+            `Could not block orphaned in-review task #${taskId} (${err instanceof Error ? err.message : String(err)}); retrying next tick.`,
+          );
+          return;
+        }
+        const label = blockedAdoptionLabel(task);
+        await this.herdr.renameTab(decision.impl.tabId, label).catch(() => {});
+        await this.board
+          .reply(
+            taskId,
+            `Dispatcher on \`${this.machineName}\` restarted without a record of this task while reviewer \`${decision.reviewerAgentName}\` was still running, so it cannot tell which review round this is. It blocked the task and parked the implementer tab \`${label}\` in workspace \`${decision.routing.projectSlug}\` for a human (${this.swarm.board.humanHandle} @lead). Check both tabs in Sheprd before unblocking.`,
+            { asProfile: orphan.boardProfile },
+          )
+          .catch(() => {});
+        this.parkedTabs.set(taskId, buildParkedAdoption(task, nowMs));
+        log(
+          "WARN",
+          `Orphaned task #${taskId} has live implementer ${decision.impl.name} and reviewer ${decision.reviewerAgentName}; blocked it and parked ${decision.impl.tabId}.`,
+        );
+        return;
+      }
+
+      default:
+        assertNever(decision);
     }
   }
 
@@ -643,6 +932,7 @@ export class SwarmDispatcher {
 
       const outcome = stepTask(task, {
         boardState: boardTask?.state ?? "unknown",
+        boardAssignee: boardTask?.assignee,
         implTabExists: tabsById.has(implHandle.tabId),
         implAgentStatus: liveImpl?.agent_status ?? null,
         reviewerTabExists: revHandle ? tabsById.has(revHandle.tabId) : false,
@@ -683,12 +973,15 @@ export class SwarmDispatcher {
         log("ERROR", `Dispatcher tick failed: ${err instanceof Error ? err.message : String(err)}`);
       }
       if (once || this.stopping) break;
-      await sleep(this.swarm.workerDefaults.pollIntervalSeconds * 1000);
+      await sleep(this.swarm.workerDefaults.pollIntervalSeconds * 1000, this.stopController.signal);
     }
 
+    // Graceful stop: persist and exit. Tabs stay open and claims stay held so agents keep working
+    // across a restart; the next dispatcher adopts them from the state file.
+    this.persistState();
     log(
       "INFO",
-      `Dispatcher stopped cleanly (activeWorkers=${this.activeWorkers.size}, parkedTabs=${this.parkedTabs.size}).`,
+      `Dispatcher stopped cleanly (activeWorkers=${this.activeWorkers.size}, parkedTabs=${this.parkedTabs.size}; tabs and claims left in place${this.statePath ? `, state saved to ${this.statePath}` : ""}).`,
     );
   }
 }
@@ -721,12 +1014,19 @@ async function main(): Promise<void> {
     projects,
     projectsConfigPath,
     machineName,
-    board: new BoardClient({ scope: swarm.board.scope, boardName: swarm.board.boardName }),
+    board: new BoardClient({
+      url: swarm.board.url,
+      scope: swarm.board.scope,
+      boardName: swarm.board.boardName,
+      binary: process.env.BOARD_CLI_BIN,
+      onWarn: (message) => log("WARN", message),
+    }),
     herdr: new HerdrClient({ target: machineCfg.herdrTarget }),
     promptTemplate,
     reviewerPromptTemplate,
     availableAgentKinds: detectAvailableAgentKinds(swarm),
     dryRun: flags.dryRun,
+    statePath: resolveDispatcherStatePath(machineName),
   });
 
   const onSignal = (sig: NodeJS.Signals) => {

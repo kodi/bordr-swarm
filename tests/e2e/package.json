@@ -1,0 +1,17 @@
+{
+  "name": "bordr-swarm-e2e",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "e2e": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@vercel/board": "latest",
+    "typescript": "^7.0.2",
+    "vitecompose": "^0.1.2",
+    "vitest": "^5.1.0"
+  }
+}

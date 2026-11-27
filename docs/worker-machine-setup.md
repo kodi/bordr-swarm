@@ -45,6 +45,7 @@ You can also register the same project slug on **multiple worker machines** — 
   mise run status         # Verify dispatcher service and active Herdr agents
   mise run logs -- -f     # Tail dispatcher logs
   ```
+- **Updating with tasks in flight is safe:** `mise run update` (and `mise run apply:worker`) restart the dispatcher, which persists its tracked tasks to `~/.local/state/bordr-swarm/dispatcher-<machine>.json` (override: `DISPATCHER_STATE_PATH`) and adopts them again on boot. Running agents and their tabs are not touched. `mise run update` leaves the dispatcher running when the pull brought no code or dependency changes. See [Restart and Recovery](architecture.md#restart-and-recovery).
 - **Dry-run / development test:**
   ```bash
   node src/dispatcher.ts --once --dry-run

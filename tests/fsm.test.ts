@@ -495,3 +495,116 @@ describe("stepParkedTab (parked [BLOCKED]/[FAILED] reconciliation)", () => {
     assert.ok(outcome.effects.some((e) => e.type === "cleanup_workspace" && e.tabId === "w1:t1"));
   });
 });
+
+describe("stepTask claim continuity (lease lapsed / claim lost)", () => {
+  function reviewingTask(): ActiveTask {
+    const base = makeTask();
+    return {
+      ...base,
+      phase: {
+        kind: "reviewing",
+        round: 1,
+        impl: makeHandle(),
+        reviewer: {
+          handle: makeHandle({
+            boardProfile: "reviewer-host-1",
+            runtime: codexRuntime,
+            tabId: "w1:t2",
+            paneId: "w1:p2",
+            agentName: "r1-1",
+          }),
+          lifecycle: { kind: "running" },
+        },
+      },
+    };
+  }
+
+  it("holds the claim when the Board assignee is our own profile (no extra effects)", () => {
+    const outcome = stepTask(makeTask(), baseObs({ boardAssignee: "worker-host-1" }));
+    assert.equal(outcome.status, "active");
+    assert.deepEqual(outcome.effects, []);
+  });
+
+  it("reclaims under the same profile when the lease lapsed to ready and the agent is alive", () => {
+    const task = makeTask();
+    const outcome = stepTask(task, baseObs({ boardState: "ready", nowMs: 9_000_000 }));
+    assert.equal(outcome.status, "active");
+    if (outcome.status !== "active") return;
+    assert.equal(outcome.next.lastLeaseRenewMs, 9_000_000);
+    assert.deepEqual(outcome.next.phase, task.phase, "phase is untouched");
+    assert.equal(outcome.effects.length, 1);
+    const [effect] = outcome.effects;
+    assert.equal(effect?.type, "reclaim_task");
+    if (effect?.type !== "reclaim_task") return;
+    assert.equal(effect.boardProfile, "worker-host-1");
+    // Fallback if the reclaim fails: orphan, never touch task state
+    assert.ok(
+      effect.onLost.some(
+        (e) => e.type === "rename_tab" && e.label === "[ORPHANED] task-1 (claude)",
+      ),
+    );
+    assert.ok(effect.onLost.some((e) => e.type === "reply_board"));
+    assert.ok(
+      !effect.onLost.some((e) =>
+        ["complete_task", "block_task", "fail_on_unexpected_exit"].includes(e.type),
+      ),
+    );
+  });
+
+  it("does not reclaim a lapsed task whose agent is gone; the exit path handles it", () => {
+    const outcome = stepTask(
+      makeTask(),
+      baseObs({ boardState: "ready", implAgentStatus: null, nowMs: 100_000 }),
+    );
+    assert.ok(!outcome.effects.some((e) => e.type === "reclaim_task"));
+    const exit = outcome.effects.find((e) => e.type === "fail_on_unexpected_exit");
+    assert.ok(exit);
+    if (exit?.type === "fail_on_unexpected_exit") {
+      assert.equal(exit.boardClaimed, false, "a ready task is never failed by us");
+    }
+  });
+
+  it("checks the reviewer session (not the implementer) for liveness during review", () => {
+    const alive = stepTask(
+      reviewingTask(),
+      baseObs({
+        boardState: "ready",
+        implAgentStatus: null,
+        reviewerTabExists: true,
+        reviewerAgentStatus: "working",
+      }),
+    );
+    assert.equal(alive.effects[0]?.type, "reclaim_task");
+  });
+
+  it("orphans and stops tracking when another profile holds the claim", () => {
+    const outcome = stepTask(
+      reviewingTask(),
+      baseObs({
+        boardAssignee: "worker-other-machine-1",
+        reviewerTabExists: true,
+        reviewerAgentStatus: "working",
+        nowMs: 9_000_000,
+      }),
+    );
+    assert.equal(outcome.status, "remove");
+    const renames = outcome.effects.filter((e) => e.type === "rename_tab");
+    assert.deepEqual(
+      renames.map((e) => (e.type === "rename_tab" ? e.label : "")),
+      ["[ORPHANED] task-1 (claude)", "[ORPHANED] review-1 r1 (codex)"],
+    );
+    const replies = outcome.effects.filter((e) => e.type === "reply_board");
+    assert.equal(replies.length, 1);
+    if (replies[0]?.type === "reply_board") {
+      assert.match(replies[0].text, /worker-other-machine-1/);
+    }
+    assert.ok(
+      !outcome.effects.some((e) =>
+        ["renew_lease", "complete_task", "block_task", "close_tab", "cleanup_workspace"].includes(
+          e.type,
+        ),
+      ),
+      "never renews, closes, or changes task state for a claim we lost",
+    );
+  });
+});

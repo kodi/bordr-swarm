@@ -74,6 +74,111 @@ export function matchesMachineLabels(
   return { matched: true };
 }
 
+export type TaskRoutingResult =
+  | { ok: true; candidate: CandidateTask }
+  | { ok: false; reason: string };
+
+/**
+ * Resolves where and how one task would run on this machine (project, repo path, runtime,
+ * reviewer). Ignores Board state and tracking, so it also serves adopting already-claimed tasks.
+ */
+export function resolveTaskRouting(params: {
+  task: BoardTask;
+  swarm: SwarmConfig;
+  projects: ProjectsConfig;
+  machineName: string;
+  machineConfig: SwarmConfig["machines"][string];
+  busyPlainTabProjects?: Set<string>;
+  availableAgentKinds?: Set<string>;
+}): TaskRoutingResult {
+  const {
+    task,
+    swarm,
+    projects,
+    machineName,
+    machineConfig,
+    busyPlainTabProjects,
+    availableAgentKinds,
+  } = params;
+
+  const projectSlug = extractProjectSlug(task.channel, swarm.board.projectChannelPrefix);
+  if (!projectSlug) {
+    return {
+      ok: false,
+      reason: `channel "${task.channel}" does not match prefix "${swarm.board.projectChannelPrefix}"`,
+    };
+  }
+
+  const project = projects.projects[projectSlug];
+  if (!project) {
+    return { ok: false, reason: `unknown project "${projectSlug}" in projects.json` };
+  }
+
+  const repoPath = project.paths[machineName];
+  if (!repoPath) {
+    return {
+      ok: false,
+      reason: `project "${projectSlug}" has no local path configured for ${machineName}`,
+    };
+  }
+
+  const labelMatch = matchesMachineLabels(
+    task.labels,
+    machineName,
+    machineConfig,
+    project.defaultMachine,
+  );
+  if (!labelMatch.matched) {
+    return { ok: false, reason: labelMatch.reason ?? "machine label mismatch" };
+  }
+
+  const useWorktree = project.useWorktree ?? swarm.workerDefaults.useWorktree;
+  if (!useWorktree && busyPlainTabProjects?.has(projectSlug)) {
+    return {
+      ok: false,
+      reason: `plain-tab checkout for "${projectSlug}" already has an active or parked worker`,
+    };
+  }
+
+  let runtime: ResolvedWorkerRuntime;
+  try {
+    runtime = resolveWorkerRuntime(swarm.workerDefaults, task.labels);
+  } catch (err) {
+    return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+  }
+
+  if (availableAgentKinds && !availableAgentKinds.has(runtime.kind)) {
+    return {
+      ok: false,
+      reason: `agent binary "${runtime.kind}" is not installed on ${machineName}`,
+    };
+  }
+
+  let reviewer: ResolvedReviewerConfig;
+  try {
+    reviewer = resolveReviewerConfig(swarm.workerDefaults, project, task.labels);
+  } catch (err) {
+    return { ok: false, reason: err instanceof Error ? err.message : String(err) };
+  }
+
+  if (
+    reviewer.enabled &&
+    reviewer.runtime &&
+    availableAgentKinds &&
+    !availableAgentKinds.has(reviewer.runtime.kind)
+  ) {
+    return {
+      ok: false,
+      reason: `reviewer binary "${reviewer.runtime.kind}" is not installed on ${machineName}`,
+    };
+  }
+
+  return {
+    ok: true,
+    candidate: { task, projectSlug, project, repoPath, useWorktree, runtime, reviewer },
+  };
+}
+
 export function selectEligibleTasks(params: {
   tasks: BoardTask[];
   swarm: SwarmConfig;
@@ -112,102 +217,20 @@ export function selectEligibleTasks(params: {
       continue;
     }
 
-    const projectSlug = extractProjectSlug(task.channel, swarm.board.projectChannelPrefix);
-    if (!projectSlug) {
-      skips.push({
-        taskId: task.id,
-        reason: `channel "${task.channel}" does not match prefix "${swarm.board.projectChannelPrefix}"`,
-      });
-      continue;
-    }
-
-    const project = projects.projects[projectSlug];
-    if (!project) {
-      skips.push({ taskId: task.id, reason: `unknown project "${projectSlug}" in projects.json` });
-      continue;
-    }
-
-    const repoPath = project.paths[machineName];
-    if (!repoPath) {
-      skips.push({
-        taskId: task.id,
-        reason: `project "${projectSlug}" has no local path configured for ${machineName}`,
-      });
-      continue;
-    }
-
-    const labelMatch = matchesMachineLabels(
-      task.labels,
+    const routed = resolveTaskRouting({
+      task,
+      swarm,
+      projects,
       machineName,
       machineConfig,
-      project.defaultMachine,
-    );
-    if (!labelMatch.matched) {
-      skips.push({ taskId: task.id, reason: labelMatch.reason ?? "machine label mismatch" });
-      continue;
-    }
-
-    const useWorktree = project.useWorktree ?? swarm.workerDefaults.useWorktree;
-    if (!useWorktree && busyPlainTabProjects.has(projectSlug)) {
-      skips.push({
-        taskId: task.id,
-        reason: `plain-tab checkout for "${projectSlug}" already has an active or parked worker`,
-      });
-      continue;
-    }
-
-    let runtime: ResolvedWorkerRuntime;
-    try {
-      runtime = resolveWorkerRuntime(swarm.workerDefaults, task.labels);
-    } catch (err) {
-      skips.push({
-        taskId: task.id,
-        reason: err instanceof Error ? err.message : String(err),
-      });
-      continue;
-    }
-
-    if (availableAgentKinds && !availableAgentKinds.has(runtime.kind)) {
-      skips.push({
-        taskId: task.id,
-        reason: `agent binary "${runtime.kind}" is not installed on ${machineName}`,
-      });
-      continue;
-    }
-
-    let reviewer: ResolvedReviewerConfig;
-    try {
-      reviewer = resolveReviewerConfig(swarm.workerDefaults, project, task.labels);
-    } catch (err) {
-      skips.push({
-        taskId: task.id,
-        reason: err instanceof Error ? err.message : String(err),
-      });
-      continue;
-    }
-
-    if (
-      reviewer.enabled &&
-      reviewer.runtime &&
-      availableAgentKinds &&
-      !availableAgentKinds.has(reviewer.runtime.kind)
-    ) {
-      skips.push({
-        taskId: task.id,
-        reason: `reviewer binary "${reviewer.runtime.kind}" is not installed on ${machineName}`,
-      });
-      continue;
-    }
-
-    candidates.push({
-      task,
-      projectSlug,
-      project,
-      repoPath,
-      useWorktree,
-      runtime,
-      reviewer,
+      busyPlainTabProjects,
+      availableAgentKinds,
     });
+    if (!routed.ok) {
+      skips.push({ taskId: task.id, reason: routed.reason });
+      continue;
+    }
+    candidates.push(routed.candidate);
   }
 
   return { candidates, skips };
@@ -267,10 +290,12 @@ export function shortTaskId(taskId: string): string {
   return taskId.replace(/^#/, "").slice(0, 12);
 }
 
+export type TabLabelPrefix = "BLOCKED" | "FAILED" | "ORPHANED";
+
 export function formatTabLabel(
   taskId: string,
   agentProfile: string,
-  prefix?: "BLOCKED" | "FAILED",
+  prefix?: TabLabelPrefix,
   tag?: string,
 ): string {
   const mid = tag ? ` ${tag}` : "";
@@ -282,7 +307,7 @@ export function formatReviewTabLabel(
   taskId: string,
   reviewerProfile: string,
   round: number,
-  prefix?: "BLOCKED" | "FAILED",
+  prefix?: TabLabelPrefix,
 ): string {
   const base = `review-${shortTaskId(taskId)} r${round} (${reviewerProfile})`;
   return prefix ? `[${prefix}] ${base}` : base;

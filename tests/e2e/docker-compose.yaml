@@ -1,0 +1,66 @@
+services:
+  board:
+    image: bordr-swarm-e2e-board:local
+    environment:
+      PORT: "4100"
+      BOARD_TOKEN: "bordr-e2e-test-token"
+      BOARD_HANDLE: "owner"
+    ports:
+      - "0:4100"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:4100/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+
+  worker-1:
+    image: bordr-swarm-e2e-worker:local
+    environment:
+      SWARM_MACHINE: "worker-1"
+      BOARD_URL: "http://board:4100/api/board"
+      BOARD_TOKEN: "bordr-e2e-test-token"
+      BOARD_CLI_BIN: "vb"
+      SWARM_POLL_INTERVAL_SECONDS: "3"
+      SWARM_IDLE_TIMEOUT_SECONDS: "10"
+      SWARM_LEASE_DURATION: "1m"
+      SWARM_LEASE_RENEW_SECONDS: "20"
+    volumes:
+      - ../../src:/workspace/src:ro
+      - ../../prompts:/workspace/prompts:ro
+      - worker-1-state:/var/lib/swarm
+    depends_on:
+      board:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "herdr workspace list >/dev/null 2>&1 || exit 1"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+
+  worker-2:
+    image: bordr-swarm-e2e-worker:local
+    environment:
+      SWARM_MACHINE: "worker-2"
+      BOARD_URL: "http://board:4100/api/board"
+      BOARD_TOKEN: "bordr-e2e-test-token"
+      BOARD_CLI_BIN: "vb"
+      SWARM_POLL_INTERVAL_SECONDS: "3"
+      SWARM_IDLE_TIMEOUT_SECONDS: "10"
+      SWARM_LEASE_DURATION: "1m"
+      SWARM_LEASE_RENEW_SECONDS: "20"
+    volumes:
+      - ../../src:/workspace/src:ro
+      - ../../prompts:/workspace/prompts:ro
+      - worker-2-state:/var/lib/swarm
+    depends_on:
+      board:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "herdr workspace list >/dev/null 2>&1 || exit 1"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  worker-1-state:
+  worker-2-state:

@@ -33,10 +33,23 @@ export interface EffectExecutorDeps {
   log: LogFn;
 }
 
-export function buildBoardEnv(swarm: SwarmConfig, boardProfile: string): Record<string, string> {
+export function buildBoardEnv(
+  swarm: SwarmConfig,
+  boardProfile: string,
+  processEnv: NodeJS.ProcessEnv = process.env,
+): Record<string, string> {
   const env: Record<string, string> = { BOARD_PROFILE: boardProfile };
-  if (swarm.board.scope) env.VERCEL_SCOPE = swarm.board.scope;
-  if (swarm.board.boardName) env.VERCEL_BOARD_NAME = swarm.board.boardName;
+  const boardUrl = (swarm.board.url || processEnv.BOARD_URL || "").trim();
+  if (boardUrl) {
+    env.BOARD_URL = boardUrl;
+  } else {
+    if (swarm.board.scope) env.VERCEL_SCOPE = swarm.board.scope;
+    if (swarm.board.boardName) env.VERCEL_BOARD_NAME = swarm.board.boardName;
+  }
+  const boardToken = (processEnv.BOARD_TOKEN || "").trim();
+  if (boardToken) {
+    env.BOARD_TOKEN = boardToken;
+  }
   return env;
 }
 
@@ -367,6 +380,29 @@ async function executeSingleEffect(
             ...cur,
             lastLeaseRenewMs: previousTask.lastLeaseRenewMs,
           });
+        }
+      }
+      return;
+    }
+
+    case "reclaim_task": {
+      try {
+        await deps.board.claimTaskById(effect.taskId, {
+          asProfile: effect.boardProfile,
+          lease: deps.swarm.board.leaseDuration,
+        });
+        deps.log(
+          "WARN",
+          `Lease on task #${effect.taskId} had lapsed (Board reported ready); re-claimed it as ${effect.boardProfile}.`,
+        );
+      } catch (err) {
+        deps.log(
+          "WARN",
+          `Lease on task #${effect.taskId} lapsed and re-claiming as ${effect.boardProfile} failed (${err instanceof Error ? err.message : String(err)}); treating it as claimed by another worker and orphaning its tab.`,
+        );
+        deps.activeWorkers.delete(effect.taskId);
+        for (const lost of effect.onLost) {
+          await executeSingleEffect(deps, previousTask, lost, nowMs);
         }
       }
       return;
