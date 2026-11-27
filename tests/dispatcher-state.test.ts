@@ -67,7 +67,12 @@ function task(id: string, phase: TaskPhase, seen: string[] = []): ActiveTask {
 }
 
 const LIFECYCLES: SessionLifecycle[] = [
-  { kind: "awaiting_prompt", promptText: "Do the task\nwith newlines", uiBlockedNotified: true },
+  {
+    kind: "awaiting_prompt",
+    promptText: "Do the task\nwith newlines",
+    sinceMs: 1_000,
+    uiBlockedNotified: true,
+  },
   { kind: "running" },
   { kind: "ui_blocked" },
   { kind: "idle_grace", sinceMs: 12_345 },

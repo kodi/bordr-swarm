@@ -1,0 +1,63 @@
+{
+  "idle": {
+    "records": [
+      {
+        "state": "idle",
+        "app": "claude-code",
+        "effective_app": "claude-code",
+        "updated_at": "2026-11-27T19:16:03.623441891Z",
+        "owner": { "pid": 3484, "name": "claude" }
+      }
+    ]
+  },
+  "working": {
+    "records": [
+      {
+        "state": "working",
+        "app": "claude-code",
+        "effective_app": "claude-code",
+        "updated_at": "2026-11-27T19:16:04.100000000Z",
+        "owner": { "pid": 3484, "name": "claude" }
+      }
+    ]
+  },
+  "done": {
+    "records": [
+      {
+        "state": "done",
+        "app": "claude-code",
+        "effective_app": "claude-code",
+        "updated_at": "2026-11-27T19:16:05.100000000Z",
+        "owner": { "pid": 3484, "name": "claude" }
+      }
+    ]
+  },
+  "blocked_permission": {
+    "records": [
+      {
+        "state": "blocked",
+        "kind": "permission",
+        "app": "claude-code",
+        "effective_app": "claude-code",
+        "msg": "Allow?",
+        "updated_at": "2026-11-27T19:16:04.754255695Z",
+        "owner": { "pid": 3520, "name": "claude" }
+      }
+    ]
+  },
+  "blocked_auth": {
+    "records": [
+      {
+        "state": "blocked",
+        "kind": "auth",
+        "app": "antigravity",
+        "effective_app": "antigravity",
+        "updated_at": "2026-11-27T19:16:04.800000000Z",
+        "owner": { "pid": 3520, "name": "agy" }
+      }
+    ]
+  },
+  "empty": {
+    "records": []
+  }
+}

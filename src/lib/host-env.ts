@@ -192,3 +192,24 @@ export function detectInstalledAgentKinds(extraKinds: string[] = []): string[] {
   }
   return found;
 }
+
+export interface InstalledRuntimes {
+  herdr: boolean;
+  rex: boolean;
+}
+
+export function detectInstalledRuntimes(): InstalledRuntimes {
+  return {
+    herdr: runQuickCommand("which", ["herdr"], 5_000).ok,
+    rex: runQuickCommand("which", ["rex"], 5_000).ok,
+  };
+}
+
+/**
+ * Default worker runtime choice for `mise run init`: whichever binary is installed,
+ * or `"herdr"` when both or neither are installed.
+ */
+export function defaultWorkerRuntimeKind(installed: InstalledRuntimes): "herdr" | "rex" {
+  if (installed.rex && !installed.herdr) return "rex";
+  return "herdr";
+}

@@ -5,12 +5,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     git \
+    gnupg \
     procps \
   && rm -rf /var/lib/apt/lists/*
 
 # Install real Herdr CLI & headless server for Linux.
 RUN curl -fsSL https://herdr.dev/install.sh | sh
 ENV PATH="/root/.local/bin:${PATH}"
+
+# Install real Rex CLI & headless server for Linux (preview channel).
+RUN curl -fsSL https://pkgs.superlogical.com/rex/install.sh | sh -s -- --channel preview
 
 # Install real Vercel CLI and @vercel/board (`vb`) globally so both CLIs can be exercised.
 RUN npm install -g --no-audit --no-fund vercel@latest @vercel/board@0.56.1

@@ -199,7 +199,7 @@ Config is a discriminated union, with the legacy `herdrTarget` kept as a back-co
 
 ### Slice 1: Rex contract spike and fixtures
 
-Status: `[ ]` Not started
+Status: `[-]` In progress (Linux Rex `0.1.0-preview.25` CLI contracts & fixtures verified in Docker; real-agent TUI multi-line paste, codex update menu, claude folder-trust, and macOS Rex app host remain for manual Mac verification)
 
 - Goal: close the last unverified Rex behaviors before writing adapter code, and capture fixtures.
 - Why here: everything after this relies on these answers; it's cheap and has no code risk.
@@ -216,7 +216,7 @@ Status: `[ ]` Not started
 
 ### Slice 2: Runtime seam with `HerdrRuntime` (pure refactor)
 
-Status: `[ ]` Not started
+Status: `[x]` Done (verified via `npm run check` + full Herdr E2E suite)
 
 - Goal: the Dispatcher and its effects talk to `WorkerRuntime`, not `HerdrClient`.
 - Why here: it decouples everything after it from Herdr without any behavior change. It is worth doing even if Rex stalls.
@@ -232,7 +232,7 @@ Status: `[ ]` Not started
 
 ### Slice 3: Startup guard in the session FSM
 
-Status: `[ ]` Not started
+Status: `[x]` Done (verified via `tests/fsm.test.ts` + `npm run check`)
 
 - Goal: a session that never reaches `idle` after spawn gets surfaced instead of sitting forever, and "alive but no status yet" isn't treated as exited.
 - Why here: Rex needs it (the codex update menu gives `[]`, and a stuck folder-trust prompt is possible). It is pure FSM work, testable before any Rex code exists. Herdr benefits too.
@@ -246,7 +246,7 @@ Status: `[ ]` Not started
 
 ### Slice 4: Config, routing label and registry
 
-Status: `[ ]` Not started
+Status: `[x]` Done (verified via `tests/rex.test.ts`, `npm run schemas:generate`, and E2E `#swarm/registry` + `runtime=rex` routing)
 
 - Goal: a machine can declare `runtime: {kind:"herdr"|"rex"}`, and the swarm knows which machines run which runtime.
 - Why here: it's the contract the later slices read. On its own it's inert (Slice 6 wires the Rex side).
@@ -261,7 +261,7 @@ Status: `[ ]` Not started
 
 ### Slice 5: `RexClient` and status normalizer
 
-Status: `[ ]` Not started
+Status: `[x]` Done (verified via `tests/rex.test.ts` against sanitized `rex 0.1.0-preview.25` fixtures + real `worker-3` E2E)
 
 - Goal: a typed, tested wrapper over the Rex CLI and a pure `records → AgentStatus` mapping.
 - Why here: it isolates Rex's beta CLI surface behind one module, tested on the Slice 1 fixtures, before it touches the Dispatcher.
@@ -277,7 +277,7 @@ Status: `[ ]` Not started
 
 ### Slice 6: `RexRuntime` and Dispatcher wiring
 
-Status: `[ ]` Not started
+Status: `[-]` In progress (implemented and verified end-to-end against real `rex 0.1.0-preview.25` in Docker `worker-3` E2E; real `claude`/`codex`/`pi`/`agy` Mac run pending manual confirmation)
 
 - Goal: a machine with `runtime.kind: "rex"` claims, runs, reviews and settles tasks end to end in Rex.
 - Why here: it needs the seam (2), the startup guard (3), config (4) and the client (5).
@@ -295,7 +295,7 @@ Status: `[ ]` Not started
 
 ### Slice 7: `git worktree` support for Rex machines
 
-Status: `[ ]` Not started
+Status: `[x]` Done (verified via `tests/rex.test.ts` + `worker-3` E2E `worktree-app` creation and cleanup)
 
 - Goal: `useWorktree: true` works on Rex machines.
 - Why here: it's optional; the default plain-tab path already works after Slice 6.
@@ -310,7 +310,7 @@ Status: `[ ]` Not started
 
 ### Slice 8: Init, apply, doctor, status, stop
 
-Status: `[ ]` Not started
+Status: `[-]` In progress (implemented and unit-tested; manual `mise run init --role worker --runtime rex` + `doctor`/`apply`/`status` on macOS/Linux host pending)
 
 - Goal: a user sets up a Rex worker from `mise run init` with no hand-editing, and the ops scripts understand it.
 - Why here: user-facing; only worth shipping once Slice 6 works.
@@ -334,7 +334,7 @@ Status: `[ ]` Not started
 
 ### Slice 9: Docs and side-by-side validation
 
-Status: `[ ]` Not started
+Status: `[-]` In progress (docs updated; mixed Herdr+Rex fleet verified in Docker E2E with `worker-1`/`worker-2` Herdr + `worker-3` Rex; real Board + Mac mixed-fleet pass pending)
 
 - Goal: the docs reflect two runtimes, and a mixed fleet is proven on the real Board.
 - This slice should implement:
@@ -350,7 +350,7 @@ Status: `[ ]` Not started
 
 ### Slice 10 (optional): Rex event source
 
-Status: `[ ]` Not started
+Status: `[x]` Done (implemented `RexEventSource`, verified via `tests/rex.test.ts` + `worker-3` E2E event-driven test with 120s poll interval and clean process-group teardown)
 
 - Goal: Rex status changes wake the Dispatcher immediately instead of on the next poll.
 - Only if Plan B's bus landed. It is a sibling of `HerdrEventSource`.
@@ -414,6 +414,17 @@ Status: `[ ]` Not started
 ## Working Notes
 
 - 2026-11-27: Plan written from the Board findings (`msg_22f3bebb-…_3` for codex/pi/claude, `_4` for agy) and `docs/research/rex-vs-herdr.md`. The research note's main blocker (no agent status in Rex) no longer applies: all four agents report through OSC 7501. Also checked live on Rex `0.1.0-preview.25`: `rex block ls --json` carries no status field (so status needs one `program_status` call per block), and `rex window new` takes `-s/-c/--focus/--json/--keep-open/--shell`.
+- 2026-11-27 (Docker Linux probe & E2E on `rex 0.1.0-preview.25`, api rev 24):
+  - Installed via `curl -fsSL https://pkgs.superlogical.com/rex/install.sh | sh -s -- --channel preview` in `node:24-bookworm-slim`; `rex server start` runs headless over Unix socket with no systemd.
+  - CLI contract specifics confirmed directly on `0.1.0-preview.25`:
+    - `rex block ls --json` requires `-s <session>` (`-A --json` fails); `rex window ls -s <session> --json` returns windows + nested block IDs.
+    - `rex window rename` does NOT accept `--json`.
+    - `rex send` reads stdin when `[TEXT]` is **omitted** (passing `-` sends literal `-`). `RexClient.send` pipes via stdin with bracketed paste (`\x1b[200~...\x1b[201~`) for multi-line prompts, followed by `rex send-key -s <sid> -b <bid> enter`.
+    - Passing `--keep-open` to `rex new` and `rex window new` keeps the window/block alive after a crash so `rex capture` returns the tail and `[FAILED]` parking works; `rex do com.superlogical.terminal.process` reports `child: null, foreground: null, last_exit: {...}` once exited.
+    - `rex events --json` streams server-level connectivity/session events; `rex events -s <sid> --json` streams `program_status_changed`, `child_exited`, `window_closed`, and `block_closed`.
+  - Race caught & fixed in E2E: fast-starting Rex agents can emit initial OSC 7501 `idle` before `rex events -s <sid>` finishes attaching; `SwarmDispatcher.tick()` schedules a debounced `rex_awaiting_prompt` wake whenever a new Rex session enters `awaiting_prompt`.
+  - Added `worker-3` (`SWARM_RUNTIME=rex`) to `tests/e2e/docker-compose.yaml` and verified mixed-fleet routing (`runtime=rex` / `runtime=herdr`), `RexEventSource` event-driven wakeups, `--keep-open` crash capture & `[FAILED]` parking, mid-review dispatcher restart durability, and Dispatcher-managed `git worktree` cleanup.
+  - Remaining manual verification on macOS / real agents: real TUI multi-line paste on `claude`/`codex`/`pi`/`agy`, `codex` startup update menu flag, `claude` untrusted-folder prompt status, and macOS Rex app + `launchd` `init`/`doctor`/`apply`/`status`.
 
 ## Next Slice
 

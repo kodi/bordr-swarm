@@ -1,8 +1,13 @@
 import type { BoardClient } from "./board.ts";
 import type { SwarmConfig } from "./config.ts";
-import { sanitizeHerdrAgentName, type HerdrClient } from "./herdr.ts";
 import { buildFixRoundPrompt, renderReviewerPrompt } from "./review.ts";
 import { formatReviewTabLabel, formatTabLabel, shortTaskId } from "./routing.ts";
+import {
+  buildSessionRef,
+  sanitizeAgentName,
+  type SessionRef,
+  type WorkerRuntime,
+} from "./runtime.ts";
 import {
   assertNever,
   createManagedSession,
@@ -11,12 +16,14 @@ import {
 } from "./session-fsm.ts";
 import {
   getImplHandle,
+  getReviewerHandle,
   type ActiveTask,
   type ParkedTab,
   type ParkedTabStepOutcome,
   type TaskEffect,
   type TaskStepOutcome,
 } from "./task-fsm.ts";
+import { defaultGitWorktreeManager, type GitWorktreeManager } from "./worktree.ts";
 
 export type { ParkedTab };
 
@@ -26,7 +33,8 @@ export interface EffectExecutorDeps {
   swarm: SwarmConfig;
   machineName: string;
   board: BoardClient;
-  herdr: HerdrClient;
+  runtime: WorkerRuntime;
+  worktreeManager?: GitWorktreeManager;
   activeWorkers: Map<string, ActiveTask>;
   parkedTabs: Map<string, ParkedTab>;
   getReviewerPromptTemplate: () => string;
@@ -53,18 +61,65 @@ export function buildBoardEnv(
   return env;
 }
 
+function handleToRef(
+  runtime: WorkerRuntime,
+  groupId: string,
+  handle: Pick<SessionHandle, "tabId" | "paneId" | "agentName">,
+): SessionRef {
+  return buildSessionRef({
+    runtime: runtime.kind,
+    groupId,
+    tabId: handle.tabId,
+    paneId: handle.paneId,
+    agentName: handle.agentName,
+  });
+}
+
+function refForTabId(runtime: WorkerRuntime, task: ActiveTask, tabId: string): SessionRef {
+  const impl = getImplHandle(task.phase);
+  const rev = getReviewerHandle(task.phase);
+  if (rev && rev.tabId === tabId) return handleToRef(runtime, task.ctx.workspaceId, rev);
+  if (impl.tabId === tabId) return handleToRef(runtime, task.ctx.workspaceId, impl);
+  return buildSessionRef({
+    runtime: runtime.kind,
+    groupId: task.ctx.workspaceId,
+    tabId,
+    paneId: "",
+    agentName: impl.agentName,
+  });
+}
+
+function refForPaneId(
+  runtime: WorkerRuntime,
+  task: ActiveTask,
+  paneId: string,
+  agentName?: string,
+): SessionRef {
+  const impl = getImplHandle(task.phase);
+  const rev = getReviewerHandle(task.phase);
+  if (rev && rev.paneId === paneId) return handleToRef(runtime, task.ctx.workspaceId, rev);
+  if (impl.paneId === paneId) return handleToRef(runtime, task.ctx.workspaceId, impl);
+  return buildSessionRef({
+    runtime: runtime.kind,
+    groupId: task.ctx.workspaceId,
+    tabId: impl.tabId,
+    paneId,
+    agentName: agentName ?? impl.agentName,
+  });
+}
+
 async function safeRenameTab(
-  herdr: HerdrClient,
-  tabId: string,
+  runtime: WorkerRuntime,
+  ref: SessionRef,
   label: string,
   log: LogFn,
 ): Promise<void> {
   try {
-    await herdr.renameTab(tabId, label);
+    await runtime.rename(ref, label);
   } catch (err) {
     log(
       "WARN",
-      `Failed to rename tab ${tabId} to "${label}": ${err instanceof Error ? err.message : String(err)}`,
+      `Failed to rename tab ${ref.tabId} to "${label}": ${err instanceof Error ? err.message : String(err)}`,
     );
   }
 }
@@ -122,19 +177,13 @@ async function executeSpawnReviewer(
 
   const shortId = shortTaskId(ctx.taskId);
   const implHandle = getImplHandle(task.phase);
+  const implRef = handleToRef(deps.runtime, ctx.workspaceId, implHandle);
   const reviewerBoardProfile = `reviewer-${deps.machineName}-${shortId}`;
-  const reviewerAgentName = sanitizeHerdrAgentName(`r${nextRound}`, shortId);
+  const reviewerAgentName = sanitizeAgentName(`r${nextRound}`, shortId);
   const reviewTabLabel = formatReviewTabLabel(ctx.taskId, reviewRuntime.profileName, nextRound);
+  const ui = deps.runtime.uiName;
 
   try {
-    const reviewPane = await deps.herdr.createTab({
-      workspaceId: ctx.workspaceId,
-      cwd: reviewCwd,
-      label: reviewTabLabel,
-      env: buildBoardEnv(deps.swarm, reviewerBoardProfile),
-      focus: false,
-    });
-
     const reviewPrompt = renderReviewerPrompt(deps.getReviewerPromptTemplate(), {
       taskId: ctx.taskId,
       channel: ctx.channel,
@@ -148,26 +197,33 @@ async function executeSpawnReviewer(
       humanHandle: ctx.humanHandle,
     });
 
-    const startRes = await deps.herdr.startAgent({
-      name: reviewerAgentName,
-      kind: reviewRuntime.kind,
-      paneId: reviewPane.paneId,
-      args: reviewRuntime.cliArgs,
+    const spawnRes = await deps.runtime.spawn({
+      group: ctx.projectSlug,
+      groupId: ctx.workspaceId,
+      cwd: reviewCwd,
+      label: reviewTabLabel,
+      env: buildBoardEnv(deps.swarm, reviewerBoardProfile),
+      agent: {
+        name: reviewerAgentName,
+        kind: reviewRuntime.kind,
+        args: reviewRuntime.cliArgs,
+      },
       timeoutMs: 60_000,
     });
 
     const reviewerHandle: SessionHandle = {
       boardProfile: reviewerBoardProfile,
       runtime: reviewRuntime,
-      tabId: reviewPane.tabId,
-      paneId: reviewPane.paneId,
+      tabId: spawnRes.ref.tabId,
+      paneId: spawnRes.ref.paneId,
       agentName: reviewerAgentName,
       startedAtMs: nowMs,
     };
 
     const reviewerSession = createManagedSession(reviewerHandle, {
       promptText: reviewPrompt,
-      blockedOnStartup: startRes.blockedOnStartup,
+      blockedOnStartup: spawnRes.blockedOnStartup,
+      promptNow: spawnRes.promptNow,
     });
 
     const latest = deps.activeWorkers.get(ctx.taskId) ?? task;
@@ -182,8 +238,8 @@ async function executeSpawnReviewer(
     });
 
     await safeRenameTab(
-      deps.herdr,
-      implHandle.tabId,
+      deps.runtime,
+      implRef,
       formatTabLabel(
         ctx.taskId,
         implHandle.runtime.profileName,
@@ -193,29 +249,34 @@ async function executeSpawnReviewer(
       deps.log,
     );
 
-    if (startRes.blockedOnStartup) {
+    if (spawnRes.blockedOnStartup) {
       deps.log(
         "WARN",
-        `Reviewer ${reviewerAgentName} for task #${ctx.taskId} hit an interactive prompt on startup; marking tab [BLOCKED] for Sheprd.`,
+        `Reviewer ${reviewerAgentName} for task #${ctx.taskId} hit an interactive prompt on startup; marking tab [BLOCKED] for ${ui}.`,
       );
       await safeRenameTab(
-        deps.herdr,
-        reviewPane.tabId,
+        deps.runtime,
+        spawnRes.ref,
         formatReviewTabLabel(ctx.taskId, reviewRuntime.profileName, nextRound, "BLOCKED"),
         deps.log,
       );
       await deps.board
         .reply(
           ctx.taskId,
-          `Reviewer (${reviewRuntime.profileName}, round ${nextRound}/${ctx.reviewConfig.maxRounds}) paused on startup prompt in Sheprd on \`${deps.machineName}\` (workspace \`${ctx.projectSlug}\`). Approve/dismiss it in Sheprd to continue.`,
+          `Reviewer (${reviewRuntime.profileName}, round ${nextRound}/${ctx.reviewConfig.maxRounds}) paused on startup prompt in ${ui} on \`${deps.machineName}\` (workspace \`${ctx.projectSlug}\`). Approve/dismiss it in ${ui} to continue.`,
           { asProfile: reviewerBoardProfile },
         )
         .catch(() => {});
-    } else {
-      await deps.herdr.promptAgent(reviewerAgentName, reviewPrompt);
+    } else if (spawnRes.promptNow) {
+      await deps.runtime.prompt(spawnRes.ref, reviewPrompt);
       deps.log(
         "INFO",
         `Spawned reviewer ${reviewerAgentName} (${reviewRuntime.profileName}/${reviewRuntime.kind}) for task #${ctx.taskId} round ${nextRound}/${ctx.reviewConfig.maxRounds}.`,
+      );
+    } else {
+      deps.log(
+        "INFO",
+        `Spawned reviewer ${reviewerAgentName} (${reviewRuntime.profileName}/${reviewRuntime.kind}) in ${spawnRes.ref.tabId} for task #${ctx.taskId} round ${nextRound}/${ctx.reviewConfig.maxRounds}; awaiting ready state before delivering prompt.`,
       );
     }
   } catch (err) {
@@ -231,13 +292,13 @@ async function executeSpawnReviewer(
     await deps.board
       .blockTask(
         ctx.taskId,
-        `Failed to start reviewer ${reviewRuntime.profileName} on ${deps.machineName}; inspect Sheprd.`,
+        `Failed to start reviewer ${reviewRuntime.profileName} on ${deps.machineName}; inspect ${ui}.`,
         { asProfile: ctx.boardProfile, kind: "needs_input" },
       )
       .catch(() => {});
     await safeRenameTab(
-      deps.herdr,
-      implHandle.tabId,
+      deps.runtime,
+      implRef,
       formatTabLabel(ctx.taskId, implHandle.runtime.profileName, "BLOCKED"),
       deps.log,
     );
@@ -257,6 +318,8 @@ async function executeResumeImplementerForFix(
 ): Promise<void> {
   const { ctx } = task;
   const impl = getImplHandle(task.phase);
+  const implRef = handleToRef(deps.runtime, ctx.workspaceId, impl);
+  const ui = deps.runtime.uiName;
 
   if (!implTabExists) {
     deps.log(
@@ -281,16 +344,12 @@ async function executeResumeImplementerForFix(
     reviewerProfile,
   });
 
-  await safeRenameTab(
-    deps.herdr,
-    impl.tabId,
-    formatTabLabel(ctx.taskId, impl.runtime.profileName, undefined, `fix-r${round}`),
-    deps.log,
-  );
+  const fixLabel = formatTabLabel(ctx.taskId, impl.runtime.profileName, undefined, `fix-r${round}`);
+  await safeRenameTab(deps.runtime, implRef, fixLabel, deps.log);
 
   try {
     if (implAlive) {
-      await deps.herdr.promptAgent(impl.agentName, fixPrompt);
+      await deps.runtime.prompt(implRef, fixPrompt);
       deps.log(
         "INFO",
         `Reviewer requested changes on task #${ctx.taskId} (round ${round}/${ctx.reviewConfig.maxRounds}); woke original implementer ${impl.agentName}.`,
@@ -299,37 +358,49 @@ async function executeResumeImplementerForFix(
     }
 
     // Self-heal if original implementer exited while waiting for review
-    const restartedHandle: SessionHandle = { ...impl, startedAtMs: nowMs };
-    const restart = await deps.herdr.startAgent({
-      name: impl.agentName,
-      kind: impl.runtime.kind,
-      paneId: impl.paneId,
-      args: impl.runtime.cliArgs,
+    const restart = await deps.runtime.restartInPane({
+      ref: implRef,
+      cwd: ctx.worktreePath ?? ctx.repoPath,
+      label: fixLabel,
+      env: buildBoardEnv(deps.swarm, ctx.boardProfile),
+      agent: {
+        name: impl.agentName,
+        kind: impl.runtime.kind,
+        args: impl.runtime.cliArgs,
+      },
       timeoutMs: 60_000,
     });
+
+    const restartedHandle: SessionHandle = {
+      ...impl,
+      tabId: restart.ref.tabId,
+      paneId: restart.ref.paneId,
+      startedAtMs: nowMs,
+    };
 
     const restartedSession = createManagedSession(restartedHandle, {
       promptText: fixPrompt,
       blockedOnStartup: restart.blockedOnStartup,
+      promptNow: restart.promptNow,
     });
     updateSessionOnActiveTask(deps, ctx.taskId, "impl", restartedSession);
 
     if (restart.blockedOnStartup) {
       await safeRenameTab(
-        deps.herdr,
-        impl.tabId,
+        deps.runtime,
+        restart.ref,
         formatTabLabel(ctx.taskId, impl.runtime.profileName, "BLOCKED"),
         deps.log,
       );
       await deps.board
         .reply(
           ctx.taskId,
-          `Implementer (${impl.runtime.profileName}) paused on startup prompt while resuming fix round ${round} in Sheprd on \`${deps.machineName}\`.`,
+          `Implementer (${impl.runtime.profileName}) paused on startup prompt while resuming fix round ${round} in ${ui} on \`${deps.machineName}\`.`,
           { asProfile: ctx.boardProfile },
         )
         .catch(() => {});
-    } else {
-      await deps.herdr.promptAgent(impl.agentName, fixPrompt);
+    } else if (restart.promptNow) {
+      await deps.runtime.prompt(restart.ref, fixPrompt);
     }
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
@@ -345,8 +416,8 @@ async function executeResumeImplementerForFix(
       )
       .catch(() => {});
     await safeRenameTab(
-      deps.herdr,
-      impl.tabId,
+      deps.runtime,
+      implRef,
       formatTabLabel(ctx.taskId, impl.runtime.profileName, "BLOCKED"),
       deps.log,
     );
@@ -409,13 +480,18 @@ async function executeSingleEffect(
     }
 
     case "rename_tab":
-      await safeRenameTab(deps.herdr, effect.tabId, effect.label, deps.log);
+      await safeRenameTab(
+        deps.runtime,
+        refForTabId(deps.runtime, previousTask, effect.tabId),
+        effect.label,
+        deps.log,
+      );
       return;
 
     case "close_tab": {
       if (!deps.swarm.workerDefaults.closeTabOnComplete) return;
       try {
-        await deps.herdr.closeTab(effect.tabId);
+        await deps.runtime.close(refForTabId(deps.runtime, previousTask, effect.tabId));
         deps.log(
           "INFO",
           `Closed tab ${effect.tabId} for task #${effect.taskId} (${effect.reason}).`,
@@ -431,15 +507,36 @@ async function executeSingleEffect(
 
     case "cleanup_workspace": {
       if (!deps.swarm.workerDefaults.closeTabOnComplete) return;
+      const ref = buildSessionRef({
+        runtime: deps.runtime.kind,
+        groupId: effect.workspaceId,
+        tabId: effect.tabId,
+        paneId: getImplHandle(previousTask.phase).paneId,
+        agentName: getImplHandle(previousTask.phase).agentName,
+      });
       try {
-        if (effect.useWorktree) {
-          await deps.herdr.removeWorktree(effect.workspaceId);
+        if (effect.useWorktree && effect.worktreePath) {
+          if (effect.tabExists) {
+            await deps.runtime.close(ref).catch(() => {});
+          }
+          const wt = deps.worktreeManager ?? defaultGitWorktreeManager;
+          await wt.remove({
+            repoPath: previousTask.ctx.repoPath,
+            worktreePath: effect.worktreePath,
+            branch: previousTask.ctx.branch,
+          });
+          deps.log(
+            "INFO",
+            `Removed git worktree ${effect.worktreePath} for task #${effect.taskId}.`,
+          );
+        } else if (effect.useWorktree && deps.runtime.removeWorktree) {
+          await deps.runtime.removeWorktree(ref);
           deps.log(
             "INFO",
             `Removed worktree workspace ${effect.workspaceId} for task #${effect.taskId}.`,
           );
         } else if (effect.tabExists) {
-          await deps.herdr.closeTab(effect.tabId);
+          await deps.runtime.close(ref);
           deps.log("INFO", `Closed tab ${effect.tabId} for completed task #${effect.taskId}.`);
         }
       } catch (err) {
@@ -452,8 +549,19 @@ async function executeSingleEffect(
     }
 
     case "prompt_agent": {
+      const impl = getImplHandle(previousTask.phase);
+      const rev = getReviewerHandle(previousTask.phase);
+      const matchedHandle =
+        rev && (effect.paneId === rev.paneId || effect.agentName === rev.agentName) ? rev : impl;
+      const ref = buildSessionRef({
+        runtime: deps.runtime.kind,
+        groupId: previousTask.ctx.workspaceId,
+        tabId: effect.tabId ?? matchedHandle.tabId,
+        paneId: effect.paneId ?? matchedHandle.paneId,
+        agentName: effect.agentName,
+      });
       try {
-        await deps.herdr.promptAgent(effect.agentName, effect.text);
+        await deps.runtime.prompt(ref, effect.text);
       } catch (err) {
         deps.log(
           "WARN",
@@ -471,11 +579,21 @@ async function executeSingleEffect(
       return;
     }
 
-    case "reply_board":
+    case "reply_board": {
+      let body = effect.text;
+      if (effect.includeTailFromPaneId) {
+        const ref = refForPaneId(deps.runtime, previousTask, effect.includeTailFromPaneId);
+        const tail = await deps.runtime.readTail(ref, 40).catch(() => "");
+        const snippet = tail.trim().slice(-1200);
+        if (snippet) {
+          body = `${body}\n\nLast terminal output:\n\`\`\`\n${snippet}\n\`\`\``;
+        }
+      }
       await deps.board
-        .reply(effect.taskId, effect.text, { asProfile: effect.boardProfile })
+        .reply(effect.taskId, body, { asProfile: effect.boardProfile })
         .catch(() => {});
       return;
+    }
 
     case "complete_task":
       await deps.board
@@ -502,9 +620,8 @@ async function executeSingleEffect(
         "ERROR",
         `${effect.roleLabel} ${effect.agentName} for task #${effect.taskId} exited unexpectedly (tabExists=${effect.tabExists}).`,
       );
-      const tail = effect.tabExists
-        ? await deps.herdr.paneRead(effect.paneId, { lines: 40 }).catch(() => "")
-        : "";
+      const ref = refForPaneId(deps.runtime, previousTask, effect.paneId, effect.agentName);
+      const tail = effect.tabExists ? await deps.runtime.readTail(ref, 40).catch(() => "") : "";
       if (effect.boardClaimed) {
         const snippet = tail.trim().slice(-1200);
         const verb =
@@ -611,7 +728,7 @@ export async function applyParkedTabOutcome(
       if (outcome.reason === "tab_closed") {
         deps.log(
           "INFO",
-          `Parked tab ${parked.tabId} for task #${parked.taskId} was closed in Sheprd; freeing slot.`,
+          `Parked tab ${parked.tabId} for task #${parked.taskId} was closed in ${deps.runtime.uiName}; freeing slot.`,
         );
       } else {
         deps.log(

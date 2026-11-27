@@ -126,7 +126,7 @@ For single-machine setups (`role: "both"`), open `http://127.0.0.1:4747` directl
 
 ### 4. Worker Dispatcher (TypeScript / Node 24+)
 
-Runs as a **per-machine daemon** locally on each worker machine (Linux or macOS). Talks directly to the local `herdr` socket, manages local `maxWorkers` slots, and claims ready tasks matching projects, OS/machine labels, and installed agent CLIs available on that host.
+Runs as a **per-machine daemon** locally on each worker machine (Linux or macOS). Talks through the runtime-neutral `WorkerRuntime` interface (`src/lib/runtime.ts`) to either **Herdr** (`HerdrRuntime`, local `herdr` socket, watched in Sheprd) or **Rex** (`RexRuntime`, local `rex` server via `RexClient`, watched in the Rex app), manages local `maxWorkers` slots, and claims ready tasks matching projects, OS/machine/runtime labels (`runtime=herdr|rex`), and installed agent CLIs available on that host. Lead Watcher stays on Herdr.
 
 #### Per-Task Lifecycle
 

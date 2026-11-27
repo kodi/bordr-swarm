@@ -133,11 +133,13 @@ export function buildMachineRegistryEntry(params: {
   }
   hostedProjects.sort((a, b) => a.slug.localeCompare(b.slug));
 
+  const runtimeKind = machine.runtime?.kind ?? "herdr";
   return MachineRegistryEntrySchema.parse({
     version: 1,
     machine: params.machineName,
     os: machine.os,
     role: machine.role,
+    runtime: runtimeKind,
     maxWorkers: machine.maxWorkers,
     agents: [...installedProfiles].toSorted(),
     labels: [...machine.labels].toSorted(),
@@ -162,10 +164,11 @@ export function formatRegistryCardMarkdown(entry: MachineRegistryEntry): string 
           .join("\n")
       : "| *(none configured yet)* | — | — | — | — |";
 
+  const runtimeBit = entry.runtime ? ` · **Runtime:** \`${entry.runtime}\`` : "";
   return [
     `### Machine Registry: \`${entry.machine}\``,
     "",
-    `- **Role:** \`${entry.role}\` · **OS:** \`${entry.os}\` · **Max Workers:** \`${entry.maxWorkers}\``,
+    `- **Role:** \`${entry.role}\` · **OS:** \`${entry.os}\`${runtimeBit} · **Max Workers:** \`${entry.maxWorkers}\``,
     `- **Agents:** ${entry.agents.length > 0 ? entry.agents.map((a) => `\`${a}\``).join(", ") : "*(none)*"}`,
     `- **Labels:** ${entry.labels.map((l) => `\`${l}\``).join(", ")}`,
     "",
@@ -280,6 +283,7 @@ export function mergeRegistryIntoLeadCatalog(params: {
     machines[entry.machine] = {
       os: entry.os,
       role: entry.role,
+      ...(entry.runtime ? { runtime: entry.runtime } : {}),
       maxWorkers: entry.maxWorkers,
       agents: entry.agents,
       labels: entry.labels,

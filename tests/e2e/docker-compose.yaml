@@ -17,6 +17,7 @@ services:
     image: bordr-swarm-e2e-worker:local
     environment:
       SWARM_MACHINE: "worker-1"
+      SWARM_RUNTIME: "herdr"
       BOARD_URL: "http://board:4100/api/board"
       BOARD_TOKEN: "bordr-e2e-test-token"
       BOARD_CLI_BIN: "vb"
@@ -41,6 +42,7 @@ services:
     image: bordr-swarm-e2e-worker:local
     environment:
       SWARM_MACHINE: "worker-2"
+      SWARM_RUNTIME: "herdr"
       BOARD_URL: "http://board:4100/api/board"
       BOARD_TOKEN: "bordr-e2e-test-token"
       BOARD_CLI_BIN: "vb"
@@ -61,6 +63,32 @@ services:
       timeout: 3s
       retries: 30
 
+  worker-3:
+    image: bordr-swarm-e2e-worker:local
+    environment:
+      SWARM_MACHINE: "worker-3"
+      SWARM_RUNTIME: "rex"
+      BOARD_URL: "http://board:4100/api/board"
+      BOARD_TOKEN: "bordr-e2e-test-token"
+      BOARD_CLI_BIN: "vb"
+      SWARM_POLL_INTERVAL_SECONDS: "3"
+      SWARM_IDLE_TIMEOUT_SECONDS: "10"
+      SWARM_LEASE_DURATION: "1m"
+      SWARM_LEASE_RENEW_SECONDS: "20"
+    volumes:
+      - ../../src:/workspace/src:ro
+      - ../../prompts:/workspace/prompts:ro
+      - worker-3-state:/var/lib/swarm
+    depends_on:
+      board:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "rex whoami --json >/dev/null 2>&1 || exit 1"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+
 volumes:
   worker-1-state:
   worker-2-state:
+  worker-3-state:

@@ -28,16 +28,17 @@ The name is **Board + Herdr**: `bordr-swarm` connects [Vercel Board](https://ver
 
 Homemade agent setups tend to break in the same few ways. Here's how this one avoids them:
 
-| Problem                               | What `bordr-swarm` does                                                                                                           |
-| ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| Agents burn tokens while waiting      | Two plain background programs do all the waiting and checking. An LLM starts only when there's a real message or task for it.     |
-| Long agent sessions get confused      | Each conversation thread gets its own new Lead session, and each task gets its own new worker tab. Both close when done.          |
-| Too many open tabs to watch           | Done tabs close automatically. Stuck ones stay open, get labeled, and show up in Sheprd.                                          |
-| Every machine needs the same config   | Each machine has its own ~10-line config and announces its repos on the Board, so there's no shared config to keep in sync.       |
-| Two agents editing the same repo      | Only one agent works in a given repo at a time. Opt into Git worktrees per project if you want parallel work in one repo.         |
-| Locked into one agent                 | Claude Code by default. Send any task to [another agent](#supported-agents) with a label.                                         |
-| Agent commits nobody reviewed         | An optional review step has a second agent check the work before the task is marked done ([details](#optional-code-review)).      |
-| Running background services is fiddly | `mise run ...` sets up user-level services on Linux (`systemd --user`) and macOS (`launchd`), with no root needed for the agents. |
+| Problem                               | What `bordr-swarm` does                                                                                                            |
+| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| Agents burn tokens while waiting      | Two plain background programs do all the waiting and checking. An LLM starts only when there's a real message or task for it.      |
+| Long agent sessions get confused      | Each conversation thread gets its own new Lead session, and each task gets its own new worker tab. Both close when done.           |
+| Too many open tabs to watch           | Done tabs close automatically. Stuck ones stay open, get labeled, and show up in Sheprd.                                           |
+| Every machine needs the same config   | Each machine has its own ~10-line config and announces its repos on the Board, so there's no shared config to keep in sync.        |
+| Two agents editing the same repo      | Only one agent works in a given repo at a time. Opt into Git worktrees per project if you want parallel work in one repo.          |
+| Locked into one agent                 | Claude Code by default. Send any task to [another agent](#supported-agents) with a label.                                          |
+| Locked into one terminal app          | Run worker machines on **Herdr** (watched in Sheprd) or **Rex** (watched in the Rex app), mixed in the same fleet (`runtime=rex`). |
+| Agent commits nobody reviewed         | An optional review step has a second agent check the work before the task is marked done ([details](#optional-code-review)).       |
+| Running background services is fiddly | `mise run ...` sets up user-level services on Linux (`systemd --user`) and macOS (`launchd`), with no root needed for the agents.  |
 
 ---
 

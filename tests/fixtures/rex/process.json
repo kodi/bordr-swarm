@@ -1,0 +1,34 @@
+{
+  "alive": {
+    "last_exit": null,
+    "child": {
+      "pid": 3484,
+      "user_id": 1000,
+      "user": "agent",
+      "name": "claude",
+      "path": "/usr/local/bin/claude",
+      "invoked_path": "/usr/local/bin/claude",
+      "argv0": "claude",
+      "cwd": "/workspace/demo-app"
+    },
+    "foreground": {
+      "pid": 3484,
+      "user_id": 1000,
+      "user": "agent",
+      "name": "claude",
+      "path": "/usr/local/bin/claude",
+      "invoked_path": "/usr/local/bin/claude",
+      "argv0": "claude",
+      "cwd": "/workspace/demo-app"
+    },
+    "home": "/home/agent"
+  },
+  "exited": {
+    "last_exit": {
+      "code": 1
+    },
+    "child": null,
+    "foreground": null,
+    "home": "/home/agent"
+  }
+}

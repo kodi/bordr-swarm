@@ -5,14 +5,18 @@ import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 import { currentPlatformOs, type MachineRole } from "../src/lib/config.ts";
 import {
+  defaultWorkerRuntimeKind,
   detectInstalledAgentKinds,
+  detectInstalledRuntimes,
   detectLocalHostnames,
   detectTailscaleInfo,
   detectVercelBoardIdentity,
 } from "../src/lib/host-env.ts";
+import type { RuntimeKind } from "../src/lib/runtime.ts";
 
-interface InitFlags {
+export interface InitFlags {
   role?: MachineRole;
+  runtime?: RuntimeKind;
   name?: string;
   maxWorkers?: number;
   handle?: string;
@@ -22,7 +26,7 @@ interface InitFlags {
   noApply: boolean;
 }
 
-function parseFlags(argv: string[]): InitFlags {
+export function parseInitFlags(argv: string[]): InitFlags {
   const flags: InitFlags = {
     projects: [],
     yes: false,
@@ -44,6 +48,15 @@ function parseFlags(argv: string[]): InitFlags {
       const val = arg.slice("--role=".length);
       if (val === "both" || val === "main" || val === "worker") flags.role = val;
       else throw new Error(`Invalid --role "${val}". Expected "both", "main", or "worker".`);
+    } else if (arg === "--runtime" && argv[i + 1]) {
+      const val = argv[i + 1]!;
+      if (val === "herdr" || val === "rex") flags.runtime = val;
+      else throw new Error(`Invalid --runtime "${val}". Expected "herdr" or "rex".`);
+      i += 1;
+    } else if (arg?.startsWith("--runtime=")) {
+      const val = arg.slice("--runtime=".length);
+      if (val === "herdr" || val === "rex") flags.runtime = val;
+      else throw new Error(`Invalid --runtime "${val}". Expected "herdr" or "rex".`);
     } else if (arg === "--name" && argv[i + 1]) {
       flags.name = argv[i + 1]!;
       i += 1;
@@ -70,11 +83,22 @@ function parseFlags(argv: string[]): InitFlags {
   return flags;
 }
 
-function normalizeRoleAnswer(raw: string): MachineRole | null {
+export function normalizeRoleAnswer(raw: string): MachineRole | null {
   const val = raw.trim().toLowerCase();
   if (!val || val === "1" || val === "both") return "both";
   if (val === "2" || val === "main") return "main";
   if (val === "3" || val === "worker") return "worker";
+  return null;
+}
+
+export function normalizeRuntimeAnswer(
+  raw: string,
+  defaultRuntime: RuntimeKind = "herdr",
+): RuntimeKind | null {
+  const val = raw.trim().toLowerCase();
+  if (!val) return defaultRuntime;
+  if (val === "1" || val === "herdr") return "herdr";
+  if (val === "2" || val === "rex") return "rex";
   return null;
 }
 
@@ -85,7 +109,7 @@ function parseYesNo(raw: string, defaultYes: boolean): boolean {
 }
 
 async function main(): Promise<void> {
-  const flags = parseFlags(process.argv.slice(2));
+  const flags = parseInitFlags(process.argv.slice(2));
   const scriptDir = dirname(fileURLToPath(import.meta.url));
   const repoRoot = resolve(scriptDir, "..");
   const configPath = process.env.SWARM_CONFIG_PATH ?? resolve(repoRoot, "config/swarm.json");
@@ -100,6 +124,11 @@ async function main(): Promise<void> {
     const hostInfo = detectLocalHostnames();
     const tailscale = detectTailscaleInfo();
     const installedAgents = detectInstalledAgentKinds();
+    const installedRuntimes = detectInstalledRuntimes();
+    const detectedRuntimesList = [
+      installedRuntimes.herdr ? "herdr" : null,
+      installedRuntimes.rex ? "rex" : null,
+    ].filter((v): v is string => Boolean(v));
     let boardId = detectVercelBoardIdentity();
 
     console.log("Detected environment:");
@@ -107,6 +136,9 @@ async function main(): Promise<void> {
     console.log(`  Hostname:      ${hostInfo.short}`);
     console.log(
       `  Tailscale:     ${tailscale.ok ? `${tailscale.dnsName}${tailscale.online ? "" : " (offline)"}` : "not detected"}`,
+    );
+    console.log(
+      `  Runtimes:      ${detectedRuntimesList.length > 0 ? detectedRuntimesList.join(", ") : "none found (install herdr or rex)"}`,
     );
     console.log(
       `  Agent CLIs:    ${installedAgents.length > 0 ? installedAgents.join(", ") : "none found (install claude, agy, codex, or pi)"}`,
@@ -162,6 +194,34 @@ async function main(): Promise<void> {
         }
         console.log("  Please enter 1 (both), 2 (main), or 3 (worker).");
       }
+    }
+
+    // 1b. Worker terminal runtime (for worker/both)
+    const defaultRuntime = defaultWorkerRuntimeKind(installedRuntimes);
+    let workerRuntime: RuntimeKind = flags.runtime ?? defaultRuntime;
+    if (role !== "main" && !flags.runtime && rl) {
+      const defaultIdx = defaultRuntime === "rex" ? "2" : "1";
+      console.log("\nWhere should worker agents run?");
+      console.log(
+        `  1) Herdr — tabs you watch in Sheprd${defaultRuntime === "herdr" ? " (default)" : ""}`,
+      );
+      console.log(
+        `  2) Rex   — tabs you watch in the Rex app${defaultRuntime === "rex" ? " (default)" : ""}`,
+      );
+      while (true) {
+        const ans = await rl.question(`Runtime [${defaultIdx}]: `);
+        const parsed = normalizeRuntimeAnswer(ans, defaultRuntime);
+        if (parsed) {
+          workerRuntime = parsed;
+          break;
+        }
+        console.log("  Please enter 1 (herdr) or 2 (rex).");
+      }
+    }
+    if (role === "both" && workerRuntime === "rex") {
+      console.log(
+        "[init] Note: the Lead agent still runs in Herdr (watched in Sheprd); only worker agents will use Rex.",
+      );
     }
 
     // 2. Machine name
@@ -234,6 +294,8 @@ async function main(): Promise<void> {
     }
     if (role !== "main") {
       machineEntry.maxWorkers = maxWorkers;
+      machineEntry.runtime =
+        workerRuntime === "rex" ? { kind: "rex" } : { kind: "herdr", target: "local" };
     }
 
     const configObj: Record<string, unknown> = {
@@ -295,7 +357,12 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err) => {
-  console.error(err instanceof Error ? err.message : String(err));
-  process.exit(1);
-});
+const isMain =
+  process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url));
+
+if (isMain) {
+  main().catch((err) => {
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  });
+}

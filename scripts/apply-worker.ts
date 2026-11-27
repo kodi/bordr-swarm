@@ -7,7 +7,9 @@ import {
   loadProjectsConfigOptional,
   loadSwarmConfig,
   resolveCurrentMachineName,
+  resolveMachineRuntime,
 } from "../src/lib/config.ts";
+import { runQuickCommand } from "../src/lib/host-env.ts";
 
 interface WorkerApplyFlags {
   dryRun: boolean;
@@ -130,6 +132,7 @@ function renderSystemdWorkerUnit(params: {
   machine: string;
   vercelScope: string;
   boardName: string;
+  runtimeKind?: "herdr" | "rex";
 }): string {
   const envLines = [
     "Environment=PATH=%h/.local/share/mise/shims:%h/.local/bin:/usr/local/bin:/usr/bin:/bin",
@@ -139,9 +142,14 @@ function renderSystemdWorkerUnit(params: {
   if (params.vercelScope) envLines.push(`Environment=VERCEL_SCOPE=${params.vercelScope}`);
   if (params.boardName) envLines.push(`Environment=VERCEL_BOARD_NAME=${params.boardName}`);
 
+  const afterLine =
+    params.runtimeKind === "rex"
+      ? "After=network-online.target rex.socket rex.service"
+      : "After=network-online.target";
+
   return `[Unit]
 Description=Swarm Worker Dispatcher (${params.machine})
-After=network-online.target
+${afterLine}
 Wants=network-online.target
 
 [Service]
@@ -263,6 +271,8 @@ function main(): void {
     );
   }
 
+  const machineRuntime = resolveMachineRuntime(machineCfg);
+
   if (machineCfg.os === "macos") {
     const label = "dev.swarm.dispatcher";
     const launchAgentsDir = resolve(home, "Library/LaunchAgents");
@@ -282,8 +292,18 @@ function main(): void {
     }
 
     console.log(
-      `[apply:worker] Verified configs: machine=${machineName}, os=macos, maxWorkers=${machineCfg.maxWorkers}, projects=${Object.keys(projects.projects).length}`,
+      `[apply:worker] Verified configs: machine=${machineName}, os=macos, runtime=${machineRuntime.kind}, maxWorkers=${machineCfg.maxWorkers}, projects=${Object.keys(projects.projects).length}`,
     );
+
+    if (machineRuntime.kind === "rex" && !flags.dryRun) {
+      const rexBin = machineRuntime.binary ?? "rex";
+      const check = runQuickCommand(rexBin, ["whoami", "--json"], 5_000);
+      if (!check.ok) {
+        console.warn(
+          "[apply:worker] Rex server is not reachable yet. On macOS, the Rex app hosts the server — open Rex.app and keep a logged-in GUI session active.",
+        );
+      }
+    }
 
     const plistContent = renderLaunchdPlist({
       label,
@@ -355,14 +375,31 @@ function main(): void {
   }
 
   console.log(
-    `[apply:worker] Verified configs: machine=${machineName}, os=linux, maxWorkers=${machineCfg.maxWorkers}, projects=${Object.keys(projects.projects).length}`,
+    `[apply:worker] Verified configs: machine=${machineName}, os=linux, runtime=${machineRuntime.kind}, maxWorkers=${machineCfg.maxWorkers}, projects=${Object.keys(projects.projects).length}`,
   );
+
+  if (machineRuntime.kind === "rex" && !flags.dryRun) {
+    const rexBin = machineRuntime.binary ?? "rex";
+    const whoami = runQuickCommand(rexBin, ["whoami", "--json"], 5_000);
+    if (!whoami.ok) {
+      console.log(
+        "[apply:worker] Rex server not running; attempting `rex server install` (user systemd)...",
+      );
+      const install = runQuickCommand(rexBin, ["server", "install"], 15_000);
+      if (!install.ok) {
+        console.warn(
+          `[apply:worker] Could not auto-install user Rex server (${install.output}). Run \`${rexBin} server install\` (or \`${rexBin} server start\`) manually.`,
+        );
+      }
+    }
+  }
 
   const unitContent = renderSystemdWorkerUnit({
     repoRoot,
     machine: machineName,
     vercelScope: swarm.board.scope,
     boardName: swarm.board.boardName,
+    runtimeKind: machineRuntime.kind,
   });
 
   const existing = existsSync(unitPath) ? readFileSync(unitPath, "utf8") : null;

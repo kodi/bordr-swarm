@@ -1,0 +1,12 @@
+{
+  "account": "agent",
+  "endpoint": "unix:///home/agent/.local/state/rex/run/server.sock",
+  "pid": 1001,
+  "instance_id": "00000000-0000-0000-0000-000000000001",
+  "host_id": "00000000-0000-0000-0000-000000000002",
+  "started_at": "2026-11-27T19:00:00.000000000Z",
+  "rex_version": "0.1.0-preview.25",
+  "api_revision": 24,
+  "exit_empty": false,
+  "session_count": 1
+}

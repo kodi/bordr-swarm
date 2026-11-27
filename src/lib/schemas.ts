@@ -428,6 +428,21 @@ export const WorkerDefaultsConfigSchema = z
       .describe(
         "Seconds a worker agent may sit idle while its task is still `claimed` before the dispatcher sends a completion/block reminder (and parks it if still idle after a second window).",
       ),
+    startupTimeoutSeconds: z
+      .number()
+      .int()
+      .min(5)
+      .default(90)
+      .describe(
+        "Seconds a newly spawned worker has to reach its first idle/ready state before the dispatcher marks its tab `[BLOCKED]` and posts a terminal excerpt.",
+      ),
+    worktreeRoot: z
+      .string()
+      .min(1)
+      .optional()
+      .describe(
+        "Optional base directory for Dispatcher-managed Git worktrees on Rex machines (defaults to `<repo>/../.swarm-worktrees/<slug>/<shortId>`).",
+      ),
     claimWaitSeconds: z
       .number()
       .int()
@@ -437,6 +452,38 @@ export const WorkerDefaultsConfigSchema = z
   })
   .strict()
   .describe("Default behavior and selectable agent CLI profiles for ephemeral task workers.");
+
+export const HerdrMachineRuntimeSchema = z
+  .object({
+    kind: z.literal("herdr"),
+    target: z
+      .string()
+      .min(1)
+      .default("local")
+      .describe(
+        'Herdr target for this dispatcher. Recommended: "local" (local `herdr server` socket) or a saved `herdr machine list` label.',
+      ),
+  })
+  .strict()
+  .describe("Run worker agents in Herdr tabs (watched in Sheprd).");
+
+export const RexMachineRuntimeSchema = z
+  .object({
+    kind: z.literal("rex"),
+    binary: z
+      .string()
+      .min(1)
+      .optional()
+      .describe('Optional path or executable name for the Rex CLI (defaults to "rex").'),
+  })
+  .strict()
+  .describe("Run worker agents in Rex windows (watched in the Rex app).");
+
+export const MachineRuntimeSchema = z
+  .discriminatedUnion("kind", [HerdrMachineRuntimeSchema, RexMachineRuntimeSchema])
+  .describe(
+    'Terminal runtime hosting worker agents on this machine: `"herdr"` (watched in Sheprd) or `"rex"` (watched in the Rex app). Defaults to `{ "kind": "herdr", "target": "local" }`.',
+  );
 
 export const MachineConfigSchema = z
   .object({
@@ -455,12 +502,13 @@ export const MachineConfigSchema = z
       .describe(
         'Hostnames and host:port pairs passed to `board inspect --allow-host` on the main machine when served behind a reverse proxy (e.g. ["main-machine", "main-machine:4748"]). Detected Tailscale MagicDNS is also added automatically.',
       ),
+    runtime: MachineRuntimeSchema.optional(),
     herdrTarget: z
       .string()
       .min(1)
-      .default("local")
+      .optional()
       .describe(
-        'Herdr target for this dispatcher. Recommended: "local" (talks directly to the local `herdr server` socket). Can also be a saved `herdr machine list` label.',
+        'Legacy back-compat alias for `runtime: { "kind": "herdr", "target": "<value>" }`. Defaults to "local".',
       ),
     maxWorkers: z
       .number()
@@ -474,10 +522,28 @@ export const MachineConfigSchema = z
       .array(LabelStringSchema)
       .default([])
       .describe(
-        "Additional routing labels matched against task labels. `machine=<key>` and `os=<os>` are added automatically.",
+        "Additional routing labels matched against task labels. `machine=<key>`, `os=<os>`, and `runtime=<kind>` are added automatically.",
       ),
   })
   .strict()
+  .superRefine((m, ctx) => {
+    if (m.runtime && m.herdrTarget !== undefined) {
+      if (m.runtime.kind === "rex") {
+        ctx.addIssue({
+          code: "custom",
+          path: ["herdrTarget"],
+          message:
+            'Cannot set both `runtime: { "kind": "rex" }` and `herdrTarget`; remove `herdrTarget` for Rex machines.',
+        });
+      } else if (m.runtime.target !== m.herdrTarget) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["herdrTarget"],
+          message: `Conflicting runtime.target ("${m.runtime.target}") and legacy herdrTarget ("${m.herdrTarget}").`,
+        });
+      }
+    }
+  })
   .describe("Configuration for a single physical or virtual machine in the swarm.");
 
 export const EventsConfigSchema = z
@@ -493,6 +559,12 @@ export const EventsConfigSchema = z
       .default(true)
       .describe(
         'Subscribe to the local Herdr socket for tab, pane, and agent-status events (only for `herdrTarget: "local"`). `false` uses CLI polling only.',
+      ),
+    rex: z
+      .boolean()
+      .default(true)
+      .describe(
+        "Follow `rex events -s <session> --json` on Rex worker machines so agent status changes and exits wake the dispatcher immediately. `false` uses CLI polling only.",
       ),
   })
   .strict()
@@ -893,6 +965,10 @@ export const MachineRegistryEntrySchema = z
     machine: z.string().min(1).describe("Logical machine key from swarm.json."),
     os: MachineOsSchema,
     role: MachineRoleSchema,
+    runtime: z
+      .enum(["herdr", "rex"])
+      .optional()
+      .describe('Terminal runtime hosting worker agents on this machine ("herdr" or "rex").'),
     maxWorkers: z.number().int().min(0),
     agents: z
       .array(z.string().min(1))
@@ -917,6 +993,7 @@ export const MergedLeadProjectsCatalogSchema = z
       z.object({
         os: MachineOsSchema,
         role: MachineRoleSchema,
+        runtime: z.enum(["herdr", "rex"]).optional(),
         maxWorkers: z.number().int().min(0),
         agents: z.array(z.string()),
         labels: z.array(z.string()),
@@ -938,14 +1015,17 @@ export const MergedLeadProjectsCatalogSchema = z
   );
 
 // ---------------------------------------------------------------------------
-// Herdr CLI JSON schemas (verified against herdr 0.9.3)
+// Runtime-neutral agent status & Herdr CLI JSON schemas (verified against herdr 0.9.3)
 // ---------------------------------------------------------------------------
 
-export const HerdrAgentStatusSchema = z
+export const AgentStatusSchema = z
   .enum(["idle", "working", "blocked", "done", "unknown"])
   .describe(
-    'Herdr detected agent lifecycle state: "working" = active turn, "blocked" = approval/question prompt visible, "idle"/"done" = ready for input, "unknown" = unclassified.',
+    'Detected agent lifecycle state: "working" = active turn, "blocked" = approval/question/error prompt visible, "idle"/"done" = ready for input, "unknown" = alive but unclassified.',
   );
+
+/** @deprecated Prefer `AgentStatusSchema`. Kept as an alias for one release. */
+export const HerdrAgentStatusSchema = AgentStatusSchema;
 
 export const HerdrWorkspaceSchema = z
   .object({
@@ -1044,6 +1124,140 @@ export const HerdrCreatedTabResultSchema = z
   .passthrough();
 
 // ---------------------------------------------------------------------------
+// Rex CLI JSON schemas (verified against rex 0.1.0-preview.25)
+// ---------------------------------------------------------------------------
+
+export const REX_VERIFIED_VERSION = "0.1.0-preview.25";
+
+export const RexWhoamiSchema = z
+  .object({
+    account: z.string().optional(),
+    endpoint: z.string().optional(),
+    pid: z.number().optional(),
+    rex_version: z.string().optional(),
+    api_revision: z.number().optional(),
+    session_count: z.number().optional(),
+  })
+  .passthrough();
+
+export const RexSessionSchema = z
+  .object({
+    session_id: z.string().min(1),
+    label: z.string(),
+  })
+  .passthrough();
+
+export const RexSessionListSchema = z
+  .object({
+    sessions: z.array(RexSessionSchema).default([]),
+  })
+  .passthrough();
+
+export const RexWindowNewSchema = z
+  .object({
+    window_id: z.string().min(1),
+    block_ids: z.array(z.string().min(1)).default([]),
+    revision: z.number().optional(),
+  })
+  .passthrough();
+
+export const RexNewSessionSchema = z
+  .object({
+    session_id: z.string().min(1),
+    initial_windows: z.array(RexWindowNewSchema).default([]),
+  })
+  .passthrough();
+
+export const RexBlockSummarySchema = z
+  .object({
+    block_id: z.string().min(1),
+    label: z.string().default(""),
+    creator_name: z.string().optional(),
+    flavor: z.string().optional(),
+    placement: z.string().optional(),
+    window_id: z.string().optional(),
+  })
+  .passthrough();
+
+export const RexWindowLayerSchema = z
+  .object({
+    layer_id: z.string().optional(),
+    blocks: z.array(RexBlockSummarySchema).default([]),
+  })
+  .passthrough();
+
+export const RexWindowSchema = z
+  .object({
+    window_id: z.string().min(1),
+    label: z.string().default(""),
+    focused_block_id: z.string().optional(),
+    layers: z.array(RexWindowLayerSchema).default([]),
+  })
+  .passthrough();
+
+export const RexWindowListSchema = z
+  .object({
+    session_id: z.string().min(1),
+    label: z.string().default(""),
+    active_window_id: z.string().optional(),
+    windows: z.array(RexWindowSchema).default([]),
+  })
+  .passthrough();
+
+export const RexBlockListSchema = z
+  .object({
+    blocks: z.array(RexBlockSummarySchema).default([]),
+  })
+  .passthrough();
+
+export const RexProgramStatusStateSchema = z
+  .enum(["idle", "working", "done", "blocked", "error", "unknown"])
+  .catch("unknown");
+
+export const RexProgramStatusRecordSchema = z
+  .object({
+    id: z.string().optional(),
+    state: RexProgramStatusStateSchema,
+    kind: z.string().optional().catch(undefined),
+    msg: z.string().optional().catch(undefined),
+    app: z.string().optional(),
+    effective_app: z.string().optional(),
+    updated_at: z.string().optional(),
+    owner: z
+      .object({
+        pid: z.number(),
+        name: z.string().optional(),
+      })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough();
+
+export const RexProgramStatusSchema = z
+  .object({
+    records: z.array(RexProgramStatusRecordSchema).default([]),
+  })
+  .passthrough();
+
+export const RexProcessInfoSchema = z
+  .object({
+    pid: z.number(),
+    name: z.string().optional(),
+    argv0: z.string().optional(),
+    cwd: z.string().optional(),
+  })
+  .passthrough();
+
+export const RexProcessSchema = z
+  .object({
+    last_exit: z.unknown().nullable().optional(),
+    child: RexProcessInfoSchema.nullable().optional(),
+    foreground: RexProcessInfoSchema.nullable().optional(),
+    home: z.string().optional(),
+  })
+  .passthrough();
+
+// ---------------------------------------------------------------------------
 // Worker Dispatcher persisted state (internal; NOT exported to config/*.schema.json)
 // Mirrors ActiveTask / ParkedTab in src/lib/task-fsm.ts with Sets stored as arrays.
 // ---------------------------------------------------------------------------
@@ -1085,6 +1299,7 @@ const PersistedSessionLifecycleSchema = z.discriminatedUnion("kind", [
     .object({
       kind: z.literal("awaiting_prompt"),
       promptText: z.string(),
+      sinceMs: z.number().optional(),
       uiBlockedNotified: z.boolean(),
     })
     .strict(),
@@ -1110,6 +1325,8 @@ const PersistedTaskContextSchema = z
     baseBranch: z.string(),
     branch: z.string(),
     useWorktree: z.boolean(),
+    worktreePath: z.string().optional(),
+    runtimeKind: z.enum(["herdr", "rex"]).optional(),
     workspaceId: z.string(),
     boardProfile: z.string(),
     reviewConfig: PersistedReviewerConfigSchema,
@@ -1186,6 +1403,7 @@ export type ProjectReviewerOverride = z.infer<typeof ProjectReviewerOverrideSche
 export type BoardConfig = z.infer<typeof BoardConfigSchema>;
 export type LeadConfig = z.infer<typeof LeadConfigSchema>;
 export type RawWorkerDefaultsConfig = z.infer<typeof WorkerDefaultsConfigSchema>;
+export type MachineRuntime = z.infer<typeof MachineRuntimeSchema>;
 export type RawMachineConfig = z.infer<typeof MachineConfigSchema>;
 export type RawSwarmConfig = z.infer<typeof SwarmConfigSchema>;
 export type EventsConfig = z.infer<typeof EventsConfigSchema>;
@@ -1199,10 +1417,22 @@ export type BoardThreadSummary = z.infer<typeof BoardThreadSummarySchema>;
 export type MachineRegistryProject = z.infer<typeof MachineRegistryProjectSchema>;
 export type MachineRegistryEntry = z.infer<typeof MachineRegistryEntrySchema>;
 export type MergedLeadProjectsCatalog = z.infer<typeof MergedLeadProjectsCatalogSchema>;
-export type HerdrAgentStatus = z.infer<typeof HerdrAgentStatusSchema>;
+export type AgentStatus = z.infer<typeof AgentStatusSchema>;
+export type HerdrAgentStatus = AgentStatus;
 export type HerdrWorkspace = z.infer<typeof HerdrWorkspaceSchema>;
 export type HerdrTab = z.infer<typeof HerdrTabSchema>;
 export type HerdrAgent = z.infer<typeof HerdrAgentSchema>;
+export type RexWhoami = z.infer<typeof RexWhoamiSchema>;
+export type RexSession = z.infer<typeof RexSessionSchema>;
+export type RexWindowNew = z.infer<typeof RexWindowNewSchema>;
+export type RexNewSession = z.infer<typeof RexNewSessionSchema>;
+export type RexBlockSummary = z.infer<typeof RexBlockSummarySchema>;
+export type RexWindow = z.infer<typeof RexWindowSchema>;
+export type RexWindowList = z.infer<typeof RexWindowListSchema>;
+export type RexProgramStatusRecord = z.infer<typeof RexProgramStatusRecordSchema>;
+export type RexProgramStatus = z.infer<typeof RexProgramStatusSchema>;
+export type RexProcessInfo = z.infer<typeof RexProcessInfoSchema>;
+export type RexProcess = z.infer<typeof RexProcessSchema>;
 export type PersistedActiveTask = z.infer<typeof PersistedActiveTaskSchema>;
 export type PersistedParkedTab = z.infer<typeof PersistedParkedTabSchema>;
 export type PersistedDispatcherState = z.infer<typeof PersistedDispatcherStateSchema>;

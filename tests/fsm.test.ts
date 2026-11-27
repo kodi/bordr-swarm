@@ -214,6 +214,91 @@ describe("session-fsm (pure Herdr agent session transitions)", () => {
     });
     assert.equal(timedOut.kind, "idle_timed_out");
   });
+
+  it("handles startup guard in awaiting_prompt (unknown -> idle, startup timeout once, blocked -> idle)", () => {
+    const waiting = createManagedSession(makeHandle({ startedAtMs: 1_000 }), {
+      promptText: "Start task",
+      blockedOnStartup: false,
+      promptNow: false,
+    });
+    assert.equal(waiting.lifecycle.kind, "awaiting_prompt");
+
+    // Alive with unknown status past startupGraceMs is NOT treated as exited
+    const stillStarting = stepSession(waiting, {
+      tabExists: true,
+      agentStatus: "unknown",
+      nowMs: 30_000,
+      startupGraceMs: 20_000,
+      startupTimeoutMs: 90_000,
+      idleTimeoutMs: 30_000,
+      canIdleTimeout: true,
+    });
+    assert.equal(stillStarting.kind, "continue");
+
+    // Still unknown past startupTimeoutMs -> emits ui_blocked (startup_timeout) once
+    const timedOut = stepSession(stillStarting.session, {
+      tabExists: true,
+      agentStatus: "unknown",
+      nowMs: 91_000,
+      startupGraceMs: 20_000,
+      startupTimeoutMs: 90_000,
+      idleTimeoutMs: 30_000,
+      canIdleTimeout: true,
+    });
+    assert.equal(timedOut.kind, "ui_blocked");
+    if (timedOut.kind === "ui_blocked") {
+      assert.equal(timedOut.reason, "startup_timeout");
+      // Does not fire a second time on subsequent ticks
+      const again = stepSession(timedOut.session, {
+        tabExists: true,
+        agentStatus: "unknown",
+        nowMs: 120_000,
+        startupGraceMs: 20_000,
+        startupTimeoutMs: 90_000,
+        idleTimeoutMs: 30_000,
+        canIdleTimeout: true,
+      });
+      assert.equal(again.kind, "continue");
+
+      // Once agent finally reaches idle -> delivers queued prompt
+      const delivered = stepSession(timedOut.session, {
+        tabExists: true,
+        agentStatus: "idle",
+        nowMs: 125_000,
+        startupGraceMs: 20_000,
+        startupTimeoutMs: 90_000,
+        idleTimeoutMs: 30_000,
+        canIdleTimeout: true,
+      });
+      assert.equal(delivered.kind, "deliver_prompt");
+      assert.equal(delivered.promptText, "Start task");
+    }
+
+    // blocked -> ui_blocked -> idle -> deliver_prompt
+    const blocked = stepSession(waiting, {
+      tabExists: true,
+      agentStatus: "blocked",
+      nowMs: 5_000,
+      startupGraceMs: 20_000,
+      startupTimeoutMs: 90_000,
+      idleTimeoutMs: 30_000,
+      canIdleTimeout: true,
+    });
+    assert.equal(blocked.kind, "ui_blocked");
+    if (blocked.kind === "ui_blocked") {
+      assert.equal(blocked.reason, "blocked");
+      const unblocked = stepSession(blocked.session, {
+        tabExists: true,
+        agentStatus: "idle",
+        nowMs: 10_000,
+        startupGraceMs: 20_000,
+        startupTimeoutMs: 90_000,
+        idleTimeoutMs: 30_000,
+        canIdleTimeout: true,
+      });
+      assert.equal(unblocked.kind, "deliver_prompt");
+    }
+  });
 });
 
 describe("task-fsm (pure outer implement -> review -> fix state table)", () => {

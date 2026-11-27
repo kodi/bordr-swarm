@@ -44,6 +44,18 @@ function runBoard(subArgs, { withProfile = false } = {}) {
   });
 }
 
+function reportRexState(state, kind) {
+  if (process.env.HERDR_PANE_ID) return;
+  const parts = [`state=${state}`, "app=claude-code"];
+  if (kind) parts.push(`kind=${kind}`);
+  process.stdout.write(`\x1b]7501;${parts.join(":")}\x1b\\`);
+}
+
+function reportAgentState(state, kind) {
+  reportRexState(state, kind);
+  return reportHerdrState(state);
+}
+
 function reportHerdrState(state) {
   const paneId = process.env.HERDR_PANE_ID;
   const socketPath = process.env.HERDR_SOCKET_PATH;
@@ -127,13 +139,13 @@ function extractTaskId(prompt) {
 }
 
 async function handleTurn(prompt) {
-  await reportHerdrState("working");
+  await reportAgentState("working");
   process.stdout.write("\x1b]0;⠂ Working\x07\n");
 
   const taskId = extractTaskId(prompt);
   if (!taskId) {
     process.stdout.write("fake-claude: could not find task ID in prompt\n");
-    await reportHerdrState("idle");
+    await reportAgentState("idle");
     return;
   }
 
@@ -166,7 +178,7 @@ async function handleTurn(prompt) {
       ],
       { withProfile: true },
     );
-    await reportHerdrState("idle");
+    await reportAgentState("idle");
     process.stdout.write(
       "\x1b]0;✳ Claude Code\x07\n──────────────────────────────────────────────────────\n❯ \n──────────────────────────────────────────────────────\n",
     );
@@ -188,7 +200,7 @@ async function handleTurn(prompt) {
     runBoard(["tasks", "block", taskId, blockMatch[1].trim(), "--kind", "needs_input"], {
       withProfile: true,
     });
-    await reportHerdrState("idle");
+    await reportAgentState("idle");
     process.stdout.write("\x1b]0;✳ Claude Code\x07\n❯ \n");
     return;
   }
@@ -214,17 +226,17 @@ async function handleTurn(prompt) {
     });
   }
 
-  await reportHerdrState("idle");
+  await reportAgentState("idle");
   process.stdout.write(
     "\x1b]0;✳ Claude Code\x07\n──────────────────────────────────────────────────────\n❯ \n──────────────────────────────────────────────────────\n",
   );
 }
 
-// Announce Claude UI prompt + Herdr idle state so `herdr agent start --kind claude` succeeds.
+// Announce Claude UI prompt + idle state (Herdr socket + Rex OSC 7501).
 process.stdout.write(
   "\x1b]0;✳ Claude Code\x07\n──────────────────────────────────────────────────────\n❯ \n──────────────────────────────────────────────────────\n",
 );
-await reportHerdrState("idle");
+await reportAgentState("idle");
 
 // Multi-turn loop: stay interactive until the dispatcher closes the tab.
 while (true) {

@@ -3,8 +3,17 @@ import { existsSync, rmSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { currentPlatformOs } from "../src/lib/config.ts";
+import {
+  currentPlatformOs,
+  loadSwarmConfig,
+  resolveCurrentMachineName,
+  resolveMachineRuntime,
+} from "../src/lib/config.ts";
+import { loadDispatcherState, resolveDispatcherStatePath } from "../src/lib/dispatcher-state.ts";
 import { HerdrClient } from "../src/lib/herdr.ts";
+import { RexClient } from "../src/lib/rex.ts";
+import { isSwarmWindowLabel } from "../src/lib/runtimes/rex-runtime.ts";
+import { getImplHandle, getReviewerHandle } from "../src/lib/task-fsm.ts";
 
 interface StopFlags {
   dryRun: boolean;
@@ -151,6 +160,64 @@ async function stopLeadAgents(dryRun: boolean): Promise<void> {
   }
 }
 
+async function stopOwnedRexWindows(repoRoot: string, dryRun: boolean): Promise<void> {
+  const configPath = process.env.SWARM_CONFIG_PATH ?? resolve(repoRoot, "config/swarm.json");
+  if (!existsSync(configPath)) return;
+
+  let binary: string | undefined;
+  let machineName: string;
+  try {
+    const swarm = loadSwarmConfig(repoRoot, configPath);
+    machineName = resolveCurrentMachineName(swarm);
+    const machineCfg = swarm.machines[machineName];
+    if (!machineCfg) return;
+    const rt = resolveMachineRuntime(machineCfg);
+    if (rt.kind !== "rex") return;
+    binary = rt.binary;
+  } catch {
+    return;
+  }
+
+  // Only ever touch Rex windows recorded in this Dispatcher's own persisted state whose label
+  // still matches a swarm tab label.
+  const statePath = resolveDispatcherStatePath(machineName);
+  const loaded = loadDispatcherState(statePath, { machine: machineName });
+  if (loaded.kind !== "loaded") return;
+
+  const owned = new Map<string, string>(); // windowId -> sessionId
+  const collect = (task: {
+    ctx: { workspaceId: string };
+    phase: Parameters<typeof getImplHandle>[0];
+  }) => {
+    const impl = getImplHandle(task.phase);
+    const rev = getReviewerHandle(task.phase);
+    if (impl.tabId) owned.set(impl.tabId, task.ctx.workspaceId);
+    if (rev?.tabId) owned.set(rev.tabId, task.ctx.workspaceId);
+  };
+  for (const task of loaded.state.activeWorkers.values()) collect(task);
+  for (const parked of loaded.state.parkedTabs.values()) {
+    collect(parked.task);
+    if (parked.tabId) owned.set(parked.tabId, parked.workspaceId);
+  }
+  if (owned.size === 0) return;
+
+  const rex = new RexClient({ binary });
+  const sessionIds = [...new Set([...owned.values()].filter(Boolean))];
+  for (const sessionId of sessionIds) {
+    const winList = await rex.listWindows(sessionId).catch(() => null);
+    if (!winList) continue;
+    for (const win of winList.windows) {
+      if (!owned.has(win.window_id) || !isSwarmWindowLabel(win.label)) continue;
+      if (dryRun) {
+        console.log(`[dry-run] Would close Rex worker window ${win.window_id} (${win.label})`);
+        continue;
+      }
+      await rex.closeWindow(win.window_id, { sessionId }).catch(() => {});
+      console.log(`[stop] Closed Rex worker window ${win.window_id} (${win.label}).`);
+    }
+  }
+}
+
 async function main(): Promise<void> {
   const flags = parseFlags(process.argv.slice(2));
   const scriptDir = dirname(fileURLToPath(import.meta.url));
@@ -167,6 +234,8 @@ async function main(): Promise<void> {
   if (!flags.keepLead) {
     await stopLeadAgents(flags.dryRun);
   }
+
+  await stopOwnedRexWindows(repoRoot, flags.dryRun);
 
   if (flags.reset) {
     const pathsToRemove = [

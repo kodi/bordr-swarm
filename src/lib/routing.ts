@@ -44,6 +44,7 @@ export function matchesMachineLabels(
 ): { matched: boolean; reason?: string } {
   const hostLabelSet = new Set(machineConfig.labels.map((l) => l.toLowerCase()));
   hostLabelSet.add(`machine=${machineName.toLowerCase()}`);
+  hostLabelSet.add(`runtime=${(machineConfig.runtime?.kind ?? "herdr").toLowerCase()}`);
 
   const requestedMachine = taskLabels.machine?.trim().toLowerCase();
   if (requestedMachine) {
@@ -68,6 +69,14 @@ export function matchesMachineLabels(
     return {
       matched: false,
       reason: `requires os=${requestedOs} (not in host labels)`,
+    };
+  }
+
+  const requestedRuntime = taskLabels.runtime?.trim().toLowerCase();
+  if (requestedRuntime && !hostLabelSet.has(`runtime=${requestedRuntime}`)) {
+    return {
+      matched: false,
+      reason: `requires runtime=${requestedRuntime} (not in host labels)`,
     };
   }
 

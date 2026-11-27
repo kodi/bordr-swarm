@@ -1,10 +1,11 @@
 import { z } from "zod";
 import { normalizeBoardTask, normalizeLabels, type BoardTask } from "../lib/board.ts";
 import {
+  AgentStatusSchema,
   BoardMessageSchema,
-  HerdrAgentStatusSchema,
+  RexProgramStatusStateSchema,
+  type AgentStatus,
   type BoardMessage,
-  type HerdrAgentStatus,
 } from "../lib/schemas.ts";
 
 /**
@@ -28,7 +29,7 @@ export type BoardTaskOp = (typeof BOARD_TASK_OPS)[number] | "other";
 
 export type BoardMessageOp = "posted" | "edited" | "deleted";
 
-export type EventSourceName = "board" | "herdr";
+export type EventSourceName = "board" | "herdr" | "rex";
 
 /**
  * Everything the daemons react to. Events are hints: consumers wake a level-triggered reconcile
@@ -63,10 +64,20 @@ export type SwarmEvent =
       cursor: string;
     }
   | { kind: "board.other"; type: string; cursor: string }
-  | { kind: "herdr.agent_status"; paneId: string; status: HerdrAgentStatus; agent: string | null }
+  | { kind: "herdr.agent_status"; paneId: string; status: AgentStatus; agent: string | null }
   | { kind: "herdr.pane_exited"; paneId: string }
   | { kind: "herdr.pane_closed"; paneId: string }
   | { kind: "herdr.tab_closed"; tabId: string }
+  | {
+      kind: "rex.agent_status";
+      sessionId: string;
+      paneId: string;
+      status: AgentStatus;
+      blockedKind?: string;
+    }
+  | { kind: "rex.pane_exited"; sessionId: string; paneId: string; exitCode?: number }
+  | { kind: "rex.pane_closed"; sessionId: string; paneId: string }
+  | { kind: "rex.tab_closed"; sessionId: string; tabId: string }
   | { kind: "timer.reconcile" }
   | { kind: "fs.changed"; path: string }
   | { kind: "source.health"; source: EventSourceName; healthy: boolean; detail: string };
@@ -286,13 +297,111 @@ export function parseHerdrEventLine(raw: unknown): SwarmEvent | null {
     case "pane_agent_status_changed": {
       const paneId = str("pane_id");
       if (!paneId) return null;
-      const status = HerdrAgentStatusSchema.catch("unknown").parse(data.agent_status);
+      const status = AgentStatusSchema.catch("unknown").parse(data.agent_status);
       return {
         kind: "herdr.agent_status",
         paneId,
         status,
         agent: typeof data.agent === "string" ? data.agent : null,
       };
+    }
+    default:
+      return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Rex NDJSON events (`rex events -s <session> --json`, verified against 0.1.0-preview.25)
+// ---------------------------------------------------------------------------
+
+const RexSessionEventEnvelopeSchema = z
+  .object({
+    type: z.literal("session_event"),
+    payload: z
+      .object({
+        session_id: z.string().min(1),
+        event: z
+          .object({
+            type: z.string().min(1),
+            payload: z.record(z.string(), z.unknown()).default({}),
+          })
+          .passthrough(),
+      })
+      .passthrough(),
+  })
+  .passthrough();
+
+/**
+ * Pure parser for one NDJSON line from `rex events -s <session> --json`.
+ * Never throws: blank/non-JSON/irrelevant lines return null.
+ */
+export function parseRexEventLine(line: string): SwarmEvent | null {
+  const trimmed = line.trim();
+  if (!trimmed || !trimmed.startsWith("{")) return null;
+  let raw: unknown;
+  try {
+    raw = JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+
+  const parsed = RexSessionEventEnvelopeSchema.safeParse(raw);
+  if (!parsed.success) return null;
+
+  const sessionId = parsed.data.payload.session_id;
+  const inner = parsed.data.payload.event;
+  const data = inner.payload;
+  const str = (key: string): string => (typeof data[key] === "string" ? data[key] : "");
+
+  switch (inner.type) {
+    case "window_closed": {
+      const tabId = str("window_id");
+      return tabId ? { kind: "rex.tab_closed", sessionId, tabId } : null;
+    }
+    case "block_closed": {
+      const paneId = str("block_id");
+      return paneId ? { kind: "rex.pane_closed", sessionId, paneId } : null;
+    }
+    case "block_event": {
+      const paneId = str("block_id");
+      const name = str("name");
+      if (!paneId || !name) return null;
+      const evPayload =
+        typeof data.payload === "object" && data.payload !== null
+          ? (data.payload as Record<string, unknown>)
+          : {};
+      if (name === "program_status_changed") {
+        const rec =
+          typeof evPayload.record === "object" && evPayload.record !== null
+            ? (evPayload.record as Record<string, unknown>)
+            : null;
+        if (!rec) return null;
+        const rawState = RexProgramStatusStateSchema.parse(rec.state);
+        const status: AgentStatus = rawState === "error" ? "blocked" : rawState;
+        const blockedKind =
+          rawState === "error"
+            ? "error"
+            : typeof rec.kind === "string" && rec.kind
+              ? rec.kind
+              : undefined;
+        return {
+          kind: "rex.agent_status",
+          sessionId,
+          paneId,
+          status,
+          ...(blockedKind ? { blockedKind } : {}),
+        };
+      }
+      if (name === "child_exited") {
+        const exitCode = typeof evPayload.exit_code === "number" ? evPayload.exit_code : undefined;
+        return {
+          kind: "rex.pane_exited",
+          sessionId,
+          paneId,
+          ...(exitCode !== undefined ? { exitCode } : {}),
+        };
+      }
+      return null;
     }
     default:
       return null;

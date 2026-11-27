@@ -8,6 +8,7 @@ import {
   type PersistedDispatcherState,
   type PersistedParkedTab,
 } from "./schemas.ts";
+import type { ManagedSession, SessionHandle } from "./session-fsm.ts";
 import type { ActiveTask, ParkedTab } from "./task-fsm.ts";
 
 export type { PersistedDispatcherState };
@@ -55,10 +56,43 @@ function activeToPersisted(task: ActiveTask): PersistedActiveTask {
   };
 }
 
+type PersistedManagedSession = Extract<
+  PersistedActiveTask["phase"],
+  { kind: "implementing" }
+>["impl"];
+
+function sessionFromPersisted(session: PersistedManagedSession): ManagedSession {
+  const handle: SessionHandle = session.handle;
+  const lifecycle = session.lifecycle;
+  return {
+    handle,
+    lifecycle:
+      lifecycle.kind === "awaiting_prompt"
+        ? {
+            kind: "awaiting_prompt",
+            promptText: lifecycle.promptText,
+            sinceMs: lifecycle.sinceMs ?? handle.startedAtMs,
+            uiBlockedNotified: lifecycle.uiBlockedNotified,
+          }
+        : lifecycle,
+  };
+}
+
 function activeFromPersisted(task: PersistedActiveTask): ActiveTask {
+  const phase: ActiveTask["phase"] =
+    task.phase.kind === "implementing"
+      ? { kind: "implementing", impl: sessionFromPersisted(task.phase.impl) }
+      : task.phase.kind === "fixing"
+        ? { kind: "fixing", round: task.phase.round, impl: sessionFromPersisted(task.phase.impl) }
+        : {
+            kind: "reviewing",
+            round: task.phase.round,
+            impl: task.phase.impl,
+            reviewer: sessionFromPersisted(task.phase.reviewer),
+          };
   return {
     ctx: task.ctx,
-    phase: task.phase,
+    phase,
     lastLeaseRenewMs: task.lastLeaseRenewMs,
     phaseSeenReplyIds: new Set(task.phaseSeenReplyIds),
     lastImplSummary: task.lastImplSummary,

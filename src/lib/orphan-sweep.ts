@@ -1,11 +1,12 @@
 import type { BoardTask } from "./board.ts";
-import { sanitizeHerdrAgentName, type HerdrAgent } from "./herdr.ts";
+import type { HerdrAgent } from "./herdr.ts";
 import {
   formatTabLabel,
   shortTaskId,
   type CandidateTask,
   type TaskRoutingResult,
 } from "./routing.ts";
+import { sanitizeAgentName, type LiveAgent, type RuntimeKind } from "./runtime.ts";
 import type { SessionHandle } from "./session-fsm.ts";
 import type { ActiveTask, ParkedTab } from "./task-fsm.ts";
 
@@ -45,7 +46,7 @@ export function findUntrackedOwnClaims(
     const boardProfile = workerBoardProfile(machineName, task.id);
     if (task.assignee !== boardProfile) continue;
     const shortId = shortTaskId(task.id);
-    out.push({ task, shortId, boardProfile, implAgentName: sanitizeHerdrAgentName("w", shortId) });
+    out.push({ task, shortId, boardProfile, implAgentName: sanitizeAgentName("w", shortId) });
   }
   return out;
 }
@@ -53,12 +54,12 @@ export function findUntrackedOwnClaims(
 function reviewerAgentNames(shortId: string): Set<string> {
   const names = new Set<string>();
   for (let round = 1; round <= MAX_PROBED_REVIEW_ROUNDS; round += 1) {
-    names.add(sanitizeHerdrAgentName(`r${round}`, shortId));
+    names.add(sanitizeAgentName(`r${round}`, shortId));
   }
   return names;
 }
 
-/** A Herdr agent we can attach to: we need its tab and pane to track it. */
+/** A live agent we can attach to: we need its tab and pane to track it. */
 export interface LocatedAgent {
   name: string;
   tabId: string;
@@ -67,13 +68,31 @@ export interface LocatedAgent {
   cwd?: string;
 }
 
-function locate(agent: HerdrAgent | undefined): LocatedAgent | null {
-  if (!agent?.name || !agent.tab_id || !agent.pane_id) return null;
+/** Accepts either runtime-neutral `LiveAgent` or raw `HerdrAgent` for back-compat. */
+export type SweepAgent = LiveAgent | HerdrAgent;
+
+function isHerdrAgent(agent: SweepAgent): agent is HerdrAgent {
+  return "pane_id" in agent;
+}
+
+function locate(agent: SweepAgent | undefined): LocatedAgent | null {
+  if (!agent) return null;
+  if (isHerdrAgent(agent)) {
+    if (!agent.name || !agent.tab_id || !agent.pane_id) return null;
+    return {
+      name: agent.name,
+      tabId: agent.tab_id,
+      paneId: agent.pane_id,
+      workspaceId: agent.workspace_id ?? "",
+      cwd: agent.cwd,
+    };
+  }
+  if (!agent.name || !agent.tabId || !agent.paneId) return null;
   return {
     name: agent.name,
-    tabId: agent.tab_id,
-    paneId: agent.pane_id,
-    workspaceId: agent.workspace_id ?? "",
+    tabId: agent.tabId,
+    paneId: agent.paneId,
+    workspaceId: agent.groupId ?? "",
     cwd: agent.cwd,
   };
 }
@@ -96,7 +115,7 @@ export type OrphanDecision =
 
 export function decideOrphan(
   orphan: OrphanCandidate,
-  agents: readonly HerdrAgent[],
+  agents: readonly SweepAgent[],
   routing: TaskRoutingResult,
 ): OrphanDecision {
   const implAgent = agents.find((a) => a.name === orphan.implAgentName);
@@ -109,7 +128,7 @@ export function decideOrphan(
     return {
       kind: "skip",
       orphan,
-      reason: `live agent ${orphan.implAgentName} has no tab/pane id in herdr agent list`,
+      reason: `live agent ${orphan.implAgentName} has no tab/pane id in runtime agent list`,
     };
   }
   if (!routing.ok) {
@@ -146,9 +165,10 @@ export function buildAdoptedTask(params: {
   replyIds: readonly string[];
   machineName: string;
   humanHandle: string;
+  runtimeKind?: RuntimeKind;
   nowMs: number;
 }): ActiveTask {
-  const { orphan, routing, impl, replyIds, machineName, humanHandle, nowMs } = params;
+  const { orphan, routing, impl, replyIds, machineName, humanHandle, runtimeKind, nowMs } = params;
   const handle: SessionHandle = {
     boardProfile: orphan.boardProfile,
     runtime: routing.runtime,
@@ -166,6 +186,7 @@ export function buildAdoptedTask(params: {
       baseBranch: routing.project.baseBranch,
       branch: `task/${orphan.shortId}`,
       useWorktree: routing.useWorktree,
+      ...(runtimeKind ? { runtimeKind } : {}),
       workspaceId: impl.workspaceId,
       boardProfile: orphan.boardProfile,
       reviewConfig: routing.reviewer,

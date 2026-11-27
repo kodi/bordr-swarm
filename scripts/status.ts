@@ -7,9 +7,12 @@ import {
   currentPlatformOs,
   loadSwarmConfig,
   resolveCurrentMachineName,
+  resolveMachineRuntime,
   type MachineOs,
 } from "../src/lib/config.ts";
 import { HerdrClient } from "../src/lib/herdr.ts";
+import { RexClient } from "../src/lib/rex.ts";
+import { RexRuntime } from "../src/lib/runtimes/rex-runtime.ts";
 
 function systemdEnv(): NodeJS.ProcessEnv {
   const uid = typeof process.getuid === "function" ? process.getuid() : 1000;
@@ -81,9 +84,10 @@ async function main(): Promise<void> {
   const machineName = resolveCurrentMachineName(swarm);
   const machine = swarm.machines[machineName]!;
   const localOs = currentPlatformOs();
+  const machineRuntime = resolveMachineRuntime(machine);
 
   console.log(
-    `Machine: ${machineName} (role=${machine.role}, os=${localOs}, maxWorkers=${machine.maxWorkers})`,
+    `Machine: ${machineName} (role=${machine.role}, os=${localOs}, runtime=${machineRuntime.kind}, maxWorkers=${machine.maxWorkers})`,
   );
   console.log("");
 
@@ -110,34 +114,59 @@ async function main(): Promise<void> {
     console.log(`Worker Dispatcher:     ${dispSvc}`);
   }
 
-  // Show Herdr live agents
-  const herdr = new HerdrClient({ target: machine.herdrTarget });
-  try {
-    const agents = await herdr.listAgents();
-    const leadPrefix = swarm.lead.boardProfile.toLowerCase();
-    const swarmAgents = agents.filter(
-      (a) =>
-        a.name === leadPrefix ||
-        Boolean(a.name?.startsWith(`${leadPrefix}-`)) ||
-        Boolean(a.name?.startsWith("w-")) ||
-        Boolean(a.name?.startsWith("r-")) ||
-        a.cwd?.endsWith("/swarm-hq"),
-    );
-    console.log("");
-    if (swarmAgents.length === 0) {
-      console.log("Swarm Herdr agents:    none currently active");
-    } else {
-      console.log("Swarm Herdr agents:");
-      for (const a of swarmAgents) {
-        console.log(
-          `  - ${a.name ?? a.agent ?? "agent"} (${a.agent ?? "?"}) status=${a.agent_status} pane=${a.pane_id} cwd=${a.cwd ?? ""}`,
-        );
+  // Show Herdr live agents when main or Herdr worker
+  if (isMain || machineRuntime.kind === "herdr") {
+    const herdr = new HerdrClient({ target: machine.herdrTarget });
+    try {
+      const agents = await herdr.listAgents();
+      const leadPrefix = swarm.lead.boardProfile.toLowerCase();
+      const swarmAgents = agents.filter(
+        (a) =>
+          a.name === leadPrefix ||
+          Boolean(a.name?.startsWith(`${leadPrefix}-`)) ||
+          Boolean(a.name?.startsWith("w-")) ||
+          Boolean(a.name?.startsWith("r-")) ||
+          a.cwd?.endsWith("/swarm-hq"),
+      );
+      console.log("");
+      if (swarmAgents.length === 0) {
+        console.log("Swarm Herdr agents:    none currently active");
+      } else {
+        console.log("Swarm Herdr agents:");
+        for (const a of swarmAgents) {
+          console.log(
+            `  - ${a.name ?? a.agent ?? "agent"} (${a.agent ?? "?"}) status=${a.agent_status} pane=${a.pane_id} cwd=${a.cwd ?? ""}`,
+          );
+        }
       }
+    } catch (err) {
+      console.log(
+        `\nSwarm Herdr agents:    unavailable (${err instanceof Error ? err.message : String(err)})`,
+      );
     }
-  } catch (err) {
-    console.log(
-      `\nSwarm Herdr agents:    unavailable (${err instanceof Error ? err.message : String(err)})`,
-    );
+  }
+
+  // Show Rex live workers when worker runtime is Rex
+  if (isWorker && machineRuntime.kind === "rex") {
+    const rexRuntime = new RexRuntime(new RexClient({ binary: machineRuntime.binary }));
+    try {
+      const agents = await rexRuntime.listLiveAgents();
+      console.log("");
+      if (agents.length === 0) {
+        console.log("Swarm Rex workers:     none currently active");
+      } else {
+        console.log("Swarm Rex workers:");
+        for (const a of agents) {
+          console.log(
+            `  - ${a.name ?? "worker"} status=${a.status}${a.blockedKind ? `(${a.blockedKind})` : ""} block=${a.paneId} window=${a.tabId ?? "?"} cwd=${a.cwd ?? ""}`,
+          );
+        }
+      }
+    } catch (err) {
+      console.log(
+        `\nSwarm Rex workers:     unavailable (${err instanceof Error ? err.message : String(err)})`,
+      );
+    }
   }
 
   if (localOs === "macos") {

@@ -66,7 +66,8 @@ test("workers automatically publish their capabilities to #swarm/registry on boo
       texts = (channel.threads ?? []).map((t) => String(t.message?.text ?? ""));
       if (
         texts.some((t) => t.includes('"worker-1"')) &&
-        texts.some((t) => t.includes('"worker-2"'))
+        texts.some((t) => t.includes('"worker-2"')) &&
+        texts.some((t) => t.includes('"worker-3"'))
       ) {
         break;
       }
@@ -78,6 +79,11 @@ test("workers automatically publish their capabilities to #swarm/registry on boo
 
   expect(texts.some((t) => t.includes('"worker-1"') && t.includes('"demo-app"'))).toBe(true);
   expect(texts.some((t) => t.includes('"worker-2"') && t.includes('"demo-app"'))).toBe(true);
+  expect(
+    texts.some(
+      (t) => t.includes('"worker-3"') && t.includes('"demo-app"') && t.includes('"runtime": "rex"'),
+    ),
+  ).toBe(true);
 });
 
 test("BoardClient.listTasks paginates across multiple pages with --after against real @vercel/board", async ({

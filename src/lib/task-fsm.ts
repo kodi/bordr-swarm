@@ -1,8 +1,8 @@
 import type { BoardTaskState } from "./board.ts";
 import type { ResolvedReviewerConfig } from "./config.ts";
-import type { HerdrAgentStatus } from "./herdr.ts";
 import type { ReviewVerdict } from "./review.ts";
 import { formatReviewTabLabel, formatTabLabel, type TabLabelPrefix } from "./routing.ts";
+import type { AgentStatus, RuntimeKind } from "./runtime.ts";
 import {
   assertNever,
   stepSession,
@@ -19,6 +19,10 @@ export interface TaskContext {
   baseBranch: string;
   branch: string;
   useWorktree: boolean;
+  /** Set only when the Dispatcher itself created a `git worktree` (Rex machines). */
+  worktreePath?: string;
+  /** Terminal runtime hosting this task (defaults to `"herdr"` when omitted in legacy state). */
+  runtimeKind?: RuntimeKind;
   workspaceId: string;
   boardProfile: string;
   reviewConfig: ResolvedReviewerConfig;
@@ -66,14 +70,15 @@ export interface TaskObservation {
   /** Board profile currently holding the claim (normalized from the claim actor), if any. */
   boardAssignee?: string;
   implTabExists: boolean;
-  implAgentStatus: HerdrAgentStatus | null;
+  implAgentStatus: AgentStatus | null;
   reviewerTabExists: boolean;
-  reviewerAgentStatus: HerdrAgentStatus | null;
+  reviewerAgentStatus: AgentStatus | null;
   signal: ThreadSignal;
   nowMs: number;
   leaseRenewIntervalMs: number;
   idleTimeoutMs: number;
   startupGraceMs: number;
+  startupTimeoutMs?: number;
 }
 
 export type TaskEffect =
@@ -97,15 +102,25 @@ export type TaskEffect =
       workspaceId: string;
       tabId: string;
       useWorktree: boolean;
+      worktreePath?: string;
       tabExists: boolean;
     }
   | {
       type: "prompt_agent";
       agentName: string;
+      tabId?: string;
+      paneId?: string;
       text: string;
       revertSessionOnError?: { role: "impl" | "reviewer"; previous: ManagedSession };
     }
-  | { type: "reply_board"; taskId: string; text: string; boardProfile: string }
+  | {
+      type: "reply_board";
+      taskId: string;
+      text: string;
+      boardProfile: string;
+      /** When set, the executor reads a terminal tail from this pane and appends it to the reply. */
+      includeTailFromPaneId?: string;
+    }
   | { type: "complete_task"; taskId: string; summary: string; boardProfile: string }
   | {
       type: "block_task";
@@ -173,6 +188,10 @@ export function getReviewerHandle(phase: TaskPhase): SessionHandle | null {
   return phase.kind === "reviewing" ? phase.reviewer.handle : null;
 }
 
+function runtimeUiName(ctx: TaskContext): string {
+  return ctx.runtimeKind === "rex" ? "Rex" : "Sheprd";
+}
+
 function getImplTabLabel(ctx: TaskContext, phase: TaskPhase, prefix?: TabLabelPrefix): string {
   const impl = getImplHandle(phase);
   const tag =
@@ -238,6 +257,8 @@ function applySessionStep(params: {
         {
           type: "prompt_agent",
           agentName: handle.agentName,
+          tabId: handle.tabId,
+          paneId: handle.paneId,
           text: step.promptText,
           revertSessionOnError: { role, previous: step.previous },
         },
@@ -249,14 +270,19 @@ function applySessionStep(params: {
         effects,
       };
 
-    case "ui_blocked":
+    case "ui_blocked": {
+      const ui = runtimeUiName(ctx);
+      const isTimeout = step.reason === "startup_timeout";
       effects.push(
         { type: "rename_tab", tabId: handle.tabId, label: blockedLabel },
         {
           type: "reply_board",
           taskId: ctx.taskId,
           boardProfile: handle.boardProfile,
-          text: `${roleLabel} \`${handle.agentName}\` (${handle.runtime.profileName}) is waiting on an interactive prompt in Sheprd on \`${ctx.machineName}\` (workspace \`${ctx.projectSlug}\`, tab \`${blockedLabel}\`).`,
+          text: isTimeout
+            ? `${roleLabel} \`${handle.agentName}\` (${handle.runtime.profileName}) did not become ready within startup timeout in ${ui} on \`${ctx.machineName}\` (workspace \`${ctx.projectSlug}\`, tab \`${blockedLabel}\`).`
+            : `${roleLabel} \`${handle.agentName}\` (${handle.runtime.profileName}) is waiting on an interactive prompt in ${ui} on \`${ctx.machineName}\` (workspace \`${ctx.projectSlug}\`, tab \`${blockedLabel}\`).`,
+          ...(isTimeout ? { includeTailFromPaneId: handle.paneId } : {}),
         },
       );
       return {
@@ -264,6 +290,7 @@ function applySessionStep(params: {
         next: { ...task, phase: withUpdatedSession(step.session) },
         effects,
       };
+    }
 
     case "ui_recovered":
       effects.push({ type: "rename_tab", tabId: handle.tabId, label: normalLabel });
@@ -277,6 +304,8 @@ function applySessionStep(params: {
       effects.push({
         type: "prompt_agent",
         agentName: handle.agentName,
+        tabId: handle.tabId,
+        paneId: handle.paneId,
         text: buildIdleReminder(ctx, role),
       });
       return {
@@ -285,7 +314,8 @@ function applySessionStep(params: {
         effects,
       };
 
-    case "idle_timed_out":
+    case "idle_timed_out": {
+      const ui = runtimeUiName(ctx);
       effects.push(
         { type: "rename_tab", tabId: handle.tabId, label: blockedLabel },
         {
@@ -295,11 +325,12 @@ function applySessionStep(params: {
           kind: "needs_input",
           reason:
             role === "reviewer"
-              ? `Reviewer ${handle.agentName} on ${ctx.machineName} went idle without posting a verdict; inspect tab in Sheprd.`
-              : `Worker ${handle.agentName} on ${ctx.machineName} went idle without completing; inspect tab in Sheprd.`,
+              ? `Reviewer ${handle.agentName} on ${ctx.machineName} went idle without posting a verdict; inspect tab in ${ui}.`
+              : `Worker ${handle.agentName} on ${ctx.machineName} went idle without completing; inspect tab in ${ui}.`,
         },
       );
       return { status: "park", parkTabId: handle.tabId, reason: "blocked", effects };
+    }
 
     case "exited_unexpectedly": {
       effects.push({
@@ -400,11 +431,12 @@ function buildOrphanEffects(
     });
   }
   const who = holder ? `\`${holder}\`` : "another worker";
+  const ui = runtimeUiName(ctx);
   effects.push({
     type: "reply_board",
     taskId: ctx.taskId,
     boardProfile: ctx.boardProfile,
-    text: `Dispatcher on \`${ctx.machineName}\` lost its claim on this task (lease ran out while it was offline; now held by ${who}). It stopped tracking its tab \`${orphanedLabel}\` in workspace \`${ctx.projectSlug}\` and left the task's state alone. The agent there may still be running: close the tab in Sheprd once it is no longer needed.`,
+    text: `Dispatcher on \`${ctx.machineName}\` lost its claim on this task (lease ran out while it was offline; now held by ${who}). It stopped tracking its tab \`${orphanedLabel}\` in workspace \`${ctx.projectSlug}\` and left the task's state alone. The agent there may still be running: close the tab in ${ui} once it is no longer needed.`,
   });
   return effects;
 }
@@ -436,6 +468,7 @@ export function stepTask(task: ActiveTask, obs: TaskObservation): TaskStepOutcom
       workspaceId: ctx.workspaceId,
       tabId: implHandle.tabId,
       useWorktree: ctx.useWorktree,
+      ...(ctx.worktreePath ? { worktreePath: ctx.worktreePath } : {}),
       tabExists: obs.implTabExists,
     });
     return { status: "remove", effects };
@@ -549,6 +582,7 @@ export function stepTask(task: ActiveTask, obs: TaskObservation): TaskStepOutcom
               workspaceId: ctx.workspaceId,
               tabId: implHandle.tabId,
               useWorktree: ctx.useWorktree,
+              ...(ctx.worktreePath ? { worktreePath: ctx.worktreePath } : {}),
               tabExists: obs.implTabExists,
             },
           );
@@ -569,6 +603,7 @@ export function stepTask(task: ActiveTask, obs: TaskObservation): TaskStepOutcom
         agentStatus: obs.implAgentStatus,
         nowMs: obs.nowMs,
         startupGraceMs: obs.startupGraceMs,
+        startupTimeoutMs: obs.startupTimeoutMs,
         idleTimeoutMs: obs.idleTimeoutMs,
         canIdleTimeout: obs.boardState === "claimed",
       });
@@ -619,6 +654,7 @@ export function stepTask(task: ActiveTask, obs: TaskObservation): TaskStepOutcom
               workspaceId: ctx.workspaceId,
               tabId: phase.impl.tabId,
               useWorktree: ctx.useWorktree,
+              ...(ctx.worktreePath ? { worktreePath: ctx.worktreePath } : {}),
               tabExists: obs.implTabExists,
             },
           );
@@ -678,6 +714,7 @@ export function stepTask(task: ActiveTask, obs: TaskObservation): TaskStepOutcom
         agentStatus: obs.reviewerAgentStatus,
         nowMs: obs.nowMs,
         startupGraceMs: obs.startupGraceMs,
+        startupTimeoutMs: obs.startupTimeoutMs,
         idleTimeoutMs: obs.idleTimeoutMs,
         canIdleTimeout: obs.boardState === "claimed",
       });
@@ -746,6 +783,7 @@ export function stepParkedTab(parked: ParkedTab, obs: ParkedTabObservation): Par
       workspaceId: parked.workspaceId,
       tabId: implHandle.tabId,
       useWorktree: parked.useWorktree,
+      ...(ctx.worktreePath ? { worktreePath: ctx.worktreePath } : {}),
       tabExists: obs.implTabExists,
     });
     return { status: "remove", reason: "board_terminal", effects };

@@ -1,0 +1,58 @@
+{
+  "revision": 3,
+  "session_id": "session:01a20000-0000-7000-8000-000000000001",
+  "label": "demo-app",
+  "active_window_id": "window:01a20000-0000-7000-8000-000000000011",
+  "windows": [
+    {
+      "window_id": "window:01a20000-0000-7000-8000-000000000011",
+      "label": "task-aaaa1111 (claude)",
+      "focused_block_id": "block:01a20000-0000-7000-8000-000000000021",
+      "layers": [
+        {
+          "layer_id": "layer:01a20000-0000-7000-8000-000000000031",
+          "kind": "tiled",
+          "bounds": [0, 0, 1, 1],
+          "layout": {
+            "rect": [0, 0, 1, 1],
+            "block_id": "block:01a20000-0000-7000-8000-000000000021"
+          },
+          "blocks": [
+            {
+              "block_id": "block:01a20000-0000-7000-8000-000000000021",
+              "label": "shell",
+              "creator_name": "com.superlogical.terminal",
+              "flavor": "com.superlogical.terminal.shell",
+              "host_id": "00000000-0000-0000-0000-000000000002"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "window_id": "window:01a20000-0000-7000-8000-000000000012",
+      "label": "task-bbbb2222 (claude)",
+      "focused_block_id": "block:01a20000-0000-7000-8000-000000000022",
+      "layers": [
+        {
+          "layer_id": "layer:01a20000-0000-7000-8000-000000000032",
+          "kind": "tiled",
+          "bounds": [0, 0, 1, 1],
+          "layout": {
+            "rect": [0, 0, 1, 1],
+            "block_id": "block:01a20000-0000-7000-8000-000000000022"
+          },
+          "blocks": [
+            {
+              "block_id": "block:01a20000-0000-7000-8000-000000000022",
+              "label": "shell",
+              "creator_name": "com.superlogical.terminal",
+              "flavor": "com.superlogical.terminal.shell",
+              "host_id": "00000000-0000-0000-0000-000000000002"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

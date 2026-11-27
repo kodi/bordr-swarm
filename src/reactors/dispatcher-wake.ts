@@ -34,8 +34,12 @@ export function shouldWakeDispatcher(
     case "herdr.agent_status":
     case "herdr.pane_exited":
     case "herdr.pane_closed":
+    case "rex.agent_status":
+    case "rex.pane_exited":
+    case "rex.pane_closed":
       return ctx.trackedPaneIds.has(event.paneId);
     case "herdr.tab_closed":
+    case "rex.tab_closed":
       return ctx.trackedTabIds.has(event.tabId);
     case "fs.changed":
     case "board.reaction":
@@ -48,7 +52,7 @@ export function shouldWakeDispatcher(
   }
 }
 
-/** `dispatcher-wake`: Board and Herdr activity that concerns this dispatcher wakes it. */
+/** `dispatcher-wake`: Board, Herdr, and Rex activity that concerns this dispatcher wakes it. */
 export function createDispatcherWakeReactor(config: {
   projectChannelPrefix: string;
 }): Reactor<DispatcherWakeContext> {
@@ -60,7 +64,11 @@ export function createDispatcherWakeReactor(config: {
       event.kind === "herdr.agent_status" ||
       event.kind === "herdr.pane_exited" ||
       event.kind === "herdr.pane_closed" ||
-      event.kind === "herdr.tab_closed",
+      event.kind === "herdr.tab_closed" ||
+      event.kind === "rex.agent_status" ||
+      event.kind === "rex.pane_exited" ||
+      event.kind === "rex.pane_closed" ||
+      event.kind === "rex.tab_closed",
     react: (event, ctx) =>
       shouldWakeDispatcher(event, { ...ctx, projectChannelPrefix: config.projectChannelPrefix })
         ? [{ type: "wake", reason: event.kind }]

@@ -1,5 +1,7 @@
 # Research: Rex vs Herdr as a worker runtime
 
+> **Update (2026-11-27):** The main blocker below ("no agent status in Rex") is **resolved**: live tests on Rex `0.1.0-preview.25` confirmed that `claude`, `codex`, `pi`, and `agy` emit OSC 7501 (`program_status` + `program_status_changed` events) natively. See [docs/plans/2026-11-27-rex-worker-runtime-plan.md](../plans/2026-11-27-rex-worker-runtime-plan.md) for the implemented `WorkerRuntime` + `RexRuntime` design.
+>
 > Status: exploration only (no implementation). Board task `msg_f86bbe3b-05bd-4a78-8ab8-482f06fd6f74_1`.
 > Rex docs read 2026-11-27 (Rex Beta 0.1.0). Herdr reference: `herdr 0.9.5` installed locally; JSON schemas in `src/lib/schemas.ts` were verified against 0.9.3.
 > Rex was **not** installed or exercised here. Everything about Rex below comes from its docs, not from running it.

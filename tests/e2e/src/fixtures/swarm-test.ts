@@ -4,7 +4,10 @@ import { runChecked, waitFor, type ComposeClient } from "vitecompose/core";
 import { inject } from "vitest";
 import type { SwarmE2eConfig } from "../../compose.setup.ts";
 
-export type WorkerName = "worker-1" | "worker-2";
+export type WorkerName = "worker-1" | "worker-2" | "worker-3";
+
+const ALL_WORKERS: readonly WorkerName[] = ["worker-1", "worker-2", "worker-3"];
+const REX_WORKERS = new Set<WorkerName>(["worker-3"]);
 
 export type E2eTaskSnapshot = {
   id: string;
@@ -112,27 +115,34 @@ async function resetSwarmEnvironment(
     throw new Error(`Failed to reset board server: HTTP ${res.status}`);
   }
 
-  // Clear persisted dispatcher state, Herdr sessions, logs, and scratch repos on both workers,
+  // Clear persisted dispatcher state, Herdr/Rex sessions, logs, and scratch repos on all workers,
   // then restart them cleanly.
-  for (const worker of ["worker-1", "worker-2"] as const) {
+  for (const worker of ALL_WORKERS) {
+    const isRex = REX_WORKERS.has(worker);
     await compose.exec(worker, [
       "sh",
       "-c",
       [
         `rm -f /var/lib/swarm/dispatcher-${worker}.json /var/lib/swarm/dispatcher-${worker}.json.*`,
         "rm -f /tmp/dispatcher.log /tmp/dispatcher.pid",
-        "touch /var/lib/swarm/.reset-herdr",
-        "rm -rf /root/.config/herdr/session.json /root/.config/herdr/session-snapshots",
+        "rm -rf /var/lib/swarm/repos/.swarm-worktrees",
+        ...(isRex
+          ? ["touch /var/lib/swarm/.reset-rex"]
+          : [
+              "touch /var/lib/swarm/.reset-herdr",
+              "rm -rf /root/.config/herdr/session.json /root/.config/herdr/session-snapshots",
+            ]),
         resetRepoCmd("/var/lib/swarm/repos/demo-app"),
         resetRepoCmd("/var/lib/swarm/repos/reviewed-app"),
+        resetRepoCmd("/var/lib/swarm/repos/worktree-app"),
+        "if [ -d /var/lib/swarm/repos/worktree-app/.git ]; then git -C /var/lib/swarm/repos/worktree-app worktree prune >/dev/null 2>&1 || true; fi",
       ].join("; "),
     ]);
   }
-  await compose.restart(["worker-1", "worker-2"]);
-  await Promise.all([
-    compose.waitForHealthy("worker-1", { timeoutMs: 30_000 }),
-    compose.waitForHealthy("worker-2", { timeoutMs: 30_000 }),
-  ]);
+  await compose.restart([...ALL_WORKERS]);
+  await Promise.all(
+    ALL_WORKERS.map((worker) => compose.waitForHealthy(worker, { timeoutMs: 30_000 })),
+  );
 }
 
 export const test = composeTest.extend(
@@ -140,7 +150,10 @@ export const test = composeTest.extend(
   async ({ compose, fileCompose, evidence, signal }) => {
     const config = inject("swarmE2e");
     evidence.markSensitive(config.boardToken);
-    evidence.watchServices({ services: ["board", "worker-1", "worker-2"], tailLines: 120 });
+    evidence.watchServices({
+      services: ["board", "worker-1", "worker-2", "worker-3"],
+      tailLines: 120,
+    });
 
     await resetSwarmEnvironment(fileCompose, config);
 
@@ -240,6 +253,40 @@ export const test = composeTest.extend(
         );
       },
       listWorkerTabs: async (worker) => {
+        if (REX_WORKERS.has(worker)) {
+          const lsRes = await compose.exec(worker, ["rex", "ls", "--json"]);
+          if (lsRes.status !== 0) {
+            throw new Error(`rex ls failed on ${worker}: ${lsRes.stderr}`);
+          }
+          const sessions =
+            (
+              JSON.parse(lsRes.stdout) as {
+                sessions?: Array<{ session_id: string; label: string }>;
+              }
+            ).sessions ?? [];
+          const tabs: Array<{ tab_id: string; label: string }> = [];
+          for (const s of sessions) {
+            const winRes = await compose.exec(worker, [
+              "rex",
+              "window",
+              "ls",
+              "-s",
+              s.session_id,
+              "--json",
+            ]);
+            if (winRes.status !== 0) continue;
+            const wins =
+              (
+                JSON.parse(winRes.stdout) as {
+                  windows?: Array<{ window_id: string; label: string }>;
+                }
+              ).windows ?? [];
+            for (const w of wins) {
+              tabs.push({ tab_id: w.window_id, label: w.label });
+            }
+          }
+          return tabs;
+        }
         const res = await compose.exec(worker, ["herdr", "tab", "list"]);
         if (res.status !== 0) {
           throw new Error(`herdr tab list failed on ${worker}: ${res.stderr}`);
@@ -250,6 +297,13 @@ export const test = composeTest.extend(
         return parsed.result?.tabs ?? [];
       },
       closeWorkerTab: async (worker, tabId) => {
+        if (REX_WORKERS.has(worker)) {
+          const res = await compose.exec(worker, ["rex", "window", "close", tabId]);
+          if (res.status !== 0) {
+            throw new Error(`rex window close ${tabId} failed on ${worker}: ${res.stderr}`);
+          }
+          return;
+        }
         const res = await compose.exec(worker, ["herdr", "tab", "close", tabId]);
         if (res.status !== 0) {
           throw new Error(`herdr tab close ${tabId} failed on ${worker}: ${res.stderr}`);

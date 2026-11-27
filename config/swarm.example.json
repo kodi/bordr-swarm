@@ -72,11 +72,13 @@
     "pollIntervalSeconds": 15,
     "reconcileIntervalSeconds": 60,
     "idleTimeoutSeconds": 30,
+    "startupTimeoutSeconds": 90,
     "claimWaitSeconds": 30
   },
   "events": {
     "boardTail": true,
-    "herdr": true
+    "herdr": true,
+    "rex": true
   },
   "reactors": [
     {
@@ -103,9 +105,18 @@
       "os": "macos",
       "hostname": "worker-machine",
       "allowedHosts": [],
-      "herdrTarget": "local",
+      "runtime": { "kind": "herdr", "target": "local" },
       "maxWorkers": 2,
       "labels": ["machine=worker-machine", "os=macos"]
+    },
+    "rex-worker-machine": {
+      "role": "worker",
+      "os": "linux",
+      "hostname": "rex-worker-machine",
+      "allowedHosts": [],
+      "runtime": { "kind": "rex" },
+      "maxWorkers": 2,
+      "labels": ["machine=rex-worker-machine", "os=linux"]
     }
   }
 }

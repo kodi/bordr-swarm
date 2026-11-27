@@ -1,0 +1,22 @@
+{
+  "blocks": [
+    {
+      "block_id": "block:01a20000-0000-7000-8000-000000000021",
+      "label": "shell",
+      "creator_name": "com.superlogical.terminal",
+      "flavor": "com.superlogical.terminal.shell",
+      "host_id": "00000000-0000-0000-0000-000000000002",
+      "placement": "placed",
+      "window_id": "window:01a20000-0000-7000-8000-000000000011"
+    },
+    {
+      "block_id": "block:01a20000-0000-7000-8000-000000000022",
+      "label": "shell",
+      "creator_name": "com.superlogical.terminal",
+      "flavor": "com.superlogical.terminal.shell",
+      "host_id": "00000000-0000-0000-0000-000000000002",
+      "placement": "placed",
+      "window_id": "window:01a20000-0000-7000-8000-000000000012"
+    }
+  ]
+}

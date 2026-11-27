@@ -22,10 +22,13 @@ import { BoardClient, type BoardTask } from "./lib/board.ts";
 import {
   BUILTIN_AGENT_KINDS,
   DEFAULT_RECONCILE_INTERVAL_SECONDS,
+  DEFAULT_STARTUP_TIMEOUT_SECONDS,
   loadProjectsConfig,
   loadProjectsConfigOptional,
   loadSwarmConfig,
   resolveCurrentMachineName,
+  resolveMachineRuntime,
+  type MachineConfig,
   type ProjectsConfig,
   type SwarmConfig,
 } from "./lib/config.ts";
@@ -43,12 +46,7 @@ import {
   saveDispatcherState,
   toPersisted,
 } from "./lib/dispatcher-state.ts";
-import {
-  HerdrClient,
-  sanitizeHerdrAgentName,
-  type HerdrAgent,
-  type HerdrTab,
-} from "./lib/herdr.ts";
+import { HerdrClient } from "./lib/herdr.ts";
 import {
   blockedAdoptionLabel,
   buildAdoptedTask,
@@ -64,6 +62,7 @@ import {
   findReviewVerdictReply,
   type GitChangeDetector,
 } from "./lib/review.ts";
+import { RexClient } from "./lib/rex.ts";
 import {
   formatTabLabel,
   renderWorkerPrompt,
@@ -72,6 +71,15 @@ import {
   shortTaskId,
   type CandidateTask,
 } from "./lib/routing.ts";
+import {
+  buildSessionRef,
+  sanitizeAgentName,
+  type LiveAgent,
+  type SnapshotRef,
+  type WorkerRuntime,
+} from "./lib/runtime.ts";
+import { HerdrRuntime } from "./lib/runtimes/herdr-runtime.ts";
+import { RexRuntime } from "./lib/runtimes/rex-runtime.ts";
 import { assertNever, createManagedSession, type SessionHandle } from "./lib/session-fsm.ts";
 import {
   getImplHandle,
@@ -81,6 +89,7 @@ import {
   type ActiveTask,
   type ThreadSignal,
 } from "./lib/task-fsm.ts";
+import { defaultGitWorktreeManager, type GitWorktreeManager } from "./lib/worktree.ts";
 import {
   createConfiguredEffectHandlers,
   createConfiguredReactors,
@@ -147,6 +156,16 @@ function detectAvailableAgentKinds(swarm: SwarmConfig): Set<string> {
   return available;
 }
 
+export function createWorkerRuntime(
+  machineCfg: Pick<MachineConfig, "runtime" | "herdrTarget">,
+): WorkerRuntime {
+  const rt = resolveMachineRuntime(machineCfg);
+  if (rt.kind === "rex") {
+    return new RexRuntime(new RexClient({ binary: rt.binary }));
+  }
+  return new HerdrRuntime(new HerdrClient({ target: rt.target }));
+}
+
 export class SwarmDispatcher {
   readonly repoRoot: string;
   readonly swarm: SwarmConfig;
@@ -154,7 +173,8 @@ export class SwarmDispatcher {
   readonly projectsConfigPath: string | null;
   readonly machineName: string;
   readonly board: BoardClient;
-  readonly herdr: HerdrClient;
+  readonly runtime: WorkerRuntime;
+  readonly worktreeManager: GitWorktreeManager;
   readonly promptTemplate: string;
   readonly reviewerPromptTemplate: string;
   readonly gitDetector: GitChangeDetector;
@@ -186,27 +206,35 @@ export class SwarmDispatcher {
     projectsConfigPath?: string;
     machineName: string;
     board: BoardClient;
-    herdr: HerdrClient;
+    /** Terminal runtime hosting worker agents. Either `runtime` or legacy `herdr` must be provided. */
+    runtime?: WorkerRuntime;
+    /** Legacy back-compat alias for `runtime: new HerdrRuntime(herdr)`. */
+    herdr?: HerdrClient;
+    worktreeManager?: GitWorktreeManager;
     promptTemplate: string;
     reviewerPromptTemplate?: string;
     gitDetector?: GitChangeDetector;
     availableAgentKinds: Set<string>;
     dryRun: boolean;
     statePath?: string;
-    /** Live Board/Herdr events; omitted, the dispatcher polls exactly as before. */
+    /** Live Board/Herdr/Rex events; omitted, the dispatcher polls exactly as before. */
     events?: DaemonEventWiring;
     timers?: Timers;
     /** Additional reactors (config-driven ones), run after the built-ins. */
     extraReactors?: Array<Reactor<DispatcherWakeContext>>;
     commandRunner?: CommandRunner;
   }) {
+    if (!params.runtime && !params.herdr) {
+      throw new Error("SwarmDispatcher requires either `runtime` or `herdr`.");
+    }
     this.repoRoot = params.repoRoot;
     this.swarm = params.swarm;
     this.projects = params.projects;
     this.projectsConfigPath = params.projectsConfigPath ?? null;
     this.machineName = params.machineName;
     this.board = params.board;
-    this.herdr = params.herdr;
+    this.runtime = params.runtime ?? new HerdrRuntime(params.herdr!);
+    this.worktreeManager = params.worktreeManager ?? defaultGitWorktreeManager;
     this.promptTemplate = params.promptTemplate;
     this.reviewerPromptTemplate = params.reviewerPromptTemplate ?? "";
     this.gitDetector = params.gitDetector ?? defaultGitChangeDetector;
@@ -243,11 +271,17 @@ export class SwarmDispatcher {
     this.stopController.abort();
   }
 
-  /** Herdr pane IDs and tab IDs of every tracked session (active and parked). */
-  private getTrackedHerdrIds(): { panes: Set<string>; tabs: Set<string> } {
+  /** Pane, tab, and group/session IDs of every tracked session (active and parked). */
+  private getTrackedRuntimeIds(): {
+    panes: Set<string>;
+    tabs: Set<string>;
+    groups: Set<string>;
+  } {
     const panes = new Set<string>();
     const tabs = new Set<string>();
+    const groups = new Set<string>();
     const add = (task: ActiveTask): void => {
+      if (task.ctx.workspaceId) groups.add(task.ctx.workspaceId);
       const impl = getImplHandle(task.phase);
       const rev = getReviewerHandle(task.phase);
       for (const h of rev ? [impl, rev] : [impl]) {
@@ -259,8 +293,9 @@ export class SwarmDispatcher {
     for (const parked of this.parkedTabs.values()) {
       add(parked.task);
       if (parked.tabId) tabs.add(parked.tabId);
+      if (parked.workspaceId) groups.add(parked.workspaceId);
     }
-    return { panes, tabs };
+    return { panes, tabs, groups };
   }
 
   /** Periodic reconcile interval for the current source health and workload. */
@@ -287,7 +322,7 @@ export class SwarmDispatcher {
       }
       return;
     }
-    const { panes, tabs } = this.getTrackedHerdrIds();
+    const { panes, tabs } = this.getTrackedRuntimeIds();
     const effects = this.reactors.collect(event, {
       trackedTaskIds: this.getTrackedTaskIds(),
       trackedPaneIds: panes,
@@ -306,9 +341,11 @@ export class SwarmDispatcher {
     };
   }
 
-  /** Keeps per-pane Herdr agent-status subscriptions in line with what is tracked. */
+  /** Keeps per-pane (Herdr) and per-session (Rex) event subscriptions in line with tracked tasks. */
   private syncPaneSubscriptions(): void {
-    this.events?.paneWatcher?.setWatchedPanes(this.getTrackedHerdrIds().panes);
+    const { panes, groups } = this.getTrackedRuntimeIds();
+    this.events?.paneWatcher?.setWatchedPanes(panes);
+    this.events?.sessionWatcher?.setWatchedSessions(groups);
   }
 
   /**
@@ -379,7 +416,8 @@ export class SwarmDispatcher {
       swarm: this.swarm,
       machineName: this.machineName,
       board: this.board,
-      herdr: this.herdr,
+      runtime: this.runtime,
+      worktreeManager: this.worktreeManager,
       activeWorkers: this.activeWorkers,
       parkedTabs: this.parkedTabs,
       getReviewerPromptTemplate: () => this.getReviewerPromptTemplate(),
@@ -468,13 +506,39 @@ export class SwarmDispatcher {
     return ids;
   }
 
+  /** Pane IDs of any active session currently waiting in `awaiting_prompt`. */
+  private getAwaitingPromptPaneIds(): Set<string> {
+    const ids = new Set<string>();
+    for (const task of this.activeWorkers.values()) {
+      if (task.phase.kind === "reviewing") {
+        if (task.phase.reviewer.lifecycle.kind === "awaiting_prompt") {
+          ids.add(task.phase.reviewer.handle.paneId);
+        }
+      } else if (task.phase.impl.lifecycle.kind === "awaiting_prompt") {
+        ids.add(task.phase.impl.handle.paneId);
+      }
+    }
+    return ids;
+  }
+
   async tick(): Promise<void> {
+    const awaitingBefore = this.getAwaitingPromptPaneIds();
     try {
       await this.runTick();
     } finally {
       this.persistState();
       // Covers spawns, adoptions, and sessions restored from the state file.
       this.syncPaneSubscriptions();
+      // A fast-starting Rex agent may emit its initial `idle` before `rex events -s <session>`
+      // finishes attaching; schedule one debounced check so it never waits for the poll interval.
+      if (this.runtime.kind === "rex") {
+        for (const paneId of this.getAwaitingPromptPaneIds()) {
+          if (!awaitingBefore.has(paneId)) {
+            this.scheduler?.wake("rex_awaiting_prompt");
+            break;
+          }
+        }
+      }
     }
   }
 
@@ -621,14 +685,14 @@ export class SwarmDispatcher {
     const machineConfig = this.swarm.machines[this.machineName];
     if (!machineConfig) return;
 
-    let agents: HerdrAgent[];
+    let agents: LiveAgent[];
     try {
-      agents = await this.herdr.listAgents();
+      agents = await this.runtime.listLiveAgents();
     } catch (err) {
-      // Never release work because Herdr was briefly unreachable
+      // Never release work because the runtime was briefly unreachable
       log(
         "WARN",
-        `Orphan sweep skipped: could not list Herdr agents (${err instanceof Error ? err.message : String(err)}); ${orphans.length} untracked claim(s) left for next tick.`,
+        `Orphan sweep skipped: could not list ${this.runtime.kind} agents (${err instanceof Error ? err.message : String(err)}); ${orphans.length} untracked claim(s) left for next tick.`,
       );
       return;
     }
@@ -701,6 +765,7 @@ export class SwarmDispatcher {
           replyIds: thread.replies.map((r) => r.id),
           machineName: this.machineName,
           humanHandle: this.swarm.board.humanHandle,
+          runtimeKind: this.runtime.kind,
           nowMs,
         });
 
@@ -717,7 +782,7 @@ export class SwarmDispatcher {
         try {
           await this.board.blockTask(
             taskId,
-            `Dispatcher on ${this.machineName} restarted mid-review without state; inspect tabs in Sheprd.`,
+            `Dispatcher on ${this.machineName} restarted mid-review without state; inspect tabs in ${this.runtime.uiName}.`,
             { asProfile: orphan.boardProfile, kind: "needs_input" },
           );
         } catch (err) {
@@ -728,11 +793,18 @@ export class SwarmDispatcher {
           return;
         }
         const label = blockedAdoptionLabel(task);
-        await this.herdr.renameTab(decision.impl.tabId, label).catch(() => {});
+        const implRef = buildSessionRef({
+          runtime: this.runtime.kind,
+          groupId: decision.impl.workspaceId,
+          tabId: decision.impl.tabId,
+          paneId: decision.impl.paneId,
+          agentName: decision.impl.name,
+        });
+        await this.runtime.rename(implRef, label).catch(() => {});
         await this.board
           .reply(
             taskId,
-            `Dispatcher on \`${this.machineName}\` restarted without a record of this task while reviewer \`${decision.reviewerAgentName}\` was still running, so it cannot tell which review round this is. It blocked the task and parked the implementer tab \`${label}\` in workspace \`${decision.routing.projectSlug}\` for a human (${this.swarm.board.humanHandle} @lead). Check both tabs in Sheprd before unblocking.`,
+            `Dispatcher on \`${this.machineName}\` restarted without a record of this task while reviewer \`${decision.reviewerAgentName}\` was still running, so it cannot tell which review round this is. It blocked the task and parked the implementer tab \`${label}\` in workspace \`${decision.routing.projectSlug}\` for a human (${this.swarm.board.humanHandle} @lead). Check both tabs in ${this.runtime.uiName} before unblocking.`,
             { asProfile: orphan.boardProfile },
           )
           .catch(() => {});
@@ -778,8 +850,9 @@ export class SwarmDispatcher {
 
     const env = buildBoardEnv(this.swarm, boardProfile);
     const tabLabel = formatTabLabel(task.id, runtime.profileName);
-    const agentName = sanitizeHerdrAgentName("w", shortId);
+    const agentName = sanitizeAgentName("w", shortId);
     const branch = `task/${shortId}`;
+    let createdWorktreePath: string | undefined;
 
     try {
       const startHeadSha = reviewer.enabled ? this.gitDetector.captureHeadSha(repoPath) : null;
@@ -791,20 +864,24 @@ export class SwarmDispatcher {
         }
       }
 
-      const spawnedPane = useWorktree
-        ? await this.herdr.createWorktree({
-            cwd: repoPath,
+      let spawnCwd = repoPath;
+      let nativeWorktree: { branch: string; base?: string } | undefined;
+      if (useWorktree) {
+        if (this.runtime.kind === "rex") {
+          const wt = await this.worktreeManager.create({
+            repoPath,
+            projectSlug,
+            shortId,
             branch,
-            base: project.baseBranch,
-            label: tabLabel,
-            env,
-          })
-        : await this.herdr.findOrCreateProjectTab({
-            workspaceLabel: projectSlug,
-            cwd: repoPath,
-            tabLabel,
-            env,
+            baseBranch: project.baseBranch,
+            worktreeRoot: this.swarm.workerDefaults.worktreeRoot,
           });
+          createdWorktreePath = wt.worktreePath;
+          spawnCwd = wt.worktreePath;
+        } else {
+          nativeWorktree = { branch, base: project.baseBranch };
+        }
+      }
 
       const promptText = renderWorkerPrompt(this.getPromptTemplate(), {
         taskId: task.id,
@@ -824,11 +901,17 @@ export class SwarmDispatcher {
           : { enabled: false },
       });
 
-      const startRes = await this.herdr.startAgent({
-        name: agentName,
-        kind: runtime.kind,
-        paneId: spawnedPane.paneId,
-        args: runtime.cliArgs,
+      const spawnRes = await this.runtime.spawn({
+        group: projectSlug,
+        cwd: spawnCwd,
+        label: tabLabel,
+        env,
+        agent: {
+          name: agentName,
+          kind: runtime.kind,
+          args: runtime.cliArgs,
+        },
+        worktree: nativeWorktree,
         timeoutMs: 60_000,
       });
 
@@ -836,8 +919,8 @@ export class SwarmDispatcher {
       const implHandle: SessionHandle = {
         boardProfile,
         runtime,
-        tabId: spawnedPane.tabId,
-        paneId: spawnedPane.paneId,
+        tabId: spawnRes.ref.tabId,
+        paneId: spawnRes.ref.paneId,
         agentName,
         startedAtMs: nowMs,
       };
@@ -851,7 +934,9 @@ export class SwarmDispatcher {
           baseBranch: project.baseBranch,
           branch,
           useWorktree,
-          workspaceId: spawnedPane.workspaceId,
+          ...(createdWorktreePath ? { worktreePath: createdWorktreePath } : {}),
+          runtimeKind: this.runtime.kind,
+          workspaceId: spawnRes.ref.groupId,
           boardProfile,
           reviewConfig: reviewer,
           startHeadSha,
@@ -862,7 +947,8 @@ export class SwarmDispatcher {
           kind: "implementing",
           impl: createManagedSession(implHandle, {
             promptText,
-            blockedOnStartup: startRes.blockedOnStartup,
+            blockedOnStartup: spawnRes.blockedOnStartup,
+            promptNow: spawnRes.promptNow,
           }),
         },
         lastLeaseRenewMs: nowMs,
@@ -872,25 +958,30 @@ export class SwarmDispatcher {
 
       this.activeWorkers.set(task.id, activeTask);
 
-      if (startRes.blockedOnStartup) {
+      if (spawnRes.blockedOnStartup) {
         log(
           "WARN",
-          `Worker ${agentName} for task #${task.id} hit an interactive prompt on startup; marking tab [BLOCKED] for Sheprd.`,
+          `Worker ${agentName} for task #${task.id} hit an interactive prompt on startup; marking tab [BLOCKED] for ${this.runtime.uiName}.`,
         );
         const blockedLabel = formatTabLabel(task.id, runtime.profileName, "BLOCKED");
-        await this.herdr.renameTab(spawnedPane.tabId, blockedLabel).catch(() => {});
+        await this.runtime.rename(spawnRes.ref, blockedLabel).catch(() => {});
         await this.board
           .reply(
             task.id,
-            `Worker (${runtime.profileName}) paused on startup prompt in Sheprd on \`${this.machineName}\` (workspace \`${projectSlug}\`, tab \`${blockedLabel}\`). Approve/dismiss it in Sheprd to continue.`,
+            `Worker (${runtime.profileName}) paused on startup prompt in ${this.runtime.uiName} on \`${this.machineName}\` (workspace \`${projectSlug}\`, tab \`${blockedLabel}\`). Approve/dismiss it in ${this.runtime.uiName} to continue.`,
             { asProfile: boardProfile },
           )
           .catch(() => {});
-      } else {
-        await this.herdr.promptAgent(agentName, promptText);
+      } else if (spawnRes.promptNow) {
+        await this.runtime.prompt(spawnRes.ref, promptText);
         log(
           "INFO",
-          `Spawned ${agentName} (${runtime.kind}) in ${spawnedPane.tabId} and delivered task #${task.id} prompt.`,
+          `Spawned ${agentName} (${runtime.kind}) in ${spawnRes.ref.tabId} and delivered task #${task.id} prompt.`,
+        );
+      } else {
+        log(
+          "INFO",
+          `Spawned ${agentName} (${runtime.kind}) in ${spawnRes.ref.tabId} (${this.runtime.kind}); awaiting ready state before delivering task #${task.id} prompt.`,
         );
       }
 
@@ -898,6 +989,11 @@ export class SwarmDispatcher {
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
       log("ERROR", `Failed to spawn worker for task #${task.id}: ${detail}`);
+      if (createdWorktreePath) {
+        await this.worktreeManager
+          .remove({ repoPath, worktreePath: createdWorktreePath, branch })
+          .catch(() => {});
+      }
       await this.board
         .reply(
           task.id,
@@ -913,8 +1009,8 @@ export class SwarmDispatcher {
   private async observeThreadSignal(
     task: ActiveTask,
     boardTask: BoardTask | undefined,
-    liveImpl: HerdrAgent | null,
-    liveReviewer: HerdrAgent | null,
+    liveImpl: LiveAgent | null,
+    liveReviewer: LiveAgent | null,
   ): Promise<ThreadSignal> {
     if (!task.ctx.reviewConfig.enabled || boardTask?.state !== "claimed") {
       return { kind: "none" };
@@ -926,9 +1022,7 @@ export class SwarmDispatcher {
       const revSession = task.phase.reviewer;
       if (revSession.lifecycle.kind === "awaiting_prompt") return { kind: "none" };
       const revIdleOrGone =
-        liveReviewer === null ||
-        liveReviewer.agent_status === "idle" ||
-        liveReviewer.agent_status === "done";
+        liveReviewer === null || liveReviewer.status === "idle" || liveReviewer.status === "done";
       if (!maybeNewReplies && !revIdleOrGone) return { kind: "none" };
 
       const thread = await this.board.readThread(task.ctx.taskId).catch((err) => {
@@ -958,7 +1052,7 @@ export class SwarmDispatcher {
     // implementing or fixing
     if (task.phase.impl.lifecycle.kind === "awaiting_prompt") return { kind: "none" };
     const implIdle =
-      liveImpl !== null && (liveImpl.agent_status === "idle" || liveImpl.agent_status === "done");
+      liveImpl !== null && (liveImpl.status === "idle" || liveImpl.status === "done");
     if (!maybeNewReplies && !implIdle) return { kind: "none" };
 
     const thread = await this.board.readThread(task.ctx.taskId).catch((err) => {
@@ -979,7 +1073,7 @@ export class SwarmDispatcher {
     if (!readyMatch) return { kind: "none" };
 
     const reviewCwd = task.ctx.useWorktree
-      ? (liveImpl?.cwd ?? liveImpl?.foreground_cwd ?? task.ctx.repoPath)
+      ? (task.ctx.worktreePath ?? liveImpl?.cwd ?? task.ctx.repoPath)
       : task.ctx.repoPath;
     const gitCheck = this.gitDetector.detectChanges(
       reviewCwd,
@@ -997,21 +1091,39 @@ export class SwarmDispatcher {
     };
   }
 
+  private collectTrackedSnapshotRefs(): SnapshotRef[] {
+    const byPane = new Map<string, SnapshotRef>();
+    const addTask = (task: ActiveTask): void => {
+      const impl = getImplHandle(task.phase);
+      const rev = getReviewerHandle(task.phase);
+      for (const h of rev ? [impl, rev] : [impl]) {
+        if (!byPane.has(h.paneId)) {
+          byPane.set(h.paneId, {
+            runtime: this.runtime.kind,
+            groupId: task.ctx.workspaceId,
+            tabId: h.tabId,
+            paneId: h.paneId,
+            agentName: h.agentName,
+            startedAtMs: h.startedAtMs,
+          });
+        }
+      }
+    };
+    for (const task of this.activeWorkers.values()) addTask(task);
+    for (const parked of this.parkedTabs.values()) addTask(parked.task);
+    return [...byPane.values()];
+  }
+
   private async reconcileRunningWorkers(tasksById: Map<string, BoardTask>): Promise<void> {
-    const [tabs, agents] = await Promise.all([
-      this.herdr.listTabs().catch(() => [] as HerdrTab[]),
-      this.herdr.listAgents().catch(() => [] as HerdrAgent[]),
-    ]);
-
-    const tabsById = new Map<string, HerdrTab>();
-    for (const tab of tabs) tabsById.set(tab.tab_id, tab);
-
-    const agentsByPaneId = new Map<string, HerdrAgent>();
-    for (const agent of agents) agentsByPaneId.set(agent.pane_id, agent);
+    const refs = this.collectTrackedSnapshotRefs();
+    const snapshot = await this.runtime.snapshot(refs);
+    const { tabIds, agentsByPane } = snapshot;
 
     const nowMs = Date.now();
     const leaseRenewIntervalMs = this.swarm.board.leaseRenewIntervalSeconds * 1000;
     const idleTimeoutMs = this.swarm.workerDefaults.idleTimeoutSeconds * 1000;
+    const startupTimeoutMs =
+      (this.swarm.workerDefaults.startupTimeoutSeconds ?? DEFAULT_STARTUP_TIMEOUT_SECONDS) * 1000;
     const deps = this.getEffectDeps();
 
     // Reconcile parked tabs (auto-close completed/canceled, unpark resumed, prune manually closed)
@@ -1025,10 +1137,10 @@ export class SwarmDispatcher {
       const outcome = stepParkedTab(parked, {
         boardState: boardTask?.state ?? "unknown",
         boardAssignee: boardTask?.assignee,
-        parkedTabExists: tabsById.has(parked.tabId),
-        implTabExists: tabsById.has(implHandle.tabId),
-        reviewerTabExists: revHandle ? tabsById.has(revHandle.tabId) : false,
-        parkedAgentAlive: agentsByPaneId.has(parkedPaneId),
+        parkedTabExists: tabIds.has(parked.tabId),
+        implTabExists: tabIds.has(implHandle.tabId),
+        reviewerTabExists: revHandle ? tabIds.has(revHandle.tabId) : false,
+        parkedAgentAlive: agentsByPane.has(parkedPaneId),
         nowMs,
       });
 
@@ -1040,22 +1152,23 @@ export class SwarmDispatcher {
       const implHandle = getImplHandle(task.phase);
       const revHandle = getReviewerHandle(task.phase);
 
-      const liveImpl = agentsByPaneId.get(implHandle.paneId) ?? null;
-      const liveReviewer = revHandle ? (agentsByPaneId.get(revHandle.paneId) ?? null) : null;
+      const liveImpl = agentsByPane.get(implHandle.paneId) ?? null;
+      const liveReviewer = revHandle ? (agentsByPane.get(revHandle.paneId) ?? null) : null;
       const signal = await this.observeThreadSignal(task, boardTask, liveImpl, liveReviewer);
 
       const outcome = stepTask(task, {
         boardState: boardTask?.state ?? "unknown",
         boardAssignee: boardTask?.assignee,
-        implTabExists: tabsById.has(implHandle.tabId),
-        implAgentStatus: liveImpl?.agent_status ?? null,
-        reviewerTabExists: revHandle ? tabsById.has(revHandle.tabId) : false,
-        reviewerAgentStatus: liveReviewer?.agent_status ?? null,
+        implTabExists: tabIds.has(implHandle.tabId),
+        implAgentStatus: liveImpl?.status ?? null,
+        reviewerTabExists: revHandle ? tabIds.has(revHandle.tabId) : false,
+        reviewerAgentStatus: liveReviewer?.status ?? null,
         signal,
         nowMs,
         leaseRenewIntervalMs,
         idleTimeoutMs,
         startupGraceMs: STARTUP_GRACE_MS,
+        startupTimeoutMs,
       });
 
       await applyTaskStepOutcome(deps, task, outcome, nowMs);
@@ -1068,9 +1181,12 @@ export class SwarmDispatcher {
       throw new Error(`Unknown machine "${this.machineName}"`);
     }
 
+    const resolvedRuntime = resolveMachineRuntime(machineCfg);
+    const runtimeDesc =
+      resolvedRuntime.kind === "herdr" ? `herdr(${resolvedRuntime.target})` : "rex";
     log(
       "INFO",
-      `Starting Worker Dispatcher on "${this.machineName}" (herdrTarget=${machineCfg.herdrTarget}, maxWorkers=${machineCfg.maxWorkers}, defaultAgent=${this.swarm.workerDefaults.defaultAgent}, installedAgents=[${[...this.availableAgentKinds].join(",")}], dryRun=${this.dryRun})`,
+      `Starting Worker Dispatcher on "${this.machineName}" (runtime=${runtimeDesc}, maxWorkers=${machineCfg.maxWorkers}, defaultAgent=${this.swarm.workerDefaults.defaultAgent}, installedAgents=[${[...this.availableAgentKinds].join(",")}], dryRun=${this.dryRun})`,
     );
 
     if (!once) log("INFO", describeReactors("Dispatcher", this.reactors.names));
@@ -1155,12 +1271,14 @@ async function main(): Promise<void> {
     onWarn: (message) => log("WARN", message),
   });
   const once = flags.once;
+  const machineRuntime = resolveMachineRuntime(machineCfg);
   const sources = once
     ? null
     : createDaemonEventSources({
         swarm,
         board,
         herdrTarget: machineCfg.herdrTarget,
+        machineRuntime,
         // The dispatcher only acts on project queues, so it tails just that prefix.
         tailChannel: swarm.board.projectChannelPrefix,
         watchFiles: [projectsConfigPath],
@@ -1175,7 +1293,7 @@ async function main(): Promise<void> {
     machineName,
     board,
     events: sources ?? undefined,
-    herdr: new HerdrClient({ target: machineCfg.herdrTarget }),
+    runtime: createWorkerRuntime(machineCfg),
     promptTemplate,
     reviewerPromptTemplate,
     availableAgentKinds: detectAvailableAgentKinds(swarm),

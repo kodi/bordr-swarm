@@ -12,6 +12,7 @@ import {
   type LeadConfig,
   type MachineOs,
   type MachineRole,
+  type MachineRuntime,
   type PermissionMode,
   type ProjectConfig,
   type ProjectReviewerOverride,
@@ -26,6 +27,7 @@ export type {
   LeadConfig,
   MachineOs,
   MachineRole,
+  MachineRuntime,
   PermissionMode,
   ProjectConfig,
   ProjectReviewerOverride,
@@ -61,6 +63,10 @@ export interface WorkerDefaultsConfig {
   /** Full-reconcile interval while live events are healthy (default 60). */
   reconcileIntervalSeconds?: number;
   idleTimeoutSeconds: number;
+  /** Seconds a spawned worker has to reach first idle before `[BLOCKED]` (default 90). */
+  startupTimeoutSeconds?: number;
+  /** Optional base directory for Dispatcher-managed Git worktrees on Rex machines. */
+  worktreeRoot?: string;
   claimWaitSeconds: number;
 }
 
@@ -69,6 +75,7 @@ export interface MachineConfig {
   os: MachineOs;
   hostname: string;
   allowedHosts: string[];
+  runtime?: MachineRuntime;
   herdrTarget: string;
   maxWorkers: number;
   labels: string[];
@@ -78,7 +85,7 @@ export interface SwarmConfig {
   board: BoardConfig;
   lead: LeadConfig;
   workerDefaults: WorkerDefaultsConfig;
-  /** Live event sources (both on when omitted). */
+  /** Live event sources (on when omitted). */
   events?: EventsConfig;
   /** User-defined reactors from local config. */
   reactors?: ConfiguredReactor[];
@@ -88,9 +95,24 @@ export interface SwarmConfig {
 /** Default for `lead.reconcileIntervalSeconds` and `workerDefaults.reconcileIntervalSeconds`. */
 export const DEFAULT_RECONCILE_INTERVAL_SECONDS = 60;
 
-/** Resolved live-event settings (`events` omitted means both sources on). */
+/** Default for `workerDefaults.startupTimeoutSeconds`. */
+export const DEFAULT_STARTUP_TIMEOUT_SECONDS = 90;
+
+/** Resolved live-event settings (`events` omitted means all sources on). */
 export function resolveEventsConfig(swarm: Pick<SwarmConfig, "events">): EventsConfig {
-  return { boardTail: swarm.events?.boardTail ?? true, herdr: swarm.events?.herdr ?? true };
+  return {
+    boardTail: swarm.events?.boardTail ?? true,
+    herdr: swarm.events?.herdr ?? true,
+    rex: swarm.events?.rex ?? true,
+  };
+}
+
+/** Resolved machine worker runtime (`runtime` omitted defaults to Herdr with `herdrTarget` / `"local"`). */
+export function resolveMachineRuntime(
+  machine: Pick<MachineConfig, "runtime" | "herdrTarget">,
+): MachineRuntime {
+  if (machine.runtime) return machine.runtime;
+  return { kind: "herdr", target: machine.herdrTarget || "local" };
 }
 
 export interface ResolvedWorkerRuntime {
@@ -183,17 +205,24 @@ export function parseSwarmConfig(input: unknown, sourceLabel = "swarm.json"): Sw
 
     const maxWorkers = m.maxWorkers ?? (inferredRole === "main" ? 0 : 2);
     const resolvedOs = m.os ?? fallbackOs;
+    const resolvedRuntime: MachineRuntime = m.runtime
+      ? m.runtime
+      : { kind: "herdr", target: m.herdrTarget ?? "local" };
+    const resolvedHerdrTarget =
+      resolvedRuntime.kind === "herdr" ? resolvedRuntime.target : (m.herdrTarget ?? "local");
 
     const labelSet = new Set(m.labels);
     labelSet.add(`machine=${machineName}`);
     labelSet.add(`os=${resolvedOs}`);
+    labelSet.add(`runtime=${resolvedRuntime.kind}`);
 
     machines[machineName] = {
       role: inferredRole,
       os: resolvedOs,
       hostname: m.hostname ?? machineName,
       allowedHosts: m.allowedHosts,
-      herdrTarget: m.herdrTarget,
+      runtime: resolvedRuntime,
+      herdrTarget: resolvedHerdrTarget,
       maxWorkers,
       labels: [...labelSet],
     };

@@ -4,6 +4,17 @@ A **worker machine** (macOS or Linux) runs **Herdr**, optional **Sheprd**, and t
 
 ## 1. Install Tools & Run Setup Wizard
 
+### Herdr worker or Rex worker
+
+Each worker machine chooses one terminal runtime during `mise run init` (or via `--runtime herdr|rex`):
+
+- **Herdr (default):** tabs are watched in **Sheprd** (desktop & mobile). Install Herdr (`curl -fsSL https://herdr.dev/install.sh | sh` on Linux or via Sheprd on macOS).
+- **Rex:** windows are watched in the **Rex** app (agents report status natively via OSC 7501).
+  - **Linux:** install the headless server (`curl -fsSL https://pkgs.superlogical.com/rex/install.sh | sh -s -- --channel preview`), then run `rex server install` (unprivileged `systemd --user`) or `rex server start`.
+  - **macOS:** install and open the Rex macOS app (the app hosts the local server; keep a logged-in GUI session active).
+  - Note: on a `role: "both"` machine using Rex for workers, the Lead agent still runs in Herdr/Sheprd.
+  - Mix Herdr and Rex worker machines freely against the same Board, and pin a task with `--label runtime=rex` or `--label runtime=herdr` when needed.
+
 ```bash
 git clone https://github.com/kodi/bordr-swarm.git ~/projects/bordr-swarm
 cd ~/projects/bordr-swarm

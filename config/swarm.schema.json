@@ -330,6 +330,18 @@
           "minimum": 5,
           "maximum": 9007199254740991
         },
+        "startupTimeoutSeconds": {
+          "default": 90,
+          "description": "Seconds a newly spawned worker has to reach its first idle/ready state before the dispatcher marks its tab `[BLOCKED]` and posts a terminal excerpt.",
+          "type": "integer",
+          "minimum": 5,
+          "maximum": 9007199254740991
+        },
+        "worktreeRoot": {
+          "description": "Optional base directory for Dispatcher-managed Git worktrees on Rex machines (defaults to `<repo>/../.swarm-worktrees/<slug>/<shortId>`).",
+          "type": "string",
+          "minLength": 1
+        },
         "claimWaitSeconds": {
           "default": 30,
           "description": "Reserved wait window in seconds for blocking claim operations.",
@@ -352,6 +364,11 @@
         "herdr": {
           "default": true,
           "description": "Subscribe to the local Herdr socket for tab, pane, and agent-status events (only for `herdrTarget: \"local\"`). `false` uses CLI polling only.",
+          "type": "boolean"
+        },
+        "rex": {
+          "default": true,
+          "description": "Follow `rex events -s <session> --json` on Rex worker machines so agent status changes and exits wake the dispatcher immediately. `false` uses CLI polling only.",
           "type": "boolean"
         }
       },
@@ -562,9 +579,48 @@
               "minLength": 1
             }
           },
+          "runtime": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "herdr"
+                  },
+                  "target": {
+                    "default": "local",
+                    "description": "Herdr target for this dispatcher. Recommended: \"local\" (local `herdr server` socket) or a saved `herdr machine list` label.",
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": ["kind"],
+                "additionalProperties": false,
+                "description": "Run worker agents in Herdr tabs (watched in Sheprd)."
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "rex"
+                  },
+                  "binary": {
+                    "description": "Optional path or executable name for the Rex CLI (defaults to \"rex\").",
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": ["kind"],
+                "additionalProperties": false,
+                "description": "Run worker agents in Rex windows (watched in the Rex app)."
+              }
+            ],
+            "description": "Terminal runtime hosting worker agents on this machine: `\"herdr\"` (watched in Sheprd) or `\"rex\"` (watched in the Rex app). Defaults to `{ \"kind\": \"herdr\", \"target\": \"local\" }`."
+          },
           "herdrTarget": {
-            "default": "local",
-            "description": "Herdr target for this dispatcher. Recommended: \"local\" (talks directly to the local `herdr server` socket). Can also be a saved `herdr machine list` label.",
+            "description": "Legacy back-compat alias for `runtime: { \"kind\": \"herdr\", \"target\": \"<value>\" }`. Defaults to \"local\".",
             "type": "string",
             "minLength": 1
           },
@@ -576,7 +632,7 @@
           },
           "labels": {
             "default": [],
-            "description": "Additional routing labels matched against task labels. `machine=<key>` and `os=<os>` are added automatically.",
+            "description": "Additional routing labels matched against task labels. `machine=<key>`, `os=<os>`, and `runtime=<kind>` are added automatically.",
             "type": "array",
             "items": {
               "type": "string",

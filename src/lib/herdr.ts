@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { ExecRunner } from "./board.ts";
+import { sanitizeAgentName } from "./runtime.ts";
 import {
   HerdrAgentListResultSchema,
   HerdrAgentSchema,
@@ -9,6 +10,7 @@ import {
   HerdrEnvelopeSchema,
   HerdrTabListResultSchema,
   HerdrWorkspaceListResultSchema,
+  type AgentStatus,
   type HerdrAgent,
   type HerdrAgentStatus,
   type HerdrTab,
@@ -17,7 +19,7 @@ import {
 
 const execFileAsync = promisify(execFile);
 
-export type { HerdrAgent, HerdrAgentStatus, HerdrTab, HerdrWorkspace };
+export type { AgentStatus, HerdrAgent, HerdrAgentStatus, HerdrTab, HerdrWorkspace };
 
 export interface SpawnedPaneResult {
   workspaceId: string;
@@ -41,16 +43,7 @@ const defaultRunner: ExecRunner = async (cmd, args, opts) => {
   return { stdout: res.stdout, stderr: res.stderr };
 };
 
-export function sanitizeHerdrAgentName(prefix: string, rawId = ""): string {
-  const cleanPrefix = prefix.toLowerCase().replace(/[^a-z0-9_-]/g, "");
-  const cleanId = rawId
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]/g, "-")
-    .replace(/^-+|-+$/g, "");
-  const combined = cleanId ? `${cleanPrefix || "w"}-${cleanId}` : cleanPrefix || "w-task";
-  const startsWithLetter = /^[a-z]/.test(combined) ? combined : `w-${combined}`;
-  return startsWithLetter.slice(0, 32);
-}
+export const sanitizeHerdrAgentName = sanitizeAgentName;
 
 function parseEnvelope(stdout: string): Record<string, unknown> {
   const trimmed = stdout.trim();

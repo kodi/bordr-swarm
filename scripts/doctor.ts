@@ -4,6 +4,7 @@ import {
   loadProjectsConfig,
   loadSwarmConfig,
   resolveCurrentMachineName,
+  resolveMachineRuntime,
   resolveReviewerConfig,
   validateSwarmAndProjects,
   type ProjectsConfig,
@@ -16,6 +17,7 @@ import {
   firstMeaningfulLine,
   runQuickCommand,
 } from "../src/lib/host-env.ts";
+import { REX_VERIFIED_VERSION, RexWhoamiSchema } from "../src/lib/schemas.ts";
 import { validateConfiguredReactors } from "../src/reactors/configured.ts";
 
 type CheckStatus = "ok" | "warn" | "fail";
@@ -45,6 +47,57 @@ function checkVersion(
 }
 
 const repoRoot = process.cwd();
+
+// Validate swarm.json first so we know which terminal runtime(s) this host needs.
+let loadedSwarm: SwarmConfig | null = null;
+let loadedProjects: ProjectsConfig | null = null;
+let currentMachineName: string | null = null;
+let swarmConfigResult: CheckResult;
+
+const swarmPath = process.env.SWARM_CONFIG_PATH ?? resolve(repoRoot, "config/swarm.json");
+if (!existsSync(swarmPath)) {
+  swarmConfigResult = {
+    name: "swarm config",
+    status: "warn",
+    detail: "missing config/swarm.json (run: mise run init)",
+  };
+} else {
+  try {
+    loadedSwarm = loadSwarmConfig(repoRoot, swarmPath);
+    currentMachineName = resolveCurrentMachineName(loadedSwarm);
+    const machineCfg = loadedSwarm.machines[currentMachineName]!;
+    const rt = resolveMachineRuntime(machineCfg);
+    swarmConfigResult = {
+      name: "swarm config",
+      status: "ok",
+      detail: `valid (this host="${currentMachineName}", role=${machineCfg.role}, os=${machineCfg.os}, runtime=${rt.kind}, maxWorkers=${machineCfg.maxWorkers})`,
+    };
+  } catch (err) {
+    swarmConfigResult = {
+      name: "swarm config",
+      status: "fail",
+      detail: err instanceof Error ? err.message.replaceAll("\n", " | ") : String(err),
+    };
+  }
+}
+
+const currentMachineCfg =
+  loadedSwarm && currentMachineName ? (loadedSwarm.machines[currentMachineName] ?? null) : null;
+const currentRuntime = currentMachineCfg ? resolveMachineRuntime(currentMachineCfg) : null;
+const isWorkerRole = Boolean(
+  currentMachineCfg &&
+  (currentMachineCfg.role === "worker" ||
+    currentMachineCfg.role === "both" ||
+    currentMachineCfg.maxWorkers > 0),
+);
+const needsRex = Boolean(isWorkerRole && currentRuntime?.kind === "rex");
+const needsHerdr =
+  !currentMachineCfg ||
+  currentMachineCfg.role === "main" ||
+  currentMachineCfg.role === "both" ||
+  currentRuntime?.kind === "herdr";
+const rexBin = currentRuntime?.kind === "rex" ? (currentRuntime.binary ?? "rex") : "rex";
+
 const results: CheckResult[] = [
   checkVersion("node", "node", ["--version"], { fixHint: "run: mise install" }),
   checkVersion("mise", "mise", ["--version"], { fixHint: "run: ./scripts/bootstrap.sh" }),
@@ -53,47 +106,28 @@ const results: CheckResult[] = [
     optional: true,
     fixHint: "run: mise install",
   }),
-  checkVersion("herdr", "herdr", ["--version"], {
-    fixHint: "install Herdr / Sheprd and ensure `herdr` is in PATH",
-  }),
+  ...(needsHerdr
+    ? [
+        checkVersion("herdr", "herdr", ["--version"], {
+          fixHint: "install Herdr / Sheprd and ensure `herdr` is in PATH",
+        }),
+      ]
+    : []),
+  ...(needsRex
+    ? [
+        checkVersion("rex", rexBin, ["version"], {
+          fixHint: "install Rex and ensure `rex` is in PATH",
+        }),
+      ]
+    : []),
   checkVersion("claude", "claude", ["--version"], {
     fixHint: "install Claude Code CLI (`claude`)",
   }),
   checkVersion("agy", "agy", ["--help"], { optional: true }),
   checkVersion("codex", "codex", ["--version"], { optional: true }),
   checkVersion("pi", "pi", ["--version"], { optional: true }),
+  swarmConfigResult,
 ];
-
-// Validate swarm.json and projects.json via Zod schemas
-let loadedSwarm: SwarmConfig | null = null;
-let loadedProjects: ProjectsConfig | null = null;
-let currentMachineName: string | null = null;
-
-const swarmPath = process.env.SWARM_CONFIG_PATH ?? resolve(repoRoot, "config/swarm.json");
-if (!existsSync(swarmPath)) {
-  results.push({
-    name: "swarm config",
-    status: "warn",
-    detail: "missing config/swarm.json (run: mise run init)",
-  });
-} else {
-  try {
-    loadedSwarm = loadSwarmConfig(repoRoot, swarmPath);
-    currentMachineName = resolveCurrentMachineName(loadedSwarm);
-    const machineCfg = loadedSwarm.machines[currentMachineName]!;
-    results.push({
-      name: "swarm config",
-      status: "ok",
-      detail: `valid (this host="${currentMachineName}", role=${machineCfg.role}, os=${machineCfg.os}, maxWorkers=${machineCfg.maxWorkers})`,
-    });
-  } catch (err) {
-    results.push({
-      name: "swarm config",
-      status: "fail",
-      detail: err instanceof Error ? err.message.replaceAll("\n", " | ") : String(err),
-    });
-  }
-}
 
 const projectsPath = process.env.PROJECTS_CONFIG_PATH ?? resolve(repoRoot, "config/projects.json");
 if (!existsSync(projectsPath)) {
@@ -241,21 +275,54 @@ results.push(
       },
 );
 
-// Check Herdr server status
-const herdrStatus = runQuickCommand("herdr", ["status", "server"]);
-results.push(
-  herdrStatus.ok
-    ? {
-        name: "herdr server",
-        status: "ok",
-        detail: firstMeaningfulLine(herdrStatus.output) || "running",
+// Check Herdr server status (when Herdr is used by Lead or workers)
+if (needsHerdr) {
+  const herdrStatus = runQuickCommand("herdr", ["status", "server"]);
+  results.push(
+    herdrStatus.ok
+      ? {
+          name: "herdr server",
+          status: "ok",
+          detail: firstMeaningfulLine(herdrStatus.output) || "running",
+        }
+      : {
+          name: "herdr server",
+          status: "warn",
+          detail: `${firstMeaningfulLine(herdrStatus.output) || "unreachable"} (run: herdr server start, or open Sheprd)`,
+        },
+  );
+}
+
+// Check Rex server status and version (when worker runtime is Rex)
+if (needsRex) {
+  const rexWhoami = runQuickCommand(rexBin, ["whoami", "--json"]);
+  if (!rexWhoami.ok) {
+    const hint =
+      process.platform === "darwin"
+        ? "open the Rex app so the local server is running"
+        : "run: rex server start (or rex server install)";
+    results.push({
+      name: "rex server",
+      status: "warn",
+      detail: `${firstMeaningfulLine(rexWhoami.output) || "unreachable"} (${hint})`,
+    });
+  } else {
+    let detail = "running";
+    let status: CheckStatus = "ok";
+    try {
+      const parsed = RexWhoamiSchema.parse(JSON.parse(rexWhoami.stdout));
+      const ver = parsed.rex_version ?? "unknown";
+      detail = `running (rex ${ver}, api rev ${parsed.api_revision ?? "?"}, ${parsed.session_count ?? 0} session(s))`;
+      if (parsed.rex_version && parsed.rex_version !== REX_VERIFIED_VERSION) {
+        status = "warn";
+        detail += ` — verified against ${REX_VERIFIED_VERSION}`;
       }
-    : {
-        name: "herdr server",
-        status: "warn",
-        detail: `${firstMeaningfulLine(herdrStatus.output) || "unreachable"} (run: herdr server start, or open Sheprd)`,
-      },
-);
+    } catch {
+      detail = firstMeaningfulLine(rexWhoami.output) || "running";
+    }
+    results.push({ name: "rex server", status, detail });
+  }
+}
 
 // Linux systemd linger check (prevents user services from stopping on SSH logout)
 const linger = detectLinuxLinger();
