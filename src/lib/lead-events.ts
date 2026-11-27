@@ -415,15 +415,16 @@ export function applyLiveBoardEventToState(
     if (channel === ctx.inboxChannel || channel.startsWith(ctx.projectChannelPrefix)) {
       const rootId = threadRootId(msg);
       const prevCount = state.seenThreadReplyCount?.[rootId];
+      // A root starts at 0 replies; a live reply advances a known count by one. An unknown count
+      // stays unknown (the next channel read records the real one).
+      const { [rootId]: _stale, ...otherCounts } = next.seenThreadReplyCount ?? {};
+      const nextCount = msg.re ? (prevCount === undefined ? undefined : prevCount + 1) : 0;
       next = {
         ...next,
         seenThreadLatestMsgId: { ...next.seenThreadLatestMsgId, [rootId]: msg.id },
         seenThreadLastSeenMs: { ...next.seenThreadLastSeenMs, [rootId]: ctx.nowMs },
-        seenThreadReplyCount: {
-          ...next.seenThreadReplyCount,
-          // A root starts at 0 replies; each live reply advances the count by one.
-          [rootId]: msg.re ? (prevCount ?? 0) + 1 : 0,
-        },
+        seenThreadReplyCount:
+          nextCount === undefined ? otherCounts : { ...otherCounts, [rootId]: nextCount },
       };
     }
   }

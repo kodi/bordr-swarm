@@ -10,6 +10,7 @@ import { BoardClient, type BoardThreadSummary, type ExecRunner } from "../src/li
 import { parseSwarmConfig } from "../src/lib/config.ts";
 import { HerdrClient } from "../src/lib/herdr.ts";
 import {
+  applyLiveBoardEventToState,
   collectLeadEvents,
   createEmptyLeadState,
   SEEN_THREAD_RETENTION_MS,
@@ -471,5 +472,48 @@ describe("LeadWatcher on the bus", () => {
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
+  });
+});
+
+describe("applyLiveBoardEventToState", () => {
+  const ctx = { inboxChannel: "inbox", projectChannelPrefix: "projects/", nowMs: 5 };
+  const reply = (id: string, re: string) =>
+    postedEvent(`c-${id}`, { ...agent(id, "progress", "worker-1"), channel: "projects/app", re });
+
+  it("advances a known reply count, leaves an unknown one unknown, and tracks the cursor", () => {
+    const known = applyLiveBoardEventToState(
+      { ...createEmptyLeadState(), seenThreadReplyCount: { msg_k_1: 2 } },
+      reply("msg_k_4", "msg_k_1"),
+      ctx,
+    );
+    assert.equal(known.seenThreadReplyCount?.msg_k_1, 3);
+    assert.equal(known.seenThreadLatestMsgId.msg_k_1, "msg_k_4");
+    assert.equal(known.tailCursor, "c-msg_k_4");
+
+    const unknown = applyLiveBoardEventToState(
+      createEmptyLeadState(),
+      reply("msg_u_9", "msg_u_1"),
+      ctx,
+    );
+    assert.equal(unknown.seenThreadReplyCount?.msg_u_1, undefined);
+    assert.equal(unknown.seenThreadLatestMsgId.msg_u_1, "msg_u_9");
+  });
+
+  it("keeps seenBlockedTaskIds in step with task transitions", () => {
+    const task = (type: string, state: string) =>
+      tailEvent({
+        cursor: type,
+        type,
+        payload: {},
+        message: { id: "msg_bt_1", channel: "projects/app", text: "t", task: { state } },
+      });
+    let s = applyLiveBoardEventToState(
+      createEmptyLeadState(),
+      task("task.blocked", "blocked"),
+      ctx,
+    );
+    assert.deepEqual(s.seenBlockedTaskIds, ["msg_bt_1"]);
+    s = applyLiveBoardEventToState(s, task("task.unblocked", "ready"), ctx);
+    assert.deepEqual(s.seenBlockedTaskIds, []);
   });
 });
