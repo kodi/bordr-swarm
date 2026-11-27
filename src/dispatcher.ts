@@ -2,9 +2,26 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { selectReconcileIntervalMs } from "./bus/bus.ts";
+import {
+  createDaemonEventSources,
+  describeHealth,
+  type DaemonEventWiring,
+} from "./bus/daemon-events.ts";
+import type { SwarmEvent } from "./bus/events.ts";
+import {
+  describeReactors,
+  executeEffects,
+  ReactorRegistry,
+  type EffectHandlers,
+  type Reactor,
+} from "./bus/reactor.ts";
+import { WakeScheduler } from "./bus/scheduler.ts";
+import { realTimers, type Timers } from "./bus/timers.ts";
 import { BoardClient, type BoardTask } from "./lib/board.ts";
 import {
   BUILTIN_AGENT_KINDS,
+  DEFAULT_RECONCILE_INTERVAL_SECONDS,
   loadProjectsConfig,
   loadProjectsConfigOptional,
   loadSwarmConfig,
@@ -64,6 +81,16 @@ import {
   type ActiveTask,
   type ThreadSignal,
 } from "./lib/task-fsm.ts";
+import {
+  createConfiguredEffectHandlers,
+  createConfiguredReactors,
+  type CommandRunner,
+} from "./reactors/configured.ts";
+import {
+  createDispatcherWakeReactor,
+  createProjectsReloadReactor,
+  type DispatcherWakeContext,
+} from "./reactors/dispatcher-wake.ts";
 
 const STARTUP_GRACE_MS = 20_000;
 /** Page size for open-task discovery; `listTasks` follows the cursor across pages. */
@@ -100,22 +127,6 @@ function log(level: "INFO" | "WARN" | "ERROR", message: string): void {
   const line = `[${ts}] [${level}] ${message}`;
   if (level === "ERROR") console.error(line);
   else console.log(line);
-}
-
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((resolvePromise) => {
-    if (signal?.aborted) {
-      resolvePromise();
-      return;
-    }
-    const timer = setTimeout(done, ms);
-    function done(): void {
-      clearTimeout(timer);
-      signal?.removeEventListener("abort", done);
-      resolvePromise();
-    }
-    signal?.addEventListener("abort", done, { once: true });
-  });
 }
 
 function detectAvailableAgentKinds(swarm: SwarmConfig): Set<string> {
@@ -159,6 +170,14 @@ export class SwarmDispatcher {
   private lastPersistedFingerprint: string | null = null;
   private lastProjectsMtimeMs = 0;
   private registryPublishedOnce = false;
+  /** Live event wiring; null means polling only (the pre-bus behavior). */
+  private readonly events: DaemonEventWiring | null;
+  private readonly timers: Timers;
+  private scheduler: WakeScheduler | null = null;
+  /** Built-in (and configured) "when X, do Y" rules, run for every bus event. */
+  readonly reactors: ReactorRegistry<DispatcherWakeContext>;
+  /** Runs `run_command` / `post` effects of configured reactors (keeps their cooldowns). */
+  private readonly configuredEffects: EffectHandlers;
 
   constructor(params: {
     repoRoot: string;
@@ -174,6 +193,12 @@ export class SwarmDispatcher {
     availableAgentKinds: Set<string>;
     dryRun: boolean;
     statePath?: string;
+    /** Live Board/Herdr events; omitted, the dispatcher polls exactly as before. */
+    events?: DaemonEventWiring;
+    timers?: Timers;
+    /** Additional reactors (config-driven ones), run after the built-ins. */
+    extraReactors?: Array<Reactor<DispatcherWakeContext>>;
+    commandRunner?: CommandRunner;
   }) {
     this.repoRoot = params.repoRoot;
     this.swarm = params.swarm;
@@ -188,6 +213,25 @@ export class SwarmDispatcher {
     this.availableAgentKinds = params.availableAgentKinds;
     this.dryRun = params.dryRun;
     this.statePath = params.dryRun ? null : (params.statePath ?? null);
+    this.events = params.events ?? null;
+    this.timers = params.timers ?? realTimers;
+    this.reactors = new ReactorRegistry<DispatcherWakeContext>(
+      [
+        createDispatcherWakeReactor({
+          projectChannelPrefix: this.swarm.board.projectChannelPrefix,
+        }),
+        createProjectsReloadReactor({ projectsConfigPath: this.projectsConfigPath }),
+        ...createConfiguredReactors(this.swarm.reactors, "dispatcher"),
+        ...(params.extraReactors ?? []),
+      ],
+      log,
+    );
+    this.configuredEffects = createConfiguredEffectHandlers({
+      board: this.board,
+      log,
+      dryRun: this.dryRun,
+      runner: params.commandRunner,
+    });
     if (this.projectsConfigPath && existsSync(this.projectsConfigPath)) {
       this.lastProjectsMtimeMs = statSync(this.projectsConfigPath).mtimeMs;
     }
@@ -197,6 +241,74 @@ export class SwarmDispatcher {
   requestStop(): void {
     this.stopping = true;
     this.stopController.abort();
+  }
+
+  /** Herdr pane IDs and tab IDs of every tracked session (active and parked). */
+  private getTrackedHerdrIds(): { panes: Set<string>; tabs: Set<string> } {
+    const panes = new Set<string>();
+    const tabs = new Set<string>();
+    const add = (task: ActiveTask): void => {
+      const impl = getImplHandle(task.phase);
+      const rev = getReviewerHandle(task.phase);
+      for (const h of rev ? [impl, rev] : [impl]) {
+        if (h.paneId) panes.add(h.paneId);
+        if (h.tabId) tabs.add(h.tabId);
+      }
+    };
+    for (const task of this.activeWorkers.values()) add(task);
+    for (const parked of this.parkedTabs.values()) {
+      add(parked.task);
+      if (parked.tabId) tabs.add(parked.tabId);
+    }
+    return { panes, tabs };
+  }
+
+  /** Periodic reconcile interval for the current source health and workload. */
+  currentIntervalMs(): number {
+    const defaults = this.swarm.workerDefaults;
+    return selectReconcileIntervalMs({
+      sourcesHealthy: this.events?.health.allHealthy ?? false,
+      // Idle reminders and lease renewals are clock-driven, so keep the poll cadence while working.
+      timeSensitiveWork: this.activeWorkers.size > 0,
+      pollMs: defaults.pollIntervalSeconds * 1000,
+      reconcileMs: (defaults.reconcileIntervalSeconds ?? DEFAULT_RECONCILE_INTERVAL_SECONDS) * 1000,
+    });
+  }
+
+  /** Bus subscriber: track source health and wake the scheduler for relevant events. */
+  handleEvent(event: SwarmEvent): void {
+    if (event.kind === "source.health") {
+      if (this.events?.health.apply(event)) {
+        log(
+          event.healthy ? "INFO" : "WARN",
+          describeHealth(this.events.health, this.currentIntervalMs()),
+        );
+        this.scheduler?.refreshInterval();
+      }
+      return;
+    }
+    const { panes, tabs } = this.getTrackedHerdrIds();
+    const effects = this.reactors.collect(event, {
+      trackedTaskIds: this.getTrackedTaskIds(),
+      trackedPaneIds: panes,
+      trackedTabIds: tabs,
+    });
+    if (effects.length > 0) void executeEffects(effects, this.effectHandlers(), log);
+  }
+
+  /** How this dispatcher runs reactor effects (Lead-only effects are not handled here). */
+  private effectHandlers(): EffectHandlers {
+    return {
+      ...this.configuredEffects,
+      wake: (effect) => this.scheduler?.wake(effect.reason),
+      // The tick's mtime check decides whether projects.json really changed.
+      projects_reload: () => this.scheduler?.wake("projects_reload"),
+    };
+  }
+
+  /** Keeps per-pane Herdr agent-status subscriptions in line with what is tracked. */
+  private syncPaneSubscriptions(): void {
+    this.events?.paneWatcher?.setWatchedPanes(this.getTrackedHerdrIds().panes);
   }
 
   /**
@@ -361,6 +473,8 @@ export class SwarmDispatcher {
       await this.runTick();
     } finally {
       this.persistState();
+      // Covers spawns, adoptions, and sessions restored from the state file.
+      this.syncPaneSubscriptions();
     }
   }
 
@@ -959,6 +1073,8 @@ export class SwarmDispatcher {
       `Starting Worker Dispatcher on "${this.machineName}" (herdrTarget=${machineCfg.herdrTarget}, maxWorkers=${machineCfg.maxWorkers}, defaultAgent=${this.swarm.workerDefaults.defaultAgent}, installedAgents=[${[...this.availableAgentKinds].join(",")}], dryRun=${this.dryRun})`,
     );
 
+    if (!once) log("INFO", describeReactors("Dispatcher", this.reactors.names));
+
     if (machineCfg.maxWorkers <= 0 && !this.dryRun) {
       log(
         "WARN",
@@ -966,14 +1082,37 @@ export class SwarmDispatcher {
       );
     }
 
-    while (!this.stopping) {
+    if (once) {
       try {
         await this.tick();
       } catch (err) {
         log("ERROR", `Dispatcher tick failed: ${err instanceof Error ? err.message : String(err)}`);
       }
-      if (once || this.stopping) break;
-      await sleep(this.swarm.workerDefaults.pollIntervalSeconds * 1000, this.stopController.signal);
+    } else if (!this.stopping) {
+      // Ticks run on wake-ups from live events (debounced) plus a periodic reconcile; with no
+      // healthy source the period is pollIntervalSeconds, i.e. the old polling loop.
+      const scheduler = new WakeScheduler({
+        run: () => this.tick(),
+        intervalMs: () => this.currentIntervalMs(),
+        timers: this.timers,
+        onError: (err) =>
+          log(
+            "ERROR",
+            `Dispatcher tick failed: ${err instanceof Error ? err.message : String(err)}`,
+          ),
+      });
+      this.scheduler = scheduler;
+      const unsubscribe = this.events?.bus.subscribe((event) => this.handleEvent(event));
+      const stopped = new Promise<void>((resolveStop) => {
+        if (this.stopController.signal.aborted) resolveStop();
+        else
+          this.stopController.signal.addEventListener("abort", () => resolveStop(), { once: true });
+      });
+      scheduler.start();
+      await stopped;
+      unsubscribe?.();
+      await scheduler.stop();
+      this.scheduler = null;
     }
 
     // Graceful stop: persist and exit. Tabs stay open and claims stay held so agents keep working
@@ -1008,19 +1147,34 @@ async function main(): Promise<void> {
     ? readFileSync(reviewerPromptPath, "utf8")
     : "";
 
+  const board = new BoardClient({
+    url: swarm.board.url,
+    scope: swarm.board.scope,
+    boardName: swarm.board.boardName,
+    binary: process.env.BOARD_CLI_BIN,
+    onWarn: (message) => log("WARN", message),
+  });
+  const once = flags.once;
+  const sources = once
+    ? null
+    : createDaemonEventSources({
+        swarm,
+        board,
+        herdrTarget: machineCfg.herdrTarget,
+        // The dispatcher only acts on project queues, so it tails just that prefix.
+        tailChannel: swarm.board.projectChannelPrefix,
+        watchFiles: [projectsConfigPath],
+        log,
+      });
+
   const dispatcher = new SwarmDispatcher({
     repoRoot,
     swarm,
     projects,
     projectsConfigPath,
     machineName,
-    board: new BoardClient({
-      url: swarm.board.url,
-      scope: swarm.board.scope,
-      boardName: swarm.board.boardName,
-      binary: process.env.BOARD_CLI_BIN,
-      onWarn: (message) => log("WARN", message),
-    }),
+    board,
+    events: sources ?? undefined,
     herdr: new HerdrClient({ target: machineCfg.herdrTarget }),
     promptTemplate,
     reviewerPromptTemplate,
@@ -1035,8 +1189,15 @@ async function main(): Promise<void> {
   };
   process.on("SIGINT", onSignal);
   process.on("SIGTERM", onSignal);
+  // Never leave a `board tail` child behind, even on an unexpected exit.
+  process.on("exit", () => sources?.killNow());
 
-  await dispatcher.runLoop(flags.once);
+  sources?.start();
+  try {
+    await dispatcher.runLoop(once);
+  } finally {
+    await sources?.stop();
+  }
 }
 
 const isMain =

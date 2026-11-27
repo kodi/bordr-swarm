@@ -131,7 +131,7 @@ interface Reactor {
 
 ### Slice 1: Board tail source
 
-Status: `[ ]` Not started
+Status: `[x]` Done
 
 - Goal: a supervised, resumable stream of typed Board events.
 - Why here: it proves the riskiest external assumption and nothing else depends on Herdr.
@@ -146,7 +146,7 @@ Status: `[ ]` Not started
 
 ### Slice 2: Herdr event source
 
-Status: `[ ]` Not started
+Status: `[x]` Done
 
 - Goal: live tab, pane and agent-status events from the local Herdr server.
 - Why here: independent of Slice 1; isolates the unstable private protocol behind one module.
@@ -161,7 +161,7 @@ Status: `[ ]` Not started
 
 ### Slice 3: Bus core and wake scheduler
 
-Status: `[ ]` Not started
+Status: `[x]` Done
 
 - Goal: one place where events are published, fanned out, and turned into debounced wake-ups.
 - Why here: both daemons need it before either can move.
@@ -176,7 +176,7 @@ Status: `[ ]` Not started
 
 ### Slice 4: Dispatcher on the bus
 
-Status: `[ ]` Not started
+Status: `[x]` Done
 
 - Goal: a ready task is claimed, and an agent status change is acted on, within about a second.
 - Why here: the dispatcher's logic is already level-triggered, so it is the low-risk first consumer.
@@ -192,7 +192,7 @@ Status: `[ ]` Not started
 
 ### Slice 5: Lead Watcher on the bus
 
-Status: `[ ]` Not started
+Status: `[x]` Done
 
 - Goal: no lost mentions, sub-second acknowledgement, and no per-channel polling.
 - Why here: it changes edge-triggered behavior, so it follows the lower-risk dispatcher move.
@@ -209,7 +209,7 @@ Status: `[ ]` Not started
 
 ### Slice 6: Reactor registry for built-in reactions
 
-Status: `[ ]` Not started
+Status: `[x]` Done
 
 - Goal: every built-in "when X, do Y" is a named reactor with its own tests.
 - Why here: the bus exists and both daemons use it, so this is a refactor with a stable target.
@@ -223,7 +223,7 @@ Status: `[ ]` Not started
 
 ### Slice 7: Config-driven reactors
 
-Status: `[ ]` Not started
+Status: `[x]` Done
 
 - Goal: a user can add "when a task blocks, notify me" without touching the code.
 - Why here: needs the registry.
@@ -238,7 +238,7 @@ Status: `[ ]` Not started
 
 ### Slice 8: Pipeline stage seam (behavior-preserving)
 
-Status: `[ ]` Not started
+Status: `[ ]` Deferred to a follow-up plan (see the design note below and Working Notes)
 
 - Goal: review is one implementation of a `Stage` interface; the task FSM composes stages.
 - Why here: last, because it is the largest refactor and nothing else depends on it.
@@ -249,9 +249,43 @@ Status: `[ ]` Not started
 - Verification: unchanged tests pass; `npm run check`.
 - Dependencies: Slices 4 and 6.
 
+#### Design note (written before coding, 2026-11-27)
+
+Proposed interface:
+
+```ts
+type StageOutcome =
+  | { kind: "continue"; next: StageState; effects: TaskEffect[] } // still running
+  | { kind: "pass"; summary: string; effects: TaskEffect[] } // next stage, or complete
+  | { kind: "retry"; round: number; effects: TaskEffect[] } // back to the implementer
+  | { kind: "escalate"; reason: string; effects: TaskEffect[] }; // block + park for a human
+
+interface Stage<S extends { kind: string }> {
+  name: string; // "review"; later "tests", "pr"
+  /** Entry condition, checked while implementing (e.g. a READY_FOR_REVIEW handoff with a diff). */
+  enter(task: ActiveTask, signal: ThreadSignal): { effects: TaskEffect[]; state: S } | null;
+  step(state: S, task: ActiveTask, obs: TaskObservation): StageOutcome;
+  sessions(state: S): SessionHandle[]; // for reconcile, pane subscriptions, orphan sweep
+}
+
+type TaskPhase =
+  | { kind: "implementing"; impl: ManagedSession }
+  | { kind: "stage"; impl: SessionHandle; stage: StageState }; // StageState = union of stage states
+```
+
+`TaskPhase` composes stages by holding exactly one stage state; `fixing` becomes the review stage's `retry` outcome, which returns to `implementing` with a round counter carried in the stage's own state. No boolean flags are involved.
+
+What was learned (why it was not implemented here):
+
+1. The `reviewing` and `fixing` variants of `TaskPhase` are constructed directly by `tests/fsm.test.ts` and `tests/reviewer.test.ts`, and persisted 1:1 by `PersistedDispatcherStateSchema` (`version: 1`, Plan A). Any seam that changes `TaskPhase` must change those tests and needs a v2 state migration. The scope guard forbids the first, and the second is a durability change that deserves its own review.
+2. A seam that keeps `TaskPhase` unchanged can only move code (the review branches of `stepTask`, the `spawn_reviewer` and `resume_implementer_for_fix` executors, and `observeThreadSignal`) behind function boundaries. Every phase switch still names `reviewing`/`fixing`, so adding a stage would still touch the same four files. That is churn without the benefit.
+3. Plan C replaces review handoff detection (text markers to labels), which is exactly the `enter`/signal half of this interface. Doing the seam first would be rewritten by Plan C.
+
+Recommendation: a follow-up plan after Plan C that introduces `{ kind: "stage" }` together with a `version: 2` dispatcher state (and a v1 → v2 loader), updates the FSM and reviewer tests deliberately, and lands review as the first `Stage`.
+
 ### Slice 9: Docs
 
-Status: `[ ]` Not started
+Status: `[x]` Done
 
 - Update `docs/architecture.md` (diagrams and the polling language), README (latency and "what it feels like" claims, reactor configuration), `AGENTS.md` (bus, reactor and source conventions), and the setup guides if any command changed.
 - Verification: `npm run check`; read the docs against the running system.
@@ -296,6 +330,52 @@ Status: `[ ]` Not started
 
 - 2026-11-27: Plan written from a code review. The tail event envelope, the sampled event types, the process-group kill requirement, the Herdr socket framing and the `events.subscribe` response were checked by hand on one machine (Vercel CLI 66.6.0, Herdr 0.9.5). Nothing was run end to end and no code has been changed.
 
+- 2026-11-27 (Slice 1): `src/bus/events.ts` (`SwarmEvent`, `parseBoardTailLine`, `LineSplitter`, `parseHerdrEventLine`), `src/bus/board-tail-source.ts` (`BoardTailSource`), `src/bus/timers.ts` (injectable `Timers`). `BoardClient.buildTailCommand` builds the args with the same `--url`/`--name`/`--scope` handling as every other call (so `vb tail` works in the e2e stack). `BoardMessageSchema` gained optional `re`, `thread`, and `labels`. Fixture: `tests/fixtures/board-tail-sample.ndjson` (one sanitized live event per observed type).
+  - **OQ3:** a live 100-event sample contained `message.posted`, `message.edited`, `reaction.added`, and `task.{created,ready,claimed,completed,failed,blocked,expired,released,canceled}`. A lapsed lease is `task.expired` (the message snapshot then says `ready`). `task.unblocked` and `task.renewed` were not in the sample; both are typed ops, and any other `task.*` maps to `op: "other"`. Each task event carries the root message snapshot (with `task { state, claim, blocked, ... }`) as of the event, so `normalizeBoardTask({ message })` works unchanged.
+  - **OQ2:** a rejected `--after` (a bogus string or a malformed `x1.` cursor) makes the CLI exit with code 2 and print a _pretty-printed_ (multi-line) JSON error on stdout with `"reason": "invalid_cursor"` (`after: <value> isn't a cursor here or a message's ID`). A message ID is accepted as `--after` too. An old message ID from many hours earlier was still accepted and replayed what followed it; how long a cursor stays valid was not determined beyond that. The supervisor detects the error line, calls `onCursorRejected`, and restarts without `--after`.
+  - **OQ1:** not verified (no way to cut the network safely on this host). The supervisor restarts the child with capped exponential backoff (1s doubling to 60s, reset once the stream has been up for 3s or delivers an event) and has a stall watchdog (default 10 min without output): it restarts the stream quietly, without a health transition, resuming from the last cursor.
+  - Stop sends `SIGTERM` to the process group (spawned `detached: true`), escalates to `SIGKILL` after 3s, and never restarts afterwards. A manual run against the live board printed the reply posted from another shell about 2s after posting, and `pgrep` found no `board tail` process after stop.
+- 2026-11-27 (Slice 2): `src/bus/herdr-event-source.ts` (`HerdrEventSource`). Socket path from `herdr status server` (`socket: <path>`), falling back to `~/.config/herdr/herdr.sock`; re-discovered on every reconnect of the main connection.
+  - Event lines on Herdr 0.9.5 are `{ "event": "tab_closed", "data": { "type": "tab_closed", "tab_id", "workspace_id" } }`: names use **underscores**, not the dotted subscription names. The parser accepts both. Closing a tab whose shell is alive emitted `tab_closed` but no `pane_closed`; a shell that exits emitted `pane_exited`.
+  - **OQ4:** `herdr api schema --json` lists only `events.subscribe` and `events.wait`; there is no unsubscribe. Subscriptions are per connection, so each watched pane gets its own connection (`setWatchedPanes`), and dropping a pane closes it. The main connection holds `tab.closed`, `pane.exited`, `pane.closed`.
+  - Health follows the main connection: healthy on `subscription_started`, unhealthy (logged once until it recovers) on connect failure, a rejected or unanswered subscribe (10s), an unparseable line, or a close. Every connection reconnects with capped backoff and re-subscribes. A non-local `herdrTarget` disables the source.
+  - **OQ5:** not verified (needs a live agent in a `--no-focus` pane). The CLI reconcile still covers it.
+  - Manual check: the source against the local server printed `herdr.tab_closed` for a scratch tab closed from another shell.
+- 2026-11-27 (Slice 3): `src/bus/bus.ts` (`Bus`, `SourceHealth`, `selectReconcileIntervalMs`), `src/bus/scheduler.ts` (`WakeScheduler`), `src/bus/fs-watch-source.ts` (`FsWatchSource`). Config: `lead.reconcileIntervalSeconds`, `workerDefaults.reconcileIntervalSeconds` (optional, default 60 via `DEFAULT_RECONCILE_INTERVAL_SECONDS`), and a top-level `events: { boardTail, herdr }` kill switch (both on when omitted). The keys are optional in the resolved `SwarmConfig` type so existing test fixtures compile unchanged.
+  - Deviation: there is no separate `TimerSource`. The scheduler owns the periodic timer and passes `periodic: true` to the tick it starts, so the event union keeps `timer.reconcile` only for reactors. The periodic deadline is measured from the previous periodic run, so a steady stream of events cannot postpone the full reconcile forever.
+  - Deviation: `selectReconcileIntervalMs` keeps the poll cadence while time-based work is in flight (dispatcher with tracked tasks, Lead with open sessions). Idle reminders, lead idle-close, and startup grace are clock-driven transitions with no event behind them; stretching ticks to 60s would delay them. The slow interval applies when the machine is idle, which is where the polling cost was.
+  - `FsWatchSource` watches the parent directory (atomic `rename` replaces the inode). `prompts/` is not watched: both prompt templates are already read from disk at every spawn.
+- 2026-11-27 (Slice 4): `runLoop` runs ticks through `WakeScheduler` (the first tick is immediate; `--once` still runs a single tick without the scheduler). Sources are built by `createDaemonEventSources` (`src/bus/daemon-events.ts`, shared with Lead): the dispatcher tails only `board.projectChannelPrefix`, watches `projects.json`, and subscribes to Herdr. `SwarmDispatcher` takes the wiring as an optional `events` parameter; without it there is no enabled source and the scheduler period is `pollIntervalSeconds`, so the old loop is reproduced exactly (all 29 existing `tests/dispatcher.test.ts` tests pass unmodified).
+  - Wake rules are the pure `shouldWakeDispatcher` (`src/reactors/dispatcher-wake.ts`): any event on a tracked task; `created`/`ready`/`unblocked`/`released`/`expired`/`other` on an untracked task under the prefix; a reply in a tracked thread (review handoff and verdicts); Herdr events for tracked panes or tabs; a `projects.json` change.
+  - Per-pane status subscriptions are re-synced at the end of every tick from active and parked tasks, which covers spawns, orphan adoption, and sessions restored from Plan A's state file.
+  - Deviation: the `projects.json` mtime comparison stays as the reload decision; `FsWatchSource` only wakes the tick. A missed or spurious watch event then costs latency at most. Nothing new is persisted: the dispatcher is level-triggered and does not need a cursor.
+  - A source that goes down or recovers logs one line (`Live events degraded (polling) [board=down, herdr=live]; periodic reconcile every 15s.`) and re-arms the periodic timer.
+  - Manual check (dry run against the live board on a scratch prefix, intervals set to 120s): the tick for a newly created task ran about 4.5s after invoking `vercel board tasks create`, CLI round trip included, instead of up to 120s. `SIGTERM` stopped it at once and `pgrep` found no `board tail` child afterwards.
+- 2026-11-27 (Slice 5): Lead Watcher tails the whole board (unfiltered), resuming from `LeadWatcherState.tailCursor`. Board events are **queued** by the bus subscriber and drained, in order, at the start of the next tick, so live handling and the catch-up reads never interleave. An event-woken tick does no channel reads: it drains live events (👀 directly on the message ID, wake events, registry sync when the registry channel changed), then reconciles sessions and dispatches. A periodic tick (first tick, interval, `tick()` with no argument, any tick while the Board stream is down, or after a rejected cursor via `requestReconcile`) also runs the old full poll (`collectCatchUpEvents`). The existing `tests/lead-watcher.test.ts` passes unmodified.
+  - Missed-mention fix: state keeps `seenThreadReplyCount`. `selectThreadsNeedingRead` picks project threads whose reply count advanced by more than one and whose latest message does not already wake Lead; those threads are read in full and every message after the seen marker is checked. Regression tests in `tests/lead-bus.test.ts` show the old latest-only check returns 0 events for mention-then-reply, and the new path returns the mention.
+  - De-duplication: `handledMessageIds` (last 1000) plus the seen markers. A live message is skipped if it is already handled or is its thread's seen marker (a replay after `--after`). The catch-up path skips handled IDs and advances markers so it does not report what the live path handled.
+  - Pruning: `seenThreadLastSeenMs` is refreshed by channel reads and live events; markers not refreshed for 14 days are dropped (legacy entries start their clock on first load). The loader is tolerant: a pre-bus state file loads unchanged.
+  - Lead keeps the 10s poll cadence while sessions are open or events are queued (idle-close, startup grace); idle with a healthy stream it reconciles every `reconcileIntervalSeconds`. Herdr events for Lead's own panes or tabs wake it, and Lead session panes are watched for agent-status changes.
+  - Manual check (dry run against the live board, inbox pointed at a scratch channel, intervals 120s): the post was detected less than a second after `vercel board post` returned, with no channel read; `SIGTERM` stopped it cleanly with no `board tail` child left.
+- 2026-11-27 (Slice 6): `src/bus/reactor.ts` holds the `Reactor` interface, `ReactorRegistry` (per-reactor isolation for both `matches` and `react`, duplicate names rejected), the `ReactorEffect` union, and `executeEffects` (one handler per effect type; failures and unsupported effect types are logged, never fatal). Built-ins: `src/reactors/dispatcher-wake.ts` (`dispatcher-wake`, `projects-reload`) and `src/reactors/lead.ts` (`inbox-ack`, `lead-wake`, `registry-sync`, `lead-session-wake`). Each daemon logs its reactor list at startup.
+  - Deviation from the interface sketch: configuration (channels, profile, paths) is bound when a reactor is created, and `ctx` carries only the daemon's live read-only view (tracked task, pane, and tab IDs; Lead session panes). That keeps `matches(event)` pure and usable at receipt time.
+  - Lead runs Board-event reactors when the tick drains its queue, after the replay/duplicate check, so a reactor never sees an already-handled message. At receipt it only asks `matchesAny` to decide whether to wake. Lead's own effects (`lead_event`, `react`, `registry_sync`) feed triage directly; other effects are deferred until after triage.
+- 2026-11-27 (Slice 7): `swarm.json` `reactors[]` (`ConfiguredReactorSchema`: `name`, `enabled`, `on` (selector or list, including `task.*` / `message.*`), `runOn`, `match { channel, labels }`, `run { command, timeoutSeconds } | { post { channel, text, profile? } }`, `cooldownSeconds` default 30; duplicate names rejected). Implementation: `src/reactors/configured.ts`. Commands run with `spawn(..., { shell: false })`, the argv comes from config only, and the event JSON goes to stdin. `post` text placeholders are `{type} {channel} {id} {thread} {author} {state} {text}`; the channel always comes from config. `mise run doctor` reports a missing command (fail), a dispatcher reactor whose channel is outside the dispatcher's prefix (warn), and a `post` reactor without a cooldown (warn).
+  - **OQ6 (answered differently from the default assumption):** reactors run in **one** daemon, chosen per reactor with `runOn`, default `"lead"`. "Both" would run every reactor once per worker machine, plus once more on a `both` machine. Lead sees the whole board, and there is one Lead per swarm. `runOn: "dispatcher"` runs on every worker and only sees the project prefix; it is for per-machine local commands.
+  - Loop prevention: a reactor never matches a message authored by its own posting profile (`reactor-<name>` unless set), and the executor's `CooldownGate` allows one run per `cooldownSeconds`. A test drives an "echo every #ops post into #ops" rule through both guards.
+  - Lead runs configured effects after triage in the same tick (`runDeferredEffects`), so 👀 and Lead prompts are never delayed by a slow command. Dry-run logs instead of running.
+  - Manual check: a non-dry-run Lead Watcher on scratch channels with `{ on: "message.posted", match: { channel: "scratch/..." }, run: { command: ["append.sh", "<file>"] } }` appended the event JSON about 5s after the post (behind that tick's triage). Process note: its startup catch-up also picked up an earlier probe post in the scratch inbox and spawned a real Lead tab. I closed it before it was prompted; use a fresh inbox channel for probes like this.
+- 2026-11-27 (Slice 8): not implemented; deferred to a follow-up plan per the scope guard. The design note under Slice 8 records the proposed `Stage` interface and the reasons: `TaskPhase`'s review variants are fixed by the FSM and reviewer tests and by the v1 persisted state, and Plan C rewrites review signal detection. No code changed for this slice.
+- 2026-11-27 (Slice 9): `docs/architecture.md` gains "Live Events, Wake-ups, and Reactors" (with a diagram) and drops the polling language from the overview diagram, the lifecycle sequence, and the component descriptions. The README's "What It Feels Like" now describes the event-driven latency, and a new "Live Events and Reactors" section shows reactor configuration. `AGENTS.md` records the bus, source, and reactor conventions. No command changed, so the setup guides are untouched.
+- 2026-11-27 (local review and e2e): a `/code-review` pass over the branch found seven issues, all fixed in `ea561fc` with regression tests.
+  - Timers were `unref()`'d, so a daemon with no healthy source could exit after its first tick. They are now ref'd; every component clears its timers on stop.
+  - Lead queues drained wake events before the catch-up read, so a failing read cannot drop them.
+  - A live event older than the last catch-up start (with a 30s skew margin, using the envelope `createdAt`) or already handled now only advances the cursor: no stale wake, no seen-marker regression, no reply-count drift.
+  - Configured Lead reactors run for every live event, including ones Lead's own dedup skips.
+  - Herdr pane subscriptions reopen after `stop()`/`start()`.
+  - Doctor ignores disabled reactors' commands.
+  - e2e: `tests/e2e/src/tests/event-bus.test.ts` adds two tests against the real `vb tail` and Herdr in the compose stack. (1) With `pollIntervalSeconds`/`reconcileIntervalSeconds` set to 120, a new task is claimed by event within the 20s bound, and its tab closes on the `task.completed` event. (2) Killing the `vb tail` child logs degraded mode, a task still completes, health recovers, and a graceful stop leaves no `tail` process. The full suite (15 tests) passes. Lead Watcher has no e2e harness in the stack (workers only), so its live path is covered by `tests/lead-bus.test.ts` and the manual runs above.
+
 ## Next Slice
 
-Start with **Slice 1**. First read Plan A's Working Notes. Then read `BoardClient` in `src/lib/board.ts` and `BoardMessageSchema` in `src/lib/schemas.ts`, capture a few live events with `vercel board tail --last 20 --json`, sanitize them into fixtures, and settle Open Questions 1–3. Verification is the parser and supervisor tests plus `npm run check`. No blockers; Slice 2 can run in parallel.
+Slices 1–7 and 9 are implemented; Slice 8 is deferred (see its design note). Remaining: the Testing Plan's final manual check on a `both` machine after merge (inbox 👀 latency, task-to-tab latency, killing the tail child, stopping the Herdr server, mention-then-reply), and a follow-up plan for the Stage seam after Plan C.

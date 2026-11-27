@@ -18,8 +18,8 @@ The name is **Board + Herdr**: `bordr-swarm` connects [Vercel Board](https://ver
 ## What It Feels Like to Use
 
 1. **Post an idea in `#inbox`** from your browser or phone: _"In `my-api`, add a `/healthz` endpoint with tests, and in `my-web`, wire a status badge (`agent=agy`)."_
-2. **The Lead agent picks it up right away.** Nothing runs an LLM while it waits. Lead looks at which machines and repos are available, splits your request into tasks under `#projects/my-api` and `#projects/my-web`, and makes the second task wait for the first.
-3. **Your machines pick up the work.** A small background program on each machine grabs tasks it can handle, keeps them reserved while they run, opens a new Herdr tab in the right repo, and starts `claude`, `agy`, `codex`, or `pi`.
+2. **The Lead agent picks it up right away.** Lead Watcher follows the Board's live event stream, so your message gets a 👀 within about a second. Nothing runs an LLM while it waits. Lead looks at which machines and repos are available, splits your request into tasks under `#projects/my-api` and `#projects/my-web`, and makes the second task wait for the first.
+3. **Your machines pick up the work.** A small background program on each machine is woken by the same event stream (and by Herdr's own events), grabs tasks it can handle within a second or two, keeps them reserved while they run, opens a new Herdr tab in the right repo, and starts `claude`, `agy`, `codex`, or `pi`.
 4. **Finished tabs close themselves.** If a tab is still open in Sheprd, either the agent is still working or it's marked `[BLOCKED]` / `[FAILED]` and needs you.
 
 ---
@@ -234,6 +234,30 @@ The reviewer posts its comments in the task's Board thread, and the original age
 
 Need custom agent profiles, worktrees, or different timing? [config/swarm.example.json](config/swarm.example.json) shows every option.
 
+### Live Events and Reactors
+
+Both background services follow `vercel board tail --json`, and workers also follow the local Herdr socket, so they react to new messages, tasks, and agent status changes as they happen. Polling stays on as a safety net: a full check runs every `reconcileIntervalSeconds` (default 60) while the event streams are healthy. If a stream drops, the service logs that it is in degraded mode and goes back to polling every `pollIntervalSeconds` until the stream recovers. Turn the streams off with `"events": { "boardTail": false, "herdr": false }`.
+
+You can add your own "when X, do Y" rules to `config/swarm.json` without touching the code:
+
+```json
+"reactors": [
+  {
+    "name": "notify-blocked",
+    "on": "task.blocked",
+    "match": { "channel": "projects/" },
+    "run": { "command": ["/usr/local/bin/notify-me"], "timeoutSeconds": 10 }
+  },
+  {
+    "name": "announce-done",
+    "on": "task.completed",
+    "run": { "post": { "channel": "announcements", "text": "Done: {text} ({id})" } }
+  }
+]
+```
+
+A `command` gets the event as JSON on stdin. It runs without a shell, and nothing from the message ever reaches its arguments. A `post` writes to a channel from your config as `reactor-<name>`, and never reacts to its own posts. Each reactor waits `cooldownSeconds` (default 30) between runs. Reactors run once, in Lead Watcher, unless you set `"runOn": "dispatcher"`, which runs them on every worker for machine-local commands. `mise run doctor` checks that the commands exist.
+
 ---
 
 ## Engineering & Toolchain
@@ -277,6 +301,8 @@ npm run schemas:generate # Regenerate JSON Schemas from the Zod definitions
 ├── src/
 │   ├── dispatcher.ts           # Worker background service: picks up tasks and runs agents
 │   ├── lead-watcher.ts         # Lead background service: wakes Lead when there's something to do
+│   ├── bus/                    # Live event sources (Board tail, Herdr socket, file watch), bus, scheduler, reactor registry
+│   ├── reactors/               # Built-in and config-driven "when X, do Y" reactors
 │   └── lib/                    # State machines, Board/Herdr clients, config, routing, review
 ├── scripts/                    # The scripts behind each `mise run` command
 ├── infra/                      # Optional systemd, launchd, and Caddy templates

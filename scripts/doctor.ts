@@ -16,6 +16,7 @@ import {
   firstMeaningfulLine,
   runQuickCommand,
 } from "../src/lib/host-env.ts";
+import { validateConfiguredReactors } from "../src/reactors/configured.ts";
 
 type CheckStatus = "ok" | "warn" | "fail";
 
@@ -119,6 +120,27 @@ if (!existsSync(projectsPath)) {
       name: "projects config",
       status: "fail",
       detail: err instanceof Error ? err.message.replaceAll("\n", " | ") : String(err),
+    });
+  }
+}
+
+if (loadedSwarm) {
+  const reactors = loadedSwarm.reactors ?? [];
+  if (reactors.length === 0) {
+    results.push({ name: "reactors", status: "ok", detail: "none configured (built-ins only)" });
+  } else {
+    // Selectors and shapes were already validated by the Zod schema while loading swarm.json.
+    const check = validateConfiguredReactors(reactors, {
+      projectChannelPrefix: loadedSwarm.board.projectChannelPrefix,
+    });
+    const problems = [...check.errors, ...check.warnings];
+    results.push({
+      name: "reactors",
+      status: check.errors.length > 0 ? "fail" : check.warnings.length > 0 ? "warn" : "ok",
+      detail:
+        problems.length > 0
+          ? problems.join(" ; ")
+          : `${reactors.length} configured: ${check.summary.join(" ; ")}`,
     });
   }
 }

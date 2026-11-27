@@ -291,7 +291,15 @@ export const LeadConfigSchema = z
       .min(3)
       .default(10)
       .describe(
-        "Seconds between deterministic Lead Watcher checks for new #inbox messages, @lead mentions, and blocked tasks (0 LLM tokens while idle).",
+        "Seconds between deterministic Lead Watcher checks for new #inbox messages, @lead mentions, and blocked tasks (0 LLM tokens while idle). With live Board events healthy this is used only while Lead sessions are open (for idle-close timing); otherwise it is the polling fallback.",
+      ),
+    reconcileIntervalSeconds: z
+      .number()
+      .int()
+      .min(5)
+      .optional()
+      .describe(
+        "Seconds between full Lead Watcher reconciles (channel reads) while the live Board event stream is healthy. Events wake Lead immediately; this is the safety net. Default 60.",
       ),
     maxConcurrentSessions: z
       .number()
@@ -401,7 +409,17 @@ export const WorkerDefaultsConfigSchema = z
       .int()
       .min(3)
       .default(15)
-      .describe("Seconds between dispatcher reconciliation and task-discovery ticks."),
+      .describe(
+        "Seconds between dispatcher reconciliation and task-discovery ticks when live Board/Herdr events are unavailable, and while workers are running (idle reminders and lease renewals are time-based).",
+      ),
+    reconcileIntervalSeconds: z
+      .number()
+      .int()
+      .min(5)
+      .optional()
+      .describe(
+        "Seconds between full dispatcher reconciles on an idle machine while live Board and Herdr events are healthy (events wake the dispatcher immediately; this is the safety net). Default 60.",
+      ),
     idleTimeoutSeconds: z
       .number()
       .int()
@@ -462,12 +480,153 @@ export const MachineConfigSchema = z
   .strict()
   .describe("Configuration for a single physical or virtual machine in the swarm.");
 
+export const EventsConfigSchema = z
+  .object({
+    boardTail: z
+      .boolean()
+      .default(true)
+      .describe(
+        "Follow `vercel board tail --json` so Board activity wakes the daemons immediately. `false` uses polling only.",
+      ),
+    herdr: z
+      .boolean()
+      .default(true)
+      .describe(
+        'Subscribe to the local Herdr socket for tab, pane, and agent-status events (only for `herdrTarget: "local"`). `false` uses CLI polling only.',
+      ),
+  })
+  .strict()
+  .describe(
+    "Live event sources. Events are hints that trigger an immediate reconcile; periodic polling remains the safety net.",
+  );
+
+/** Event selectors a configured reactor can listen on (`vercel board tail` event types). */
+export const REACTOR_EVENT_SELECTORS = [
+  "message.posted",
+  "message.edited",
+  "message.deleted",
+  "message.*",
+  "reaction.added",
+  "reaction.removed",
+  "task.created",
+  "task.ready",
+  "task.claimed",
+  "task.completed",
+  "task.blocked",
+  "task.unblocked",
+  "task.failed",
+  "task.canceled",
+  "task.released",
+  "task.expired",
+  "task.renewed",
+  "task.*",
+] as const;
+
+export const ReactorEventSelectorSchema = z
+  .enum(REACTOR_EVENT_SELECTORS)
+  .describe(
+    "Board event type to react to (`message.posted`, `task.blocked`, ...); `message.*` and `task.*` match every message or task event.",
+  );
+
+export const ConfiguredReactorSchema = z
+  .object({
+    name: z
+      .string()
+      .regex(
+        /^[a-z][a-z0-9-]{0,39}$/,
+        "Reactor names are lowercase letters, digits, and hyphens (max 40), starting with a letter.",
+      )
+      .describe(
+        "Unique reactor name, used in logs and as the default posting profile `reactor-<name>`.",
+      ),
+    enabled: z
+      .boolean()
+      .default(true)
+      .describe("Set false to keep a reactor configured but inactive."),
+    on: z
+      .union([ReactorEventSelectorSchema, z.array(ReactorEventSelectorSchema).min(1)])
+      .describe("Event selector, or a list of them."),
+    runOn: z
+      .enum(["lead", "dispatcher"])
+      .default("lead")
+      .describe(
+        '"lead" (default): runs once, in the Lead Watcher on the main machine, which sees the whole board. "dispatcher": runs in every worker dispatcher, which only sees `board.projectChannelPrefix` (use for per-machine local commands).',
+      ),
+    match: z
+      .object({
+        channel: z
+          .string()
+          .min(1)
+          .optional()
+          .describe('Exact channel (`inbox`) or a prefix ending in "/" (`projects/`).'),
+        labels: z
+          .record(z.string().min(1), z.string())
+          .optional()
+          .describe(
+            'Labels the event\'s message (or task root) must carry, e.g. `{ "review": "skip" }`.',
+          ),
+      })
+      .strict()
+      .optional()
+      .describe("Optional filters; every given filter must match."),
+    run: z
+      .union([
+        z
+          .object({
+            command: z
+              .array(z.string().min(1))
+              .min(1)
+              .describe(
+                "Local command as argv (no shell). The event is passed as JSON on stdin; nothing from the event is ever put in the command line.",
+              ),
+            timeoutSeconds: z.number().int().min(1).max(600).default(30),
+          })
+          .strict(),
+        z
+          .object({
+            post: z
+              .object({
+                channel: z.string().min(1).describe("Channel to post in (from config only)."),
+                text: z
+                  .string()
+                  .min(1)
+                  .describe(
+                    "Message text. Placeholders: {type} {channel} {id} {thread} {author} {state} {text} (event values, text truncated).",
+                  ),
+                profile: z
+                  .string()
+                  .min(1)
+                  .optional()
+                  .describe("Board profile to post as (default `reactor-<name>`)."),
+              })
+              .strict(),
+          })
+          .strict(),
+      ])
+      .describe("What to do: run a local command, or post a message."),
+    cooldownSeconds: z
+      .number()
+      .int()
+      .min(0)
+      .default(30)
+      .describe("Minimum seconds between two runs of this reactor (loop and burst protection)."),
+  })
+  .strict()
+  .describe(
+    'A user-defined "when X, do Y" rule. Runs local commands only from this local, gitignored config.',
+  );
+
 export const SwarmConfigSchema = z
   .object({
     $schema: z.string().optional().describe("Optional JSON Schema path for editor validation."),
     board: BoardConfigSchema.prefault({}),
     lead: LeadConfigSchema.prefault({}),
     workerDefaults: WorkerDefaultsConfigSchema.prefault({}),
+    events: EventsConfigSchema.optional(),
+    reactors: z
+      .array(ConfiguredReactorSchema)
+      .optional()
+      .describe('User-defined reactors (for example "when a task blocks, notify me").'),
     machines: z
       .record(z.string().min(1), MachineConfigSchema)
       .refine(
@@ -486,6 +645,17 @@ export const SwarmConfigSchema = z
         path: ["lead", "machine"],
         message: `lead.machine "${cfg.lead.machine}" does not exist in machines (${Object.keys(cfg.machines).join(", ")}).`,
       });
+    }
+    const reactorNames = new Set<string>();
+    for (const [i, r] of (cfg.reactors ?? []).entries()) {
+      if (reactorNames.has(r.name)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["reactors", i, "name"],
+          message: `Duplicate reactor name "${r.name}".`,
+        });
+      }
+      reactorNames.add(r.name);
     }
     const builtinAgents = new Set(["claude", "agy", "codex", "pi"]);
     if (
@@ -638,6 +808,14 @@ export const BoardMessageSchema = z
     text: z.string().default(""),
     createdAt: z.string().optional(),
     deleted: z.boolean().optional(),
+    re: z
+      .string()
+      .nullable()
+      .optional()
+      .catch(undefined)
+      .describe("Root message ID when this message is a reply; null/absent for a thread root."),
+    thread: z.string().nullable().optional().catch(undefined),
+    labels: z.unknown().optional(),
     by: z
       .object({
         actor: z.string().optional(),
@@ -1010,6 +1188,9 @@ export type LeadConfig = z.infer<typeof LeadConfigSchema>;
 export type RawWorkerDefaultsConfig = z.infer<typeof WorkerDefaultsConfigSchema>;
 export type RawMachineConfig = z.infer<typeof MachineConfigSchema>;
 export type RawSwarmConfig = z.infer<typeof SwarmConfigSchema>;
+export type EventsConfig = z.infer<typeof EventsConfigSchema>;
+export type ConfiguredReactor = z.infer<typeof ConfiguredReactorSchema>;
+export type ReactorEventSelector = z.infer<typeof ReactorEventSelectorSchema>;
 export type ProjectConfig = z.infer<typeof ProjectConfigSchema>;
 export type ProjectsConfig = z.infer<typeof ProjectsConfigSchema>;
 export type BoardTaskState = z.infer<typeof BoardTaskStateSchema>;

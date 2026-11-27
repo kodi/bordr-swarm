@@ -272,6 +272,22 @@ export class BoardClient {
     return args;
   }
 
+  /**
+   * Command line for `vercel board tail --json` (or `vb tail --json` for the standalone CLI) with
+   * the same `--url` / `--name` / `--scope` handling as every other call. `channel` may be a
+   * channel or a `prefix/`; omitted, the tail covers the whole board.
+   */
+  buildTailCommand(opts: { channel?: string; after?: string } = {}): {
+    cmd: string;
+    args: string[];
+  } {
+    const sub = ["tail"];
+    const channel = opts.channel?.replace(/^#/, "").trim();
+    if (channel) sub.push(channel);
+    if (opts.after) sub.push("--after", opts.after);
+    return { cmd: this.binary, args: this.buildArgs(sub, { json: true }) };
+  }
+
   private async runJson(
     subcommandArgs: string[],
     opts?: { asProfile?: string; timeoutMs?: number },

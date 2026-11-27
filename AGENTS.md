@@ -35,6 +35,9 @@ Machine names, OS (`"linux"` or `"macos"`), hostnames, capacities, and repo path
 - **Board Inspector UI:** Uses `board inspect` from `@vercel/board` (pinned in `mise.toml` as `"npm:@vercel/board" = "latest"`), with `--allow-host` rendered from `machines.<main>.allowedHosts`.
 - **No secrets or personal machine details in git:** `config/swarm.json` and `config/projects.json` are gitignored; keep generic templates in `*.example.json`.
 
+- **Event bus (`src/bus/`), events are hints:** `BoardTailSource` (`vercel board tail --json`), `HerdrEventSource` (Herdr socket, Zod-validated, private protocol, so any failure falls back to CLI polling), and `FsWatchSource` publish a `SwarmEvent` discriminated union. Events only wake a debounced, non-overlapping `WakeScheduler` tick of the same level-triggered FSMs; a periodic reconcile (`reconcileIntervalSeconds`, or `pollIntervalSeconds` while a source is down) stays as the safety net. Every slice of behavior must keep working with all sources disabled (`events.boardTail`/`events.herdr: false`). Never leave a `board tail` child behind: spawn it `detached` and kill the process group on stop.
+- **Reactors:** "when X, do Y" rules are named reactors (`src/reactors/`) with pure `matches(event)` / `react(event, ctx) → ReactorEffect[]`; daemons execute effects in thin, per-effect-isolated handlers. Bind configuration when creating a reactor; `ctx` is only the daemon's read-only live view. Config-driven reactors (`swarm.json` `reactors[]`) run local commands only from local config (argv, no shell, event JSON on stdin) and never derive a command, path, or argument from Board content.
+
 ## Conventions
 
 - Keep Linux services unprivileged (`systemctl --user`) — never require `sudo` for agent runtime users.
