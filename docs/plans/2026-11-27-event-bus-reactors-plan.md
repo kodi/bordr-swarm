@@ -176,7 +176,7 @@ Status: `[x]` Done
 
 ### Slice 4: Dispatcher on the bus
 
-Status: `[ ]` Not started
+Status: `[x]` Done
 
 - Goal: a ready task is claimed, and an agent status change is acted on, within about a second.
 - Why here: the dispatcher's logic is already level-triggered, so it is the low-risk first consumer.
@@ -311,6 +311,12 @@ Status: `[ ]` Not started
   - Deviation: there is no separate `TimerSource`. The scheduler owns the periodic timer and passes `periodic: true` to the tick it starts, so the event union keeps `timer.reconcile` only for reactors. The periodic deadline is measured from the previous periodic run, so a steady stream of events cannot postpone the full reconcile forever.
   - Deviation: `selectReconcileIntervalMs` keeps the poll cadence while time-based work is in flight (dispatcher with tracked tasks, Lead with open sessions). Idle reminders, lead idle-close, and startup grace are clock-driven transitions with no event behind them; stretching ticks to 60s would delay them. The slow interval applies when the machine is idle, which is where the polling cost was.
   - `FsWatchSource` watches the parent directory (atomic `rename` replaces the inode). `prompts/` is not watched: both prompt templates are already read from disk at every spawn.
+- 2026-11-27 (Slice 4): `runLoop` runs ticks through `WakeScheduler` (the first tick is immediate; `--once` still runs a single tick without the scheduler). Sources are built by `createDaemonEventSources` (`src/bus/daemon-events.ts`, shared with Lead): the dispatcher tails only `board.projectChannelPrefix`, watches `projects.json`, and subscribes to Herdr. `SwarmDispatcher` takes the wiring as an optional `events` parameter; without it there is no enabled source and the scheduler period is `pollIntervalSeconds`, so the old loop is reproduced exactly (all 29 existing `tests/dispatcher.test.ts` tests pass unmodified).
+  - Wake rules are the pure `shouldWakeDispatcher` (`src/reactors/dispatcher-wake.ts`): any event on a tracked task; `created`/`ready`/`unblocked`/`released`/`expired`/`other` on an untracked task under the prefix; a reply in a tracked thread (review handoff and verdicts); Herdr events for tracked panes or tabs; a `projects.json` change.
+  - Per-pane status subscriptions are re-synced at the end of every tick from active and parked tasks, which covers spawns, orphan adoption, and sessions restored from Plan A's state file.
+  - Deviation: the `projects.json` mtime comparison stays as the reload decision; `FsWatchSource` only wakes the tick. A missed or spurious watch event then costs latency at most. Nothing new is persisted: the dispatcher is level-triggered and does not need a cursor.
+  - A source that goes down or recovers logs one line (`Live events degraded (polling) [board=down, herdr=live]; periodic reconcile every 15s.`) and re-arms the periodic timer.
+  - Manual check (dry run against the live board on a scratch prefix, intervals set to 120s): the tick for a newly created task ran about 4.5s after invoking `vercel board tasks create`, CLI round trip included, instead of up to 120s. `SIGTERM` stopped it at once and `pgrep` found no `board tail` child afterwards.
 
 ## Next Slice
 
