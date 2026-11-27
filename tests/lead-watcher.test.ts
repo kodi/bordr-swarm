@@ -12,7 +12,10 @@ import {
   collectLeadEvents,
   createEmptyLeadState,
   enqueueLeadEvents,
+  hasProfileReaction,
+  isHumanMessage,
   mentionsProfile,
+  selectMessagesToAcknowledge,
   type LeadWakeEvent,
 } from "../src/lib/lead-events.ts";
 import {
@@ -745,6 +748,218 @@ describe("LeadWatcher ephemeral per-thread sessions", () => {
       assert.equal(mock.prompted.length, 2);
       assert.equal(mock.prompted[1]?.agentName, "lead-ccc33333");
       assert.match(mock.prompted[1]?.prompt ?? "", /msg_ccc33333_1/);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("Lead 👀 acknowledgement of new #inbox messages", () => {
+  const human = (id: string, extra: Record<string, unknown> = {}) => ({
+    id,
+    text: `human ${id}`,
+    by: { profile: null },
+    author: { kind: "person", handle: "owner" },
+    ...extra,
+  });
+  const agent = (id: string, profile: string) => ({
+    id,
+    text: `agent ${id}`,
+    by: { profile },
+    author: { kind: "agent", handle: `owner/${profile}`, name: profile },
+  });
+  const leadEyes = { eyes: ["vercel:user:abc+lead"] };
+
+  it("classifies humans vs agents and detects Lead's existing 👀", () => {
+    assert.equal(isHumanMessage(human("m1"), "lead"), true);
+    assert.equal(isHumanMessage(agent("m2", "lead"), "lead"), false);
+    assert.equal(isHumanMessage(agent("m3", "worker-x"), "lead"), false);
+    assert.equal(
+      isHumanMessage({ id: "m4", text: "", by: { profile: "worker-x" } }, "lead"),
+      false,
+    );
+    assert.equal(isHumanMessage(human("m5", { deleted: true }), "lead"), false);
+    assert.equal(hasProfileReaction(human("m6", { reactions: leadEyes }), "lead"), true);
+    assert.equal(
+      hasProfileReaction(human("m7", { reactions: { eyes: ["vercel:user:abc"] } }), "lead"),
+      false,
+    );
+    assert.equal(
+      hasProfileReaction(human("m8", { reactions: { "+1": ["vercel:user:abc+lead"] } }), "lead"),
+      false,
+    );
+  });
+
+  it("selects only new, un-acknowledged human messages after the last handled one", () => {
+    const thread = [
+      human("r_1"),
+      agent("r_2", "lead"),
+      human("r_3"),
+      agent("r_4", "worker-x"),
+      human("r_5", { reactions: leadEyes }),
+      human("r_6"),
+    ];
+    // Brand-new thread: every human message without Lead's 👀
+    assert.deepEqual(selectMessagesToAcknowledge({ messages: thread, leadProfile: "lead" }), [
+      "r_1",
+      "r_3",
+      "r_6",
+    ]);
+    // Follow-up: only messages after the last handled one
+    assert.deepEqual(
+      selectMessagesToAcknowledge({ messages: thread, sinceMessageId: "r_2", leadProfile: "lead" }),
+      ["r_3", "r_6"],
+    );
+    // Unknown cursor: never react retroactively, only the newest message
+    assert.deepEqual(
+      selectMessagesToAcknowledge({
+        messages: thread,
+        sinceMessageId: "gone",
+        leadProfile: "lead",
+      }),
+      ["r_6"],
+    );
+    assert.deepEqual(
+      selectMessagesToAcknowledge({
+        messages: [agent("x_1", "worker-x")],
+        sinceMessageId: "gone",
+        leadProfile: "lead",
+      }),
+      [],
+    );
+  });
+
+  function makeAckBoard(threads: Map<string, Array<Record<string, unknown>>>, order: string[]) {
+    const reacted: Array<{ id: string; emoji: string; as: string | undefined }> = [];
+    let failReacts = false;
+    const runner: ExecRunner = async (_cmd, args) => {
+      if (args[1] === "read" && args[2] === "inbox") {
+        const summaries = [...threads.values()].map((msgs) => ({
+          message: msgs[0],
+          replies: msgs.length - 1,
+          last: msgs.length > 1 ? msgs[msgs.length - 1] : null,
+        }));
+        return { stdout: JSON.stringify({ threads: summaries, cursor: "c" }), stderr: "" };
+      }
+      if (args[1] === "read") {
+        const msgs = threads.get(args[2]!);
+        if (!msgs) throw new Error(`not found: ${args[2]}`);
+        return {
+          stdout: JSON.stringify({ message: msgs[0], replies: msgs.slice(1) }),
+          stderr: "",
+        };
+      }
+      if (args[1] === "react") {
+        order.push(`react:${args[2]}`);
+        if (failReacts) throw new Error("network down");
+        const asIdx = args.indexOf("--as");
+        reacted.push({
+          id: args[2]!,
+          emoji: args[3]!,
+          as: asIdx >= 0 ? args[asIdx + 1] : undefined,
+        });
+        return { stdout: JSON.stringify({ ok: true }), stderr: "" };
+      }
+      if (args[1] === "channels") {
+        return { stdout: JSON.stringify({ channels: [] }), stderr: "" };
+      }
+      if (args[1] === "tasks") {
+        return { stdout: JSON.stringify({ tasks: [] }), stderr: "" };
+      }
+      return { stdout: JSON.stringify({ ok: true }), stderr: "" };
+    };
+    return {
+      board: new BoardClient({}, runner),
+      reacted,
+      setFailReacts(v: boolean) {
+        failReacts = v;
+      },
+    };
+  }
+
+  it("reacts 👀 as Lead before prompting, on follow-ups, never on agents, never twice across restarts", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "lead-watcher-ack-"));
+    try {
+      const statePath = join(tmp, "state.json");
+      const order: string[] = [];
+      const threads = new Map<string, Array<Record<string, unknown>>>([
+        ["msg_aaa11111_1", [human("msg_aaa11111_1")]],
+        // Thread whose latest message is from another agent: wakes Lead but gets no 👀
+        ["msg_bbb22222_1", [agent("msg_bbb22222_1", "worker-x")]],
+      ]);
+      const ack = makeAckBoard(threads, order);
+      const mock = createMockHerdr();
+      const origPrompt = mock.herdr.promptAgent.bind(mock.herdr);
+      mock.herdr.promptAgent = async (name: string, prompt: string) => {
+        order.push(`prompt:${name}`);
+        return origPrompt(name, prompt);
+      };
+      const makeWatcher = () =>
+        new LeadWatcher({
+          swarm: makeSwarm({ maxConcurrentSessions: 2 }),
+          board: ack.board,
+          herdr: mock.herdr,
+          statePath,
+          leadWorkspaceDir: tmp,
+          dryRun: false,
+          now: () => 1_000,
+        });
+
+      const watcher = makeWatcher();
+      await watcher.tick();
+      assert.deepEqual(ack.reacted, [{ id: "msg_aaa11111_1", emoji: "eyes", as: "lead" }]);
+      assert.ok(
+        order.indexOf("react:msg_aaa11111_1") < order.indexOf("prompt:lead-aaa11111"),
+        `👀 must precede the Lead prompt: ${order.join(", ")}`,
+      );
+
+      // Lead replies, then the human follows up (reply) -> 👀 only on the follow-up
+      threads.get("msg_aaa11111_1")!.push(agent("msg_aaa11111_2", "lead"));
+      threads.get("msg_aaa11111_1")!.push(human("msg_aaa11111_3"));
+      // Pretend the Watcher already reacted on the root (as Board would now show it)
+      threads.get("msg_aaa11111_1")![0] = human("msg_aaa11111_1", { reactions: leadEyes });
+      await watcher.tick();
+      assert.deepEqual(
+        ack.reacted.map((r) => r.id),
+        ["msg_aaa11111_1", "msg_aaa11111_3"],
+      );
+
+      // Restart with the same persisted state: nothing new -> no duplicate 👀
+      threads.get("msg_aaa11111_1")![2] = human("msg_aaa11111_3", { reactions: leadEyes });
+      await makeWatcher().tick();
+      assert.equal(ack.reacted.length, 2);
+
+      // Restart with lost state: messages already carrying Lead's 👀 are skipped
+      rmSync(statePath, { force: true });
+      await makeWatcher().tick();
+      assert.equal(ack.reacted.length, 2);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("logs a failed reaction and still triages (prompts Lead)", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "lead-watcher-ack-fail-"));
+    try {
+      const order: string[] = [];
+      const threads = new Map([["msg_ccc33333_1", [human("msg_ccc33333_1")]]]);
+      const ack = makeAckBoard(threads, order);
+      ack.setFailReacts(true);
+      const mock = createMockHerdr();
+      const watcher = new LeadWatcher({
+        swarm: makeSwarm(),
+        board: ack.board,
+        herdr: mock.herdr,
+        statePath: join(tmp, "state.json"),
+        leadWorkspaceDir: tmp,
+        dryRun: false,
+        now: () => 1_000,
+      });
+      await watcher.tick();
+      assert.deepEqual(order, ["react:msg_ccc33333_1"]);
+      assert.equal(ack.reacted.length, 0);
+      assert.equal(mock.prompted.length, 1);
+      assert.equal(mock.prompted[0]?.agentName, "lead-ccc33333");
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }

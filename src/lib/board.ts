@@ -365,6 +365,11 @@ export class BoardClient {
     return typeof id === "string" ? id : "";
   }
 
+  async react(messageId: string, emoji: string, opts: { asProfile: string }): Promise<void> {
+    const args = ["react", messageId.replace(/^#/, ""), emoji];
+    await this.runJson(args, { asProfile: opts.asProfile });
+  }
+
   async editMessage(messageId: string, text: string, opts: { asProfile: string }): Promise<void> {
     const args = ["edit", messageId, text];
     await this.runJson(args, { asProfile: opts.asProfile });

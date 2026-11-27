@@ -2,7 +2,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, unlinkSync, writeFileSy
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { BoardClient, type BoardThreadSummary } from "./lib/board.ts";
+import { BoardClient, type BoardMessage, type BoardThreadSummary } from "./lib/board.ts";
 import {
   buildAgentCliArgs,
   loadProjectsConfig,
@@ -17,6 +17,8 @@ import {
   collectLeadEvents,
   createEmptyLeadState,
   enqueueLeadEvents,
+  LEAD_ACK_EMOJI,
+  selectMessagesToAcknowledge,
   type LeadWakeEvent,
   type LeadWatcherState,
 } from "./lib/lead-events.ts";
@@ -535,6 +537,50 @@ export class LeadWatcher {
     }
   }
 
+  /**
+   * React 👀 (as Lead) on new human messages of a detected `#inbox` event, before any Lead
+   * session is spawned or prompted. Best-effort: failures are logged and never block triage.
+   * Duplicates are avoided twice over: the persisted seen-state stops re-detection, and
+   * messages already carrying Lead's 👀 are skipped (e.g. after a restart mid-tick).
+   */
+  private async acknowledgeInboxEvent(
+    event: LeadWakeEvent,
+    summary: BoardThreadSummary | undefined,
+    sinceMessageId: string | undefined,
+  ): Promise<void> {
+    const leadProfile = this.swarm.lead.boardProfile;
+    let messages: BoardMessage[];
+    let since = sinceMessageId;
+    try {
+      const detail = await this.board.readThread(event.threadId);
+      messages = [detail.message, ...detail.replies];
+    } catch (err) {
+      log(
+        "WARN",
+        `Could not read #${event.channel} thread ${event.threadId} for 👀 acknowledgement; falling back to its latest message: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      messages = summary ? [summary.last ?? summary.message] : [];
+      since = undefined;
+    }
+
+    const ids = selectMessagesToAcknowledge({ messages, sinceMessageId: since, leadProfile });
+    for (const messageId of ids) {
+      if (this.dryRun) {
+        log("INFO", `[dry-run] Would react ${LEAD_ACK_EMOJI} on ${messageId} as "${leadProfile}".`);
+        continue;
+      }
+      try {
+        await this.board.react(messageId, LEAD_ACK_EMOJI, { asProfile: leadProfile });
+        log("INFO", `Reacted ${LEAD_ACK_EMOJI} on ${messageId} (thread ${event.threadId}).`);
+      } catch (err) {
+        log(
+          "WARN",
+          `Could not react ${LEAD_ACK_EMOJI} on ${messageId} (thread ${event.threadId}); continuing with triage: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+  }
+
   async tick(): Promise<void> {
     await this.syncRegistryCatalog();
 
@@ -561,6 +607,17 @@ export class LeadWatcher {
       leadProfile: this.swarm.lead.boardProfile,
       state: this.state,
     });
+
+    // 👀 first: acknowledge new human #inbox messages before any Lead session is spawned/prompted
+    const inboxSummaries = new Map(inboxRes.threads.map((t) => [t.message.id, t]));
+    for (const ev of events) {
+      if (ev.kind !== "inbox") continue;
+      await this.acknowledgeInboxEvent(
+        ev,
+        inboxSummaries.get(ev.threadId),
+        this.state.seenThreadLatestMsgId[ev.threadId],
+      );
+    }
 
     if (events.length > 0) {
       log("INFO", `Detected ${events.length} new Board event(s) for Lead.`);

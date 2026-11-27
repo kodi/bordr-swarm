@@ -649,6 +649,11 @@ export const BoardMessageSchema = z
       })
       .passthrough()
       .optional(),
+    reactions: z
+      .record(z.string(), z.array(z.string()))
+      .optional()
+      .catch(undefined)
+      .describe("Reactions keyed by emoji name (e.g. `eyes`), each listing reacting actor IDs."),
   })
   .passthrough();
 

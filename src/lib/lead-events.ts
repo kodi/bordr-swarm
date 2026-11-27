@@ -69,6 +69,57 @@ export function mentionsProfile(text: string, profile: string): boolean {
   return re.test(text);
 }
 
+/** Reaction the Lead Watcher adds to new human `#inbox` messages as the "seen" signal. */
+export const LEAD_ACK_EMOJI = "eyes";
+const LEAD_ACK_EMOJI_KEYS = new Set(["eyes", "👀"]);
+
+/**
+ * True only for messages written by a human: Board marks agent/profile posts with
+ * `author.kind = "agent"` (and a non-null `by.profile`), so those never count.
+ */
+export function isHumanMessage(msg: BoardMessage, leadProfile: string): boolean {
+  if (msg.deleted) return false;
+  if (isAuthoredByProfile(msg, leadProfile)) return false;
+  const kind = msg.author?.kind?.trim().toLowerCase();
+  if (kind) return kind === "person";
+  return !msg.by?.profile?.trim();
+}
+
+/** True if `profile` (actor IDs look like `vercel:user:<id>+<profile>`) already reacted with `emoji`. */
+export function hasProfileReaction(msg: BoardMessage, profile: string): boolean {
+  const target = profile.trim().toLowerCase();
+  if (!target || !msg.reactions) return false;
+  for (const [emoji, actors] of Object.entries(msg.reactions)) {
+    if (!LEAD_ACK_EMOJI_KEYS.has(emoji)) continue;
+    if (actors.some((actor) => actor.trim().toLowerCase().endsWith(`+${target}`))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Picks the IDs of new human messages in a thread (root + replies, in order) that still
+ * need Lead's 👀. `sinceMessageId` is the last message already handled for this thread:
+ * only messages after it are new. If it is set but missing from `messages`, only the
+ * newest message is considered, so old history is never reacted to retroactively.
+ */
+export function selectMessagesToAcknowledge(params: {
+  messages: BoardMessage[];
+  sinceMessageId?: string;
+  leadProfile: string;
+}): string[] {
+  const { messages, sinceMessageId, leadProfile } = params;
+  let candidates = messages;
+  if (sinceMessageId) {
+    const idx = messages.findIndex((m) => m.id === sinceMessageId);
+    candidates = idx >= 0 ? messages.slice(idx + 1) : messages.slice(-1);
+  }
+  return candidates
+    .filter((m) => isHumanMessage(m, leadProfile) && !hasProfileReaction(m, leadProfile))
+    .map((m) => m.id);
+}
+
 function truncatePreview(text: string, maxLen = 220): string {
   const singleLine = text.replace(/\s+/g, " ").trim();
   if (singleLine.length <= maxLen) return singleLine;
