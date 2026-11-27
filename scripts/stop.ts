@@ -174,6 +174,11 @@ async function main(): Promise<void> {
       resolve(home, ".local/state/bordr-swarm"),
       resolve(repoRoot, "config/swarm.json"),
       resolve(repoRoot, "config/projects.json"),
+      // State files relocated by env overrides live outside ~/.local/state/bordr-swarm
+      ...[process.env.DISPATCHER_STATE_PATH, process.env.LEAD_WATCHER_STATE_PATH]
+        .map((p) => p?.trim())
+        .filter((p): p is string => Boolean(p))
+        .map((p) => resolve(p)),
     ];
     for (const target of pathsToRemove) {
       if (!existsSync(target)) continue;

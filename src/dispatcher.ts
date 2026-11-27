@@ -20,6 +20,13 @@ import {
   type ParkedTab,
 } from "./lib/dispatcher-effects.ts";
 import {
+  dispatcherStateFingerprint,
+  loadDispatcherState,
+  resolveDispatcherStatePath,
+  saveDispatcherState,
+  toPersisted,
+} from "./lib/dispatcher-state.ts";
+import {
   HerdrClient,
   sanitizeHerdrAgentName,
   type HerdrAgent,
@@ -39,7 +46,7 @@ import {
   shortTaskId,
   type CandidateTask,
 } from "./lib/routing.ts";
-import { createManagedSession, type SessionHandle } from "./lib/session-fsm.ts";
+import { assertNever, createManagedSession, type SessionHandle } from "./lib/session-fsm.ts";
 import {
   getImplHandle,
   getReviewerHandle,
@@ -86,9 +93,19 @@ function log(level: "INFO" | "WARN" | "ERROR", message: string): void {
   else console.log(line);
 }
 
-function sleep(ms: number): Promise<void> {
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolvePromise) => {
-    setTimeout(resolvePromise, ms);
+    if (signal?.aborted) {
+      resolvePromise();
+      return;
+    }
+    const timer = setTimeout(done, ms);
+    function done(): void {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolvePromise();
+    }
+    signal?.addEventListener("abort", done, { once: true });
   });
 }
 
@@ -123,10 +140,14 @@ export class SwarmDispatcher {
   readonly gitDetector: GitChangeDetector;
   readonly availableAgentKinds: Set<string>;
   readonly dryRun: boolean;
+  /** Where tracked tasks are persisted across restarts; null disables persistence. */
+  readonly statePath: string | null;
 
   readonly activeWorkers = new Map<string, ActiveTask>();
   readonly parkedTabs = new Map<string, ParkedTab>();
   private stopping = false;
+  private readonly stopController = new AbortController();
+  private lastPersistedFingerprint: string | null = null;
   private lastProjectsMtimeMs = 0;
   private registryPublishedOnce = false;
 
@@ -143,6 +164,7 @@ export class SwarmDispatcher {
     gitDetector?: GitChangeDetector;
     availableAgentKinds: Set<string>;
     dryRun: boolean;
+    statePath?: string;
   }) {
     this.repoRoot = params.repoRoot;
     this.swarm = params.swarm;
@@ -156,13 +178,79 @@ export class SwarmDispatcher {
     this.gitDetector = params.gitDetector ?? defaultGitChangeDetector;
     this.availableAgentKinds = params.availableAgentKinds;
     this.dryRun = params.dryRun;
+    this.statePath = params.dryRun ? null : (params.statePath ?? null);
     if (this.projectsConfigPath && existsSync(this.projectsConfigPath)) {
       this.lastProjectsMtimeMs = statSync(this.projectsConfigPath).mtimeMs;
     }
+    this.restoreState();
   }
 
   requestStop(): void {
     this.stopping = true;
+    this.stopController.abort();
+  }
+
+  /**
+   * Loads persisted tracking. Loading never closes tabs or touches Board tasks: restored entries
+   * go through the normal reconcile on the next tick, where the FSMs decide what to do.
+   */
+  private restoreState(): void {
+    if (!this.statePath) return;
+    let res: ReturnType<typeof loadDispatcherState>;
+    try {
+      res = loadDispatcherState(this.statePath, { machine: this.machineName });
+    } catch (err) {
+      log(
+        "WARN",
+        `Could not load dispatcher state ${this.statePath}; starting empty: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return;
+    }
+
+    switch (res.kind) {
+      case "missing":
+        log("INFO", `No dispatcher state at ${this.statePath}; starting empty.`);
+        break;
+      case "other_machine":
+        log(
+          "WARN",
+          `Ignoring dispatcher state ${this.statePath}: written for machine "${res.machine}", not "${this.machineName}". It will be overwritten on the next save; give each machine its own DISPATCHER_STATE_PATH.`,
+        );
+        break;
+      case "quarantined":
+        log(
+          "WARN",
+          `Dispatcher state ${this.statePath} was invalid; moved it to ${res.quarantinePath} and starting empty:\n${res.error}`,
+        );
+        break;
+      case "loaded":
+        for (const [id, task] of res.state.activeWorkers) this.activeWorkers.set(id, task);
+        for (const [id, parked] of res.state.parkedTabs) this.parkedTabs.set(id, parked);
+        log(
+          "INFO",
+          `Restored ${this.activeWorkers.size} active and ${this.parkedTabs.size} parked task(s) from ${this.statePath} (saved ${new Date(res.savedAtMs).toISOString()}).`,
+        );
+        break;
+      default:
+        assertNever(res);
+    }
+    this.lastPersistedFingerprint = dispatcherStateFingerprint(this, this.machineName);
+  }
+
+  /** Atomically writes tracked state when it changed since the last write. */
+  persistState(): void {
+    if (!this.statePath) return;
+    const fingerprint = dispatcherStateFingerprint(this, this.machineName);
+    if (fingerprint === this.lastPersistedFingerprint) return;
+    try {
+      saveDispatcherState(this.statePath, toPersisted(this, this.machineName, Date.now()));
+      this.lastPersistedFingerprint = fingerprint;
+    } catch (err) {
+      log(
+        "WARN",
+        `Failed to persist dispatcher state to ${this.statePath}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   private getEffectDeps(): EffectExecutorDeps {
@@ -260,6 +348,14 @@ export class SwarmDispatcher {
   }
 
   async tick(): Promise<void> {
+    try {
+      await this.runTick();
+    } finally {
+      this.persistState();
+    }
+  }
+
+  private async runTick(): Promise<void> {
     const machineCfg = this.swarm.machines[this.machineName];
     if (!machineCfg) {
       throw new Error(`Missing machine config for "${this.machineName}"`);
@@ -719,12 +815,15 @@ export class SwarmDispatcher {
         log("ERROR", `Dispatcher tick failed: ${err instanceof Error ? err.message : String(err)}`);
       }
       if (once || this.stopping) break;
-      await sleep(this.swarm.workerDefaults.pollIntervalSeconds * 1000);
+      await sleep(this.swarm.workerDefaults.pollIntervalSeconds * 1000, this.stopController.signal);
     }
 
+    // Graceful stop: persist and exit. Tabs stay open and claims stay held so agents keep working
+    // across a restart; the next dispatcher adopts them from the state file.
+    this.persistState();
     log(
       "INFO",
-      `Dispatcher stopped cleanly (activeWorkers=${this.activeWorkers.size}, parkedTabs=${this.parkedTabs.size}).`,
+      `Dispatcher stopped cleanly (activeWorkers=${this.activeWorkers.size}, parkedTabs=${this.parkedTabs.size}; tabs and claims left in place${this.statePath ? `, state saved to ${this.statePath}` : ""}).`,
     );
   }
 }
@@ -767,6 +866,7 @@ async function main(): Promise<void> {
     reviewerPromptTemplate,
     availableAgentKinds: detectAvailableAgentKinds(swarm),
     dryRun: flags.dryRun,
+    statePath: resolveDispatcherStatePath(machineName),
   });
 
   const onSignal = (sig: NodeJS.Signals) => {

@@ -174,7 +174,7 @@ describe("dispatcher persisted state (pure)", () => {
   it("fingerprint ignores savedAtMs and Set/Map insertion order but tracks real changes", () => {
     const a = buildTracked();
     const b = buildTracked();
-    const reordered = new Map([...b.activeWorkers.entries()].reverse());
+    const reordered = new Map([...b.activeWorkers.entries()].toReversed());
     assert.equal(
       dispatcherStateFingerprint(a, "m"),
       dispatcherStateFingerprint({ activeWorkers: reordered, parkedTabs: b.parkedTabs }, "m"),

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -25,6 +25,7 @@ import {
   type SwarmConfig,
 } from "../src/lib/config.ts";
 import { HerdrClient, sanitizeHerdrAgentName } from "../src/lib/herdr.ts";
+import type { GitChangeDetector } from "../src/lib/review.ts";
 import { SwarmConfigSchema } from "../src/lib/schemas.ts";
 import { z } from "zod";
 import {
@@ -367,6 +368,43 @@ function createLifecycleFixture(opts?: { reviewer?: boolean; statePath?: string 
     projects,
     cleanup: () => rmSync(tmpBase, { recursive: true, force: true }),
   };
+}
+
+const fixtureGitDetector: GitChangeDetector = {
+  captureHeadSha: () => "abc1234",
+  detectChanges: () => ({
+    hasChanges: true,
+    currentHeadSha: "def5678",
+    dirtyFiles: 0,
+    detail: "1 commit ahead",
+  }),
+};
+
+function makeFixtureDispatcher(
+  fx: { tmpBase: string; swarm: SwarmConfig; projects: ProjectsConfig },
+  board: { runner: ExecRunner },
+  herdr: { runner: ExecRunner },
+  opts?: { statePath?: string; swarm?: SwarmConfig },
+): SwarmDispatcher {
+  return new SwarmDispatcher({
+    repoRoot: fx.tmpBase,
+    swarm: opts?.swarm ?? fx.swarm,
+    projects: fx.projects,
+    machineName: "worker-machine",
+    board: new BoardClient({ scope: "test-team" }, board.runner),
+    herdr: new HerdrClient({ target: "local" }, herdr.runner),
+    promptTemplate: "Work on {{TASK_ID}}",
+    reviewerPromptTemplate: "Review {{TASK_ID}}",
+    gitDetector: fixtureGitDetector,
+    availableAgentKinds: new Set(["claude"]),
+    dryRun: false,
+    statePath: opts?.statePath,
+  });
+}
+
+/** Same config, but every tick is "due" for a lease renewal. */
+function withEagerLeaseRenewal(swarm: SwarmConfig): SwarmConfig {
+  return { ...swarm, board: { ...swarm.board, leaseRenewIntervalSeconds: 0 } };
 }
 
 const FIXTURE_WORKSPACES = [
@@ -1277,6 +1315,122 @@ describe("SwarmDispatcher mocked lifecycle", () => {
       assert.ok(reads.length > 0, "tracked task missing from open list should be point-looked-up");
       assert.equal(dispatcher.activeWorkers.size, 0);
       assert.equal(herdr.openTabs.size, 0, "completed task tab should be closed");
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it("restart: a new dispatcher on the same state file adopts the task, renews, and cleans up", async () => {
+    const fx = createLifecycleFixture();
+    try {
+      const statePath = join(fx.tmpBase, "state", "dispatcher-worker-machine.json");
+      const board = createFakeBoard([
+        { id: "401", channel: "projects/repo-a", state: "ready", text: "Long task", labels: {} },
+      ]);
+      const herdr = createFakeHerdr(FIXTURE_WORKSPACES);
+
+      const a = makeFixtureDispatcher(fx, board, herdr, { statePath });
+      await a.tick();
+      assert.ok(a.activeWorkers.has("401"));
+      assert.equal(board.callsFor("claim").length, 1);
+      assert.ok(existsSync(statePath), "state persisted at end of tick");
+
+      // Graceful stop must not close tabs or release the task
+      a.requestStop();
+      await a.runLoop(true);
+      assert.equal(herdr.openTabs.size, 1);
+      assert.equal(board.callsFor("release").length, 0);
+      assert.equal(board.tasks.get("401")!.state, "claimed");
+
+      const b = makeFixtureDispatcher(fx, board, herdr, {
+        statePath,
+        swarm: withEagerLeaseRenewal(fx.swarm),
+      });
+      assert.ok(b.activeWorkers.has("401"), "restored from state file at construction");
+
+      await b.tick();
+      assert.equal(board.callsFor("claim").length, 1, "B must not re-claim");
+      const renews = board.callsFor("renew", "401");
+      assert.equal(renews.length, 1);
+      assert.equal(renews[0]![renews[0]!.indexOf("--as") + 1], "worker-worker-machine-401");
+      assert.ok(b.activeWorkers.has("401"));
+
+      board.tasks.get("401")!.state = "completed";
+      await b.tick();
+      assert.equal(b.activeWorkers.size, 0);
+      assert.equal(herdr.openTabs.size, 0, "tab closes when the Board reports completed");
+
+      const c = makeFixtureDispatcher(fx, board, herdr, { statePath });
+      assert.equal(c.activeWorkers.size, 0, "cleanup was persisted too");
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it("restart: a parked [BLOCKED] task keeps holding the plain-tab repo lock", async () => {
+    const fx = createLifecycleFixture();
+    try {
+      const statePath = join(fx.tmpBase, "dispatcher.json");
+      const board = createFakeBoard([
+        { id: "501", channel: "projects/repo-a", state: "ready", text: "Blocks", labels: {} },
+      ]);
+      const herdr = createFakeHerdr(FIXTURE_WORKSPACES);
+
+      const a = makeFixtureDispatcher(fx, board, herdr, { statePath });
+      await a.tick();
+      board.tasks.get("501")!.state = "blocked";
+      board.tasks.get("501")!.assignee = undefined;
+      await a.tick();
+      assert.ok(a.parkedTabs.has("501"));
+
+      const b = makeFixtureDispatcher(fx, board, herdr, { statePath });
+      assert.ok(b.parkedTabs.has("501"));
+      board.tasks.set("502", {
+        id: "502",
+        channel: "projects/repo-a",
+        state: "ready",
+        text: "Same repo",
+        labels: {},
+        replies: [],
+      });
+      await b.tick();
+      assert.ok(!b.activeWorkers.has("502"), "repo-a is still locked by the parked tab");
+      assert.equal(board.callsFor("claim", "502").length, 0);
+      assert.equal(herdr.openTabs.get("w1:t1")?.label, "[BLOCKED] task-501 (claude)");
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it("restart during reviewing: the reviewer verdict is still processed", async () => {
+    const fx = createLifecycleFixture({ reviewer: true });
+    try {
+      const statePath = join(fx.tmpBase, "dispatcher.json");
+      const board = createFakeBoard([
+        { id: "601", channel: "projects/repo-a", state: "ready", text: "Reviewed", labels: {} },
+      ]);
+      const herdr = createFakeHerdr(FIXTURE_WORKSPACES);
+
+      const a = makeFixtureDispatcher(fx, board, herdr, { statePath });
+      await a.tick();
+      board.postReply("601", "Done.\n\nSTATUS: READY_FOR_REVIEW", "worker-worker-machine-601");
+      herdr.setAgentStatus("w-601", "idle");
+      await a.tick();
+      const phase = a.activeWorkers.get("601")?.phase;
+      assert.equal(phase?.kind, "reviewing");
+      assert.ok(herdr.agentByName("r1-601"), "reviewer agent started");
+
+      // Dispatcher restarts while the reviewer works
+      const b = makeFixtureDispatcher(fx, board, herdr, { statePath });
+      assert.equal(b.activeWorkers.get("601")?.phase.kind, "reviewing");
+
+      board.postReply("601", "Looks good.\n\nVERDICT: APPROVE", "reviewer-worker-machine-601");
+      herdr.setAgentStatus("r1-601", "idle");
+      await b.tick();
+
+      assert.equal(board.callsFor("complete", "601").length, 1, "approval completes the task");
+      assert.equal(b.activeWorkers.size, 0);
+      assert.equal(herdr.openTabs.size, 0, "implementer and reviewer tabs are closed");
     } finally {
       fx.cleanup();
     }

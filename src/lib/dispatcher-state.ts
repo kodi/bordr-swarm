@@ -50,7 +50,7 @@ function activeToPersisted(task: ActiveTask): PersistedActiveTask {
     ctx: task.ctx,
     phase: task.phase,
     lastLeaseRenewMs: task.lastLeaseRenewMs,
-    phaseSeenReplyIds: [...task.phaseSeenReplyIds].sort(),
+    phaseSeenReplyIds: [...task.phaseSeenReplyIds].toSorted(),
     lastImplSummary: task.lastImplSummary,
   };
 }
@@ -80,11 +80,11 @@ export function toPersisted(
   savedAtMs: number,
 ): PersistedDispatcherState {
   const activeWorkers: Record<string, PersistedActiveTask> = {};
-  for (const id of [...tracked.activeWorkers.keys()].sort()) {
+  for (const id of [...tracked.activeWorkers.keys()].toSorted()) {
     activeWorkers[id] = activeToPersisted(tracked.activeWorkers.get(id)!);
   }
   const parkedTabs: Record<string, PersistedParkedTab> = {};
-  for (const id of [...tracked.parkedTabs.keys()].sort()) {
+  for (const id of [...tracked.parkedTabs.keys()].toSorted()) {
     parkedTabs[id] = parkedToPersisted(tracked.parkedTabs.get(id)!);
   }
   return { version: DISPATCHER_STATE_VERSION, machine, savedAtMs, activeWorkers, parkedTabs };

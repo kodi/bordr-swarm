@@ -135,7 +135,7 @@ Status: `[x]` Done
 
 ### Slice 3: Wire persistence into the dispatcher
 
-Status: `[ ]` Not started
+Status: `[x]` Done
 
 - Goal: a restarted dispatcher resumes tracking the same tasks and tabs.
 - Why here: needs the store from Slice 2 and correct Board lookups from Slice 1.
@@ -244,6 +244,8 @@ Status: `[ ]` Not started
   - **OQ5** (`herdr agent start` with a duplicate name) is not exercised by this plan: reclaiming in Slice 4 keeps the existing agent, so nothing starts a second agent under the same name. Left unverified.
 - 2026-11-27 (Slice 2): `PersistedDispatcherStateSchema` (strict, `version: 1`) lives in `src/lib/schemas.ts` and is not wired into `scripts/generate-schemas.ts`. `src/lib/dispatcher-state.ts` holds pure `toPersisted`/`fromPersisted` (ids and `phaseSeenReplyIds` sorted, so the output is deterministic), `dispatcherStateFingerprint` (everything except `savedAtMs`, used to skip unchanged writes), `resolveDispatcherStatePath`, `loadDispatcherState` (returns `missing` / `loaded` / `other_machine` / `quarantined`; a file for another machine is left in place, not quarantined), and `saveDispatcherState` (temp file + `rename`, mode `0600`). The types are checked both ways at compile time: `fromPersisted` must produce `ActiveTask` and `toPersisted` must accept it.
 
+- 2026-11-27 (Slice 3): `SwarmDispatcher` takes `statePath` (ignored with `--dry-run`), restores at construction, and logs `Restored N active and M parked task(s) from <path>` (or why it started empty). `tick()` wraps the old body in `try/finally` so state is persisted at the end of every tick, including ticks that throw or return early, and only when the fingerprint changed. `runLoop` persists once more on stop and logs that tabs and claims were left in place. The poll sleep is now cut short by `requestStop()`, so `SIGTERM` exits within one tick instead of one tick plus a full poll interval (it was close to launchd's default 20s `ExitTimeOut`). `scripts/stop.ts --reset` already removed `~/.local/state/bordr-swarm` (both default state files); it now also removes `DISPATCHER_STATE_PATH`/`LEAD_WATCHER_STATE_PATH` when set. The lifecycle tests share new `createFakeBoard`/`createFakeHerdr` fakes in `tests/dispatcher.test.ts`. The fake Board honors `--state open`, `read <id>`, claim/renew ownership (`claim_lost`), and replies.
+
 ## Next Slice
 
-**Slice 3**: wire `loadDispatcherState`/`saveDispatcherState` into `SwarmDispatcher` (load at construction, persist at the end of each tick when the fingerprint changed and on stop; skip in `--dry-run`), then `scripts/stop.ts --reset`.
+**Slice 4**: add `boardAssignee` to `TaskObservation` and model lease lapse (`ready` → `reclaim_task`) and claim lost to another profile (`[ORPHANED]`, one reply, stop tracking) in `stepTask`.
