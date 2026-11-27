@@ -9,11 +9,13 @@
  *   executes scripted directives found in the task text, and reports `idle`.
  *
  * Supported task directives:
- *   [sleep:<ms>]          Wait `<ms>` milliseconds before completing (for crash/lease tests).
- *   [commit:<filename>]   Create `<filename>` in the repo checkout and git commit it.
- *   [block:<reason>]      Block the task (`tasks block`) with `<reason>` and stay open.
- *   [fail-exit]           Exit non-zero without completing (tests unexpected exit handling).
- *   [review-ready]        Reply with `STATUS: READY_FOR_REVIEW` instead of completing.
+ *   [sleep:<ms>]                  Wait `<ms>` milliseconds before completing (for crash/restart tests).
+ *   [commit:<filename>]           Create `<filename>` in the repo checkout and git commit it.
+ *   [block:<reason>]              Block the task (`tasks block`) with `<reason>` and stay open.
+ *   [fail-exit]                   Exit non-zero without completing (tests unexpected exit handling).
+ *   [review-ready]                Reply with `STATUS: READY_FOR_REVIEW` instead of completing.
+ *   [review-sleep:<ms>]           When running as reviewer (`BOARD_PROFILE=reviewer-*`), sleep `<ms>` before verdict.
+ *   [review-verdict:<VERDICT>]    Reviewer verdict (`APPROVE` or `REQUEST_CHANGES`, defaults to `APPROVE`).
  */
 import { execFileSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
@@ -27,8 +29,11 @@ process.title = "claude";
 const BOARD_BIN = process.env.BOARD_CLI_BIN || "vercel";
 const IS_VERCEL = BOARD_BIN === "vercel" || BOARD_BIN.endsWith("/vercel");
 
-function runBoard(subArgs) {
+function runBoard(subArgs, { withProfile = false } = {}) {
   const args = IS_VERCEL ? ["board", ...subArgs] : [...subArgs];
+  if (withProfile && process.env.BOARD_PROFILE) {
+    args.push("--as", process.env.BOARD_PROFILE);
+  }
   if (process.env.BOARD_URL) {
     args.push("--url", process.env.BOARD_URL);
   }
@@ -143,6 +148,31 @@ async function handleTurn(prompt) {
     );
   }
 
+  const boardProfile = process.env.BOARD_PROFILE ?? "";
+  const isReviewer = boardProfile.startsWith("reviewer-");
+
+  if (isReviewer) {
+    const reviewSleepMatch = taskText.match(/\[review-sleep:(\d+)\]/);
+    if (reviewSleepMatch) {
+      await delay(Number.parseInt(reviewSleepMatch[1], 10));
+    }
+    const verdictMatch = taskText.match(/\[review-verdict:(APPROVE|REQUEST_CHANGES)\]/i);
+    const verdict = verdictMatch ? verdictMatch[1].toUpperCase() : "APPROVE";
+    runBoard(
+      [
+        "reply",
+        taskId,
+        `fake-claude reviewer (${boardProfile}) reviewed task ${taskId}.\nVERDICT: ${verdict}`,
+      ],
+      { withProfile: true },
+    );
+    await reportHerdrState("idle");
+    process.stdout.write(
+      "\x1b]0;✳ Claude Code\x07\n──────────────────────────────────────────────────────\n❯ \n──────────────────────────────────────────────────────\n",
+    );
+    return;
+  }
+
   const sleepMatch = taskText.match(/\[sleep:(\d+)\]/);
   if (sleepMatch) {
     await delay(Number.parseInt(sleepMatch[1], 10));
@@ -155,7 +185,9 @@ async function handleTurn(prompt) {
 
   const blockMatch = taskText.match(/\[block:([^\]]+)\]/);
   if (blockMatch) {
-    runBoard(["tasks", "block", taskId, blockMatch[1].trim(), "--kind", "needs_input"]);
+    runBoard(["tasks", "block", taskId, blockMatch[1].trim(), "--kind", "needs_input"], {
+      withProfile: true,
+    });
     await reportHerdrState("idle");
     process.stdout.write("\x1b]0;✳ Claude Code\x07\n❯ \n");
     return;
@@ -164,25 +196,22 @@ async function handleTurn(prompt) {
   const commitMatch = taskText.match(/\[commit:([^\]]+)\]/);
   if (commitMatch) {
     const filename = commitMatch[1].trim();
-    writeFileSync(
-      join(process.cwd(), filename),
-      `created by ${process.env.BOARD_PROFILE ?? "fake-claude"}\n`,
-    );
+    writeFileSync(join(process.cwd(), filename), `created by ${boardProfile || "fake-claude"}\n`);
     execFileSync("git", ["add", filename], { stdio: "ignore" });
     execFileSync("git", ["commit", "-m", `task ${taskId}: add ${filename}`], { stdio: "ignore" });
   }
 
   const machine = process.env.SWARM_MACHINE ?? "worker";
-  runBoard([
-    "reply",
-    taskId,
-    `fake-claude (${process.env.BOARD_PROFILE ?? machine}) processed task ${taskId}`,
-  ]);
+  runBoard(["reply", taskId, `fake-claude (${boardProfile || machine}) processed task ${taskId}`], {
+    withProfile: true,
+  });
 
   if (taskText.includes("[review-ready]")) {
-    runBoard(["reply", taskId, "Changes ready.\nSTATUS: READY_FOR_REVIEW"]);
+    runBoard(["reply", taskId, "Changes ready.\nSTATUS: READY_FOR_REVIEW"], { withProfile: true });
   } else {
-    runBoard(["tasks", "complete", taskId, `Completed by fake-claude on ${machine}`]);
+    runBoard(["tasks", "complete", taskId, `Completed by fake-claude on ${machine}`], {
+      withProfile: true,
+    });
   }
 
   await reportHerdrState("idle");

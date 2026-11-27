@@ -4,6 +4,8 @@ import { runChecked, waitFor, type ComposeClient } from "vitecompose/core";
 import { inject } from "vitest";
 import type { SwarmE2eConfig } from "../../compose.setup.ts";
 
+export type WorkerName = "worker-1" | "worker-2";
+
 export type E2eTaskSnapshot = {
   id: string;
   channel: string;
@@ -15,6 +17,7 @@ export type E2eTaskSnapshot = {
 
 export type SwarmFixture = {
   config: SwarmE2eConfig;
+  vbBin: string;
   vb: (
     args: readonly string[],
     opts?: { asProfile?: string; timeoutMs?: number },
@@ -34,16 +37,25 @@ export type SwarmFixture = {
     expected: string | readonly string[],
     opts?: { timeoutMs?: number },
   ) => Promise<E2eTaskSnapshot>;
-  listWorkerTabs: (
-    worker: "worker-1" | "worker-2",
-  ) => Promise<Array<{ tab_id: string; label: string }>>;
+  listWorkerTabs: (worker: WorkerName) => Promise<Array<{ tab_id: string; label: string }>>;
+  closeWorkerTab: (worker: WorkerName, tabId: string) => Promise<void>;
   listWorkerAgents: (
-    worker: "worker-1" | "worker-2",
+    worker: WorkerName,
   ) => Promise<Array<{ name?: string; agent_status: string; tab_id?: string }>>;
-  readDispatcherState: (worker: "worker-1" | "worker-2") => Promise<Record<string, unknown> | null>;
+  readDispatcherState: (worker: WorkerName) => Promise<Record<string, unknown> | null>;
+  readDispatcherLog: (worker: WorkerName) => Promise<string>;
+  stopDispatcher: (worker: WorkerName, opts?: { kill?: boolean }) => Promise<void>;
+  startDispatcher: (worker: WorkerName) => Promise<void>;
+  restartDispatcher: (worker: WorkerName, opts?: { kill?: boolean }) => Promise<void>;
 };
 
 const VB_BIN = resolve(import.meta.dirname, "../../node_modules/.bin/vb");
+
+export function shortTaskId(taskId: string): string {
+  const msgUuid = /^msg_([a-zA-Z0-9]{8})/.exec(taskId);
+  if (msgUuid?.[1]) return msgUuid[1];
+  return taskId.replace(/^#/, "").slice(0, 12);
+}
 
 function parseTaskSnapshot(raw: Record<string, unknown>): E2eTaskSnapshot {
   const msg = (raw.message ?? raw) as Record<string, unknown>;
@@ -79,6 +91,17 @@ function parseTaskSnapshot(raw: Record<string, unknown>): E2eTaskSnapshot {
   };
 }
 
+function resetRepoCmd(repoPath: string): string {
+  return [
+    `if [ -d ${repoPath}/.git ]; then`,
+    `cd ${repoPath}`,
+    "&& git checkout --force main >/dev/null 2>&1 || true",
+    '&& git reset --hard "$(git rev-list --max-parents=0 HEAD | tail -n 1)" >/dev/null 2>&1 || true',
+    "&& git clean -fd >/dev/null 2>&1 || true;",
+    "fi",
+  ].join(" ");
+}
+
 async function resetSwarmEnvironment(
   compose: ComposeClient,
   config: SwarmE2eConfig,
@@ -89,18 +112,20 @@ async function resetSwarmEnvironment(
     throw new Error(`Failed to reset board server: HTTP ${res.status}`);
   }
 
-  // Clear persisted dispatcher state and reset scratch repos on both workers, then restart them cleanly.
+  // Clear persisted dispatcher state, Herdr sessions, logs, and scratch repos on both workers,
+  // then restart them cleanly.
   for (const worker of ["worker-1", "worker-2"] as const) {
     await compose.exec(worker, [
       "sh",
       "-c",
       [
         `rm -f /var/lib/swarm/dispatcher-${worker}.json /var/lib/swarm/dispatcher-${worker}.json.*`,
+        "rm -f /tmp/dispatcher.log /tmp/dispatcher.pid",
+        "touch /var/lib/swarm/.reset-herdr",
         "rm -rf /root/.config/herdr/session.json /root/.config/herdr/session-snapshots",
-        "cd /var/lib/swarm/repos/demo-app && git checkout --force main >/dev/null 2>&1 || true",
-        'cd /var/lib/swarm/repos/demo-app && git reset --hard "$(git rev-list --max-parents=0 HEAD | tail -n 1)" >/dev/null 2>&1 || true',
-        "cd /var/lib/swarm/repos/demo-app && git clean -fd >/dev/null 2>&1 || true",
-      ].join(" && "),
+        resetRepoCmd("/var/lib/swarm/repos/demo-app"),
+        resetRepoCmd("/var/lib/swarm/repos/reviewed-app"),
+      ].join("; "),
     ]);
   }
   await compose.restart(["worker-1", "worker-2"]);
@@ -158,8 +183,18 @@ export const test = composeTest.extend(
       return parseTaskSnapshot(raw);
     };
 
+    const runDispatcherCtl = async (worker: WorkerName, args: readonly string[]): Promise<void> => {
+      const res = await compose.exec(worker, ["dispatcher-ctl", ...args]);
+      if (res.status !== 0) {
+        throw new Error(
+          `dispatcher-ctl ${args.join(" ")} failed on ${worker}: stdout=${res.stdout} stderr=${res.stderr}`,
+        );
+      }
+    };
+
     const swarm: SwarmFixture = {
       config,
+      vbBin: VB_BIN,
       vb: (args, opts) => runVb(args, opts),
       vbJson: (args, opts) => vbJson(args, opts),
       createTask: async (channel, text, opts) => {
@@ -214,6 +249,12 @@ export const test = composeTest.extend(
         };
         return parsed.result?.tabs ?? [];
       },
+      closeWorkerTab: async (worker, tabId) => {
+        const res = await compose.exec(worker, ["herdr", "tab", "close", tabId]);
+        if (res.status !== 0) {
+          throw new Error(`herdr tab close ${tabId} failed on ${worker}: ${res.stderr}`);
+        }
+      },
       listWorkerAgents: async (worker) => {
         const res = await compose.exec(worker, ["herdr", "agent", "list"]);
         if (res.status !== 0) {
@@ -232,6 +273,23 @@ export const test = composeTest.extend(
         ]);
         const trimmed = res.stdout.trim();
         return trimmed ? (JSON.parse(trimmed) as Record<string, unknown>) : null;
+      },
+      readDispatcherLog: async (worker) => {
+        const res = await compose.exec(worker, [
+          "sh",
+          "-c",
+          "cat /tmp/dispatcher.log 2>/dev/null || true",
+        ]);
+        return res.stdout;
+      },
+      stopDispatcher: async (worker, opts) => {
+        await runDispatcherCtl(worker, opts?.kill ? ["stop", "--kill"] : ["stop"]);
+      },
+      startDispatcher: async (worker) => {
+        await runDispatcherCtl(worker, ["start"]);
+      },
+      restartDispatcher: async (worker, opts) => {
+        await runDispatcherCtl(worker, opts?.kill ? ["restart", "--kill"] : ["restart"]);
       },
     };
 

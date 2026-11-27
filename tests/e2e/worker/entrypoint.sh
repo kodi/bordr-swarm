@@ -3,19 +3,28 @@ set -euo pipefail
 
 MACHINE="${SWARM_MACHINE:-worker-1}"
 STATE_DIR="/var/lib/swarm"
-REPO_DIR="${STATE_DIR}/repos/demo-app"
+REPOS_DIR="${STATE_DIR}/repos"
+DEMO_REPO_DIR="${REPOS_DIR}/demo-app"
+REVIEWED_REPO_DIR="${REPOS_DIR}/reviewed-app"
 CONFIG_DIR="${STATE_DIR}/config"
-mkdir -p "$REPO_DIR" "$CONFIG_DIR"
+mkdir -p "$DEMO_REPO_DIR" "$REVIEWED_REPO_DIR" "$CONFIG_DIR"
 
-# Seed a real local Git repository inside the worker container if not already initialized.
-if [ ! -d "${REPO_DIR}/.git" ]; then
-  git -C "$REPO_DIR" init -b main
-  git -C "$REPO_DIR" config user.name "Swarm Test"
-  git -C "$REPO_DIR" config user.email "swarm-test@example.com"
-  printf '# demo-app\n' > "${REPO_DIR}/README.md"
-  git -C "$REPO_DIR" add README.md
-  git -C "$REPO_DIR" commit -m "chore: initial commit"
-fi
+seed_repo() {
+  local repo_dir="$1"
+  local repo_name="$2"
+  if [ ! -d "${repo_dir}/.git" ]; then
+    git -C "$repo_dir" init -b main
+    git -C "$repo_dir" config user.name "Swarm Test"
+    git -C "$repo_dir" config user.email "swarm-test@example.com"
+    printf '# %s\n' "$repo_name" > "${repo_dir}/README.md"
+    git -C "$repo_dir" add README.md
+    git -C "$repo_dir" commit -m "chore: initial commit"
+  fi
+}
+
+# Seed real local Git repositories inside the worker container if not already initialized.
+seed_repo "$DEMO_REPO_DIR" "demo-app"
+seed_repo "$REVIEWED_REPO_DIR" "reviewed-app"
 
 # Generate per-worker swarm.json and projects.json (fast polling for E2E speed).
 cat > "${CONFIG_DIR}/swarm.json" <<EOF
@@ -52,12 +61,31 @@ cat > "${CONFIG_DIR}/projects.json" <<EOF
       "defaultMachine": "any",
       "baseBranch": "main",
       "paths": {
-        "${MACHINE}": "${REPO_DIR}"
+        "${MACHINE}": "${DEMO_REPO_DIR}"
+      }
+    },
+    "reviewed-app": {
+      "defaultMachine": "any",
+      "baseBranch": "main",
+      "reviewer": {
+        "enabled": true,
+        "agent": "claude",
+        "maxRounds": 2,
+        "skipIfNoDiff": true
+      },
+      "paths": {
+        "${MACHINE}": "${REVIEWED_REPO_DIR}"
       }
     }
   }
 }
 EOF
+
+# Clear Herdr session state on startup when requested by the test harness (avoids Herdr
+# flushing a stale session.json on container shutdown and resurrecting tabs on boot).
+if [ -f "${STATE_DIR}/.reset-herdr" ]; then
+  rm -rf /root/.config/herdr/session.json /root/.config/herdr/session-snapshots "${STATE_DIR}/.reset-herdr"
+fi
 
 # Start real headless Herdr server in the background and wait for its Unix socket.
 herdr server >/tmp/herdr-server.log 2>&1 &
@@ -79,5 +107,34 @@ export SWARM_CONFIG_PATH="${CONFIG_DIR}/swarm.json"
 export PROJECTS_CONFIG_PATH="${CONFIG_DIR}/projects.json"
 export DISPATCHER_STATE_PATH="${STATE_DIR}/dispatcher-${MACHINE}.json"
 
-# Forward signals cleanly to dispatcher so graceful-stop persistence is exercised on `docker compose stop`.
-exec node /workspace/src/dispatcher.ts --machine "${MACHINE}"
+# Persist dispatcher env so `dispatcher-ctl start` from `docker compose exec` inherits identical settings.
+cat > /tmp/dispatcher.env <<EOF
+export SWARM_MACHINE='${MACHINE}'
+export SWARM_CONFIG_PATH='${SWARM_CONFIG_PATH}'
+export PROJECTS_CONFIG_PATH='${PROJECTS_CONFIG_PATH}'
+export DISPATCHER_STATE_PATH='${DISPATCHER_STATE_PATH}'
+export BOARD_URL='${BOARD_URL}'
+export BOARD_TOKEN='${BOARD_TOKEN:-}'
+export BOARD_CLI_BIN='${BOARD_CLI_BIN:-vb}'
+EOF
+
+# Stream dispatcher logs to container stdout across independent dispatcher restarts.
+touch /tmp/dispatcher.log
+tail -n 0 -F /tmp/dispatcher.log &
+TAIL_PID=$!
+
+/usr/local/bin/dispatcher-ctl start
+
+shutdown() {
+  /usr/local/bin/dispatcher-ctl stop || true
+  kill "$TAIL_PID" "$HERDR_PID" 2>/dev/null || true
+  wait "$HERDR_PID" 2>/dev/null || true
+  exit 0
+}
+trap shutdown TERM INT
+
+# Keep PID 1 alive so tests can stop/restart only `dispatcher.ts` while `herdr server` stays up.
+while true; do
+  sleep 3600 &
+  wait $! || true
+done

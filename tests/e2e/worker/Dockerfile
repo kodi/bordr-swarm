@@ -15,10 +15,11 @@ ENV PATH="/root/.local/bin:${PATH}"
 # Install real Vercel CLI and @vercel/board (`vb`) globally so both CLIs can be exercised.
 RUN npm install -g --no-audit --no-fund vercel@latest @vercel/board@0.56.1
 
-# Install hermetic fake `claude` CLI on PATH.
+# Install hermetic fake `claude` CLI and worker control scripts on PATH.
 COPY tests/e2e/worker/fake-claude.mjs /usr/local/bin/claude
+COPY tests/e2e/worker/dispatcher-ctl.sh /usr/local/bin/dispatcher-ctl
 COPY tests/e2e/worker/entrypoint.sh /usr/local/bin/worker-entrypoint.sh
-RUN chmod +x /usr/local/bin/claude /usr/local/bin/worker-entrypoint.sh
+RUN chmod +x /usr/local/bin/claude /usr/local/bin/dispatcher-ctl /usr/local/bin/worker-entrypoint.sh
 
 # Pre-install bordr-swarm runtime dependency (zod) into /workspace-deps so mounted /workspace stays Linux-clean.
 WORKDIR /workspace
