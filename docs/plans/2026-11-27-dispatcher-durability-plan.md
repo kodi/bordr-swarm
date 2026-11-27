@@ -171,7 +171,7 @@ Status: `[x]` Done
 
 ### Slice 5: Orphan sweep for the no-state case
 
-Status: `[ ]` Not started
+Status: `[x]` Done
 
 - Goal: recover sensibly when there is no usable state file (first deploy of this change, corrupted file, manual wipe).
 - Why here: a fallback for the path Slices 3 and 4 make primary; lowest value, so last among code slices.
@@ -252,6 +252,16 @@ Status: `[ ]` Not started
   - In review, "alive" means the reviewer session, since that is the one that is working.
   - Trade-off: an orphaned plain-tab task frees its repo lock as soon as tracking stops, even though its agent may still be running in that checkout. The reply asks a human to close the tab. A task that a worker agent `release`s itself now gets re-claimed (agents are told not to release, and nothing in the dispatcher releases a tracked task).
 
+- 2026-11-27 (Slice 5): the pure logic is in `src/lib/orphan-sweep.ts` and the I/O wrapper is `SwarmDispatcher.sweepOrphans`/`applyOrphanDecision`. It runs every tick, after reconcile and before claiming, and reuses the open-task list.
+  - Matching uses the **exact** profile `worker-<machine>-<shortId>`, not a prefix, so a machine named `mac` never sweeps `worker-mac-studio-…`.
+  - Decisions: `adopt` (live `w-<shortId>`), `park_in_review` (a live `r<N>-<shortId>` too), `release` (no live implementer), and `skip`. `skip` covers a live agent that we cannot route (unknown project or path) or that has no tab or pane id: we leave it alone and never release live work.
+  - To route an adopted task, the per-task half of `selectEligibleTasks` was extracted as `resolveTaskRouting` (no behavior change).
+  - An adopted task gets `lastLeaseRenewMs: 0` so the next reconcile renews right away, and every existing reply is marked seen, so an old `READY_FOR_REVIEW` is not replayed.
+  - `park_in_review` **blocks** the task on the Board (`needs_input`) before parking. A parked `blocked` tab whose task is still `claimed` would be unparked on the next tick by `stepParkedTab`. If the block fails, nothing is parked and the sweep retries next tick.
+  - If `herdr agent list` fails, the sweep skips that tick rather than releasing.
+  - Ids tracked at tick start are excluded. Otherwise a task that reconcile completed this tick, which still reads `claimed` in the list fetched before reconcile, would be re-adopted. A mutation check confirms the lifecycle test fails without this guard.
+  - Follow-up, out of scope (it applies to every parked `[BLOCKED]` tab): `tasks unblock` returns a task to `ready`, not `claimed`, so `stepParkedTab`'s unpark-on-`claimed` path only fires when someone re-claims under our profile. An unblocked parked task waits until its tab is closed.
+
 ## Next Slice
 
-**Slice 5**: orphan sweep for tasks `claimed` by `worker-<thisMachine>-*` that are not tracked (no or corrupt state file). Keep the decision in a pure function, adopt live `w-<shortId>` agents, and release the task when there is no agent.
+**Slice 6**: docs (architecture "Restart and recovery", worker setup + README note that `mise run update` is safe with tasks in flight, AGENTS.md durable-state decision) and optionally skip the dispatcher restart in `scripts/update.ts` when no code changed.

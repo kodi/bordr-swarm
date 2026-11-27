@@ -1,5 +1,13 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -1516,6 +1524,157 @@ describe("SwarmDispatcher mocked lifecycle", () => {
 
       const c = makeFixtureDispatcher(fx, board, herdr, { statePath });
       assert.equal(c.activeWorkers.size, 0, "orphaning is persisted");
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it("orphan sweep with a corrupt state file: quarantines, adopts live agents, releases dead ones", async () => {
+    const fx = createLifecycleFixture();
+    try {
+      const statePath = join(fx.tmpBase, "dispatcher.json");
+      writeFileSync(statePath, '{"version": 1, "machine": "worker-machine", "activeWor');
+
+      const claimedBy = (id: string) => ({
+        id,
+        state: "claimed" as const,
+        assignee: `worker-worker-machine-${id}`,
+        labels: {},
+      });
+      const board = createFakeBoard([
+        { ...claimedBy("901"), channel: "projects/repo-a", text: "Live implementer" },
+        { ...claimedBy("902"), channel: "projects/repo-a", text: "Agent died" },
+        { ...claimedBy("903"), channel: "projects/repo-b", text: "Mid-review" },
+        // Someone else's claim is never ours to sweep
+        {
+          id: "904",
+          channel: "projects/repo-b",
+          state: "claimed",
+          assignee: "worker-other-machine-904",
+          text: "Not ours",
+          labels: {},
+        },
+      ]);
+      board.postReply("901", "Earlier progress update", "worker-worker-machine-901");
+      board.postReply(
+        "901",
+        "Old handoff\n\nSTATUS: READY_FOR_REVIEW",
+        "worker-worker-machine-901",
+      );
+
+      const herdr = createFakeHerdr(FIXTURE_WORKSPACES);
+      const addLiveAgent = (name: string, wsId: string, tabId: string, label: string) => {
+        herdr.openTabs.set(tabId, { tab_id: tabId, workspace_id: wsId, label });
+        herdr.liveAgents.set(`${tabId}:p`, {
+          pane_id: `${tabId}:p`,
+          tab_id: tabId,
+          workspace_id: wsId,
+          agent_status: "working",
+          name,
+        });
+      };
+      addLiveAgent("w-901", "w1", "w1:t90", "task-901 (claude)");
+      addLiveAgent("w-903", "w2", "w2:t91", "task-903 [IN-REVIEW r1] (claude)");
+      addLiveAgent("r1-903", "w2", "w2:t92", "review-903 r1 (claude)");
+      addLiveAgent("w-904", "w2", "w2:t93", "task-904 (claude)");
+
+      const b = makeFixtureDispatcher(fx, board, herdr, { statePath });
+      assert.equal(b.activeWorkers.size + b.parkedTabs.size, 0, "corrupt state starts empty");
+      assert.ok(!existsSync(statePath) || readFileSync(statePath, "utf8").startsWith("{\n"));
+      assert.equal(
+        readdirSync(fx.tmpBase).filter((f) => f.startsWith("dispatcher.json.corrupt-")).length,
+        1,
+        "corrupt file is quarantined",
+      );
+
+      await b.tick();
+
+      // #901 adopted as implementing/running on the live agent, old replies marked seen
+      const adopted = b.activeWorkers.get("901");
+      assert.ok(adopted);
+      assert.equal(adopted.phase.kind, "implementing");
+      assert.equal(adopted.ctx.boardProfile, "worker-worker-machine-901");
+      assert.equal(adopted.phaseSeenReplyIds.size, 2);
+      assert.equal(board.callsFor("release", "901").length, 0);
+
+      // #902 released with an explanation
+      assert.equal(board.tasks.get("902")!.state, "ready");
+      assert.equal(board.callsFor("release", "902").length, 1);
+      assert.match(board.tasks.get("902")!.replies.at(-1)!.text, /released the task/);
+
+      // #903 parked [BLOCKED] instead of guessing the review round
+      assert.ok(b.parkedTabs.has("903"));
+      assert.equal(board.tasks.get("903")!.state, "blocked");
+      assert.equal(herdr.openTabs.get("w2:t91")?.label, "[BLOCKED] task-903 (claude)");
+
+      // #904 untouched
+      assert.equal(board.tasks.get("904")!.replies.length, 0);
+      assert.ok(!b.activeWorkers.has("904") && !b.parkedTabs.has("904"));
+
+      // Next tick: the adopted task's lease is renewed right away under its own profile,
+      // #902 (now ready) waits for repo-a's plain-tab lock, and #901 is not re-sent to review.
+      await b.tick();
+      const renews = board.callsFor("renew", "901");
+      assert.equal(renews.length, 1);
+      assert.equal(renews[0]![renews[0]!.indexOf("--as") + 1], "worker-worker-machine-901");
+      assert.equal(board.callsFor("claim", "902").length, 0, "repo-a is busy with adopted #901");
+      assert.ok(!herdr.agentByName("r1-901"), "old READY_FOR_REVIEW is not replayed");
+
+      // The adoption is durable from here on
+      const c = makeFixtureDispatcher(fx, board, herdr, { statePath });
+      assert.ok(c.activeWorkers.has("901"));
+      assert.ok(c.parkedTabs.has("903"));
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it("orphan sweep does not adopt a task that reconcile just finished this tick", async () => {
+    const fx = createLifecycleFixture({ reviewer: true });
+    try {
+      // No-diff handoff completes the task inside reconcile; the agent stays alive afterwards.
+      fx.swarm.workerDefaults.reviewer.skipIfNoDiff = true;
+      fx.swarm.workerDefaults.closeTabOnComplete = false;
+      const board = createFakeBoard([
+        { id: "951", channel: "projects/repo-a", state: "ready", text: "No-op", labels: {} },
+      ]);
+      const herdr = createFakeHerdr(FIXTURE_WORKSPACES);
+      const d = new SwarmDispatcher({
+        repoRoot: fx.tmpBase,
+        swarm: fx.swarm,
+        projects: fx.projects,
+        machineName: "worker-machine",
+        board: new BoardClient({ scope: "test-team" }, board.runner),
+        herdr: new HerdrClient({ target: "local" }, herdr.runner),
+        promptTemplate: "x",
+        gitDetector: {
+          captureHeadSha: () => "abc1234",
+          detectChanges: () => ({
+            hasChanges: false,
+            currentHeadSha: "abc1234",
+            dirtyFiles: 0,
+            detail: "no changes",
+          }),
+        },
+        availableAgentKinds: new Set(["claude"]),
+        dryRun: false,
+      });
+      await d.tick();
+      assert.ok(d.activeWorkers.has("951"));
+
+      board.postReply(
+        "951",
+        "Nothing to change.\n\nSTATUS: READY_FOR_REVIEW",
+        "worker-worker-machine-951",
+      );
+      herdr.setAgentStatus("w-951", "idle");
+      await d.tick();
+
+      // The list fetched at tick start still said claimed-by-us, but reconcile completed it.
+      assert.equal(board.callsFor("complete", "951").length, 1);
+      assert.ok(herdr.agentByName("w-951"), "agent is still alive");
+      assert.equal(d.activeWorkers.size, 0, "completed task is not re-adopted by the sweep");
+      assert.equal(board.callsFor("release", "951").length, 0);
     } finally {
       fx.cleanup();
     }

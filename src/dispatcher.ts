@@ -32,6 +32,14 @@ import {
   type HerdrAgent,
   type HerdrTab,
 } from "./lib/herdr.ts";
+import {
+  blockedAdoptionLabel,
+  buildAdoptedTask,
+  buildParkedAdoption,
+  decideOrphan,
+  findUntrackedOwnClaims,
+  type OrphanDecision,
+} from "./lib/orphan-sweep.ts";
 import { buildMachineRegistryEntry, publishMachineRegistry } from "./lib/registry.ts";
 import {
   defaultGitChangeDetector,
@@ -42,6 +50,7 @@ import {
 import {
   formatTabLabel,
   renderWorkerPrompt,
+  resolveTaskRouting,
   selectEligibleTasks,
   shortTaskId,
   type CandidateTask,
@@ -369,9 +378,14 @@ export class SwarmDispatcher {
     for (const t of openTasks) tasksById.set(t.id, t);
     await this.lookupTrackedTasksMissingFromOpenList(tasksById);
 
+    // Tasks reconcile finishes this tick still look `claimed` in the (pre-reconcile) list;
+    // remember them so the orphan sweep does not mistake them for orphans.
+    const trackedAtTickStart = this.getTrackedTaskIds();
     if (this.activeWorkers.size > 0 || this.parkedTabs.size > 0) {
       await this.reconcileRunningWorkers(tasksById);
     }
+
+    await this.sweepOrphans(openTasks, trackedAtTickStart);
 
     if (this.stopping) return;
 
@@ -475,6 +489,149 @@ export class SwarmDispatcher {
         "WARN",
         `Tracked task #${id} is not in the open-task list and its state could not be resolved (${error ?? "lookup returned no task state"}); treating it as unknown this tick.`,
       );
+    }
+  }
+
+  /**
+   * Recovers tasks the Board says this machine holds but nothing tracks (no or corrupt state
+   * file). Decisions come from the pure `decideOrphan`; this only runs the I/O.
+   */
+  private async sweepOrphans(
+    openTasks: readonly BoardTask[],
+    trackedAtTickStart: ReadonlySet<string>,
+  ): Promise<void> {
+    const tracked = new Set([...trackedAtTickStart, ...this.getTrackedTaskIds()]);
+    const orphans = findUntrackedOwnClaims(openTasks, tracked, this.machineName);
+    if (orphans.length === 0) return;
+
+    const machineConfig = this.swarm.machines[this.machineName];
+    if (!machineConfig) return;
+
+    let agents: HerdrAgent[];
+    try {
+      agents = await this.herdr.listAgents();
+    } catch (err) {
+      // Never release work because Herdr was briefly unreachable
+      log(
+        "WARN",
+        `Orphan sweep skipped: could not list Herdr agents (${err instanceof Error ? err.message : String(err)}); ${orphans.length} untracked claim(s) left for next tick.`,
+      );
+      return;
+    }
+
+    for (const orphan of orphans) {
+      if (this.stopping) return;
+      const routing = resolveTaskRouting({
+        task: orphan.task,
+        swarm: this.swarm,
+        projects: this.projects,
+        machineName: this.machineName,
+        machineConfig,
+        availableAgentKinds: this.availableAgentKinds,
+      });
+      const decision = decideOrphan(orphan, agents, routing);
+      if (this.dryRun) {
+        log("INFO", `[dry-run] Orphan sweep would ${decision.kind} task #${orphan.task.id}.`);
+        continue;
+      }
+      await this.applyOrphanDecision(decision);
+    }
+  }
+
+  private async applyOrphanDecision(decision: OrphanDecision): Promise<void> {
+    const { orphan } = decision;
+    const taskId = orphan.task.id;
+    const nowMs = Date.now();
+
+    switch (decision.kind) {
+      case "skip":
+        log("WARN", `Orphan sweep left task #${taskId} alone: ${decision.reason}.`);
+        return;
+
+      case "release": {
+        log(
+          "WARN",
+          `Task #${taskId} is claimed by ${orphan.boardProfile} but untracked and no live ${orphan.implAgentName} agent exists; releasing it.`,
+        );
+        await this.board
+          .reply(
+            taskId,
+            `Dispatcher on \`${this.machineName}\` restarted without a record of this task and found no live \`${orphan.implAgentName}\` agent, so it released the task so it can be claimed again.`,
+            { asProfile: orphan.boardProfile },
+          )
+          .catch(() => {});
+        await this.board.releaseTask(taskId, { asProfile: orphan.boardProfile }).catch((err) => {
+          log(
+            "WARN",
+            `Failed to release orphaned task #${taskId}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        });
+        return;
+      }
+
+      case "adopt":
+      case "park_in_review": {
+        const thread = await this.board.readThread(taskId).catch((err) => {
+          log(
+            "WARN",
+            `Orphan sweep could not read thread #${taskId} (${err instanceof Error ? err.message : String(err)}); retrying next tick.`,
+          );
+          return null;
+        });
+        if (!thread) return;
+
+        const task = buildAdoptedTask({
+          orphan,
+          routing: decision.routing,
+          impl: decision.impl,
+          replyIds: thread.replies.map((r) => r.id),
+          machineName: this.machineName,
+          humanHandle: this.swarm.board.humanHandle,
+          nowMs,
+        });
+
+        if (decision.kind === "adopt") {
+          this.activeWorkers.set(taskId, task);
+          log(
+            "INFO",
+            `Adopted orphaned task #${taskId}: live agent ${decision.impl.name} in ${decision.impl.tabId} (implementing, ${thread.replies.length} existing repl(ies) marked seen).`,
+          );
+          return;
+        }
+
+        // A reviewer is live too, and we cannot know the round: hand it to a human.
+        try {
+          await this.board.blockTask(
+            taskId,
+            `Dispatcher on ${this.machineName} restarted mid-review without state; inspect tabs in Sheprd.`,
+            { asProfile: orphan.boardProfile, kind: "needs_input" },
+          );
+        } catch (err) {
+          log(
+            "WARN",
+            `Could not block orphaned in-review task #${taskId} (${err instanceof Error ? err.message : String(err)}); retrying next tick.`,
+          );
+          return;
+        }
+        const label = blockedAdoptionLabel(task);
+        await this.herdr.renameTab(decision.impl.tabId, label).catch(() => {});
+        await this.board
+          .reply(
+            taskId,
+            `Dispatcher on \`${this.machineName}\` restarted without a record of this task while reviewer \`${decision.reviewerAgentName}\` was still running, so it cannot tell which review round this is. It blocked the task and parked the implementer tab \`${label}\` in workspace \`${decision.routing.projectSlug}\` for a human (${this.swarm.board.humanHandle} @lead). Check both tabs in Sheprd before unblocking.`,
+            { asProfile: orphan.boardProfile },
+          )
+          .catch(() => {});
+        this.parkedTabs.set(taskId, buildParkedAdoption(task, nowMs));
+        log(
+          "WARN",
+          `Orphaned task #${taskId} has live implementer ${decision.impl.name} and reviewer ${decision.reviewerAgentName}; blocked it and parked ${decision.impl.tabId}.`,
+        );
+        return;
+      }
+
+      default:
+        assertNever(decision);
     }
   }
 
