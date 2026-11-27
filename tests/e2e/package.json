@@ -11,7 +11,7 @@
     "@types/node": "^24.0.0",
     "@vercel/board": "latest",
     "typescript": "^7.0.2",
-    "vitecompose": "^0.1.2",
+    "vitecompose": "^0.2.0",
     "vitest": "^5.1.0"
   }
 }

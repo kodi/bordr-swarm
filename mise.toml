@@ -144,7 +144,8 @@ run = "npm --prefix tests/e2e run e2e"
 
 [tasks."e2e:one"]
 description = "Run one Docker Compose E2E test by name filter (pass -t pattern)"
-run = "npm --prefix tests/e2e exec -- vitest run -t \"{{arg(name='pattern')}}\""
+dir = "tests/e2e"
+run = "npx vitest run -t \"{{arg(name='pattern')}}\""
 
 [tasks."e2e:fresh"]
 description = "Run Docker Compose E2E tests on a fresh stack (deleted afterward)"
