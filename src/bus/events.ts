@@ -35,7 +35,14 @@ export type EventSourceName = "board" | "herdr";
  * instead of treating an event as the only source of truth.
  */
 export type SwarmEvent =
-  | { kind: "board.message"; op: BoardMessageOp; message: BoardMessage; cursor: string }
+  | {
+      kind: "board.message";
+      op: BoardMessageOp;
+      message: BoardMessage;
+      cursor: string;
+      /** When the Board recorded the event (ISO), if the envelope carried it. */
+      createdAt?: string;
+    }
   | {
       kind: "board.task";
       op: BoardTaskOp;
@@ -45,6 +52,7 @@ export type SwarmEvent =
       /** The thread root message snapshot, when the event carried one. */
       message: BoardMessage | null;
       cursor: string;
+      createdAt?: string;
     }
   | {
       kind: "board.reaction";
@@ -149,6 +157,7 @@ export function parseBoardTailLine(line: string): BoardTailLineResult {
   const env = BoardTailEnvelopeSchema.safeParse(raw);
   if (!env.success) return { kind: "skip", reason: "not a tail event" };
   const { cursor, type, payload } = env.data;
+  const at = env.data.createdAt ? { createdAt: env.data.createdAt } : {};
   const rawMessage = env.data.message ?? null;
   const [family, op = ""] = type.split(".", 2);
 
@@ -158,7 +167,7 @@ export function parseBoardTailLine(line: string): BoardTailLineResult {
     }
     const message = parseMessage(rawMessage, payload);
     if (!message) return { kind: "skip", reason: `${type} without a message` };
-    return { kind: "event", event: { kind: "board.message", op, message, cursor } };
+    return { kind: "event", event: { kind: "board.message", op, message, cursor, ...at } };
   }
 
   if (family === "task") {
@@ -174,6 +183,7 @@ export function parseBoardTailLine(line: string): BoardTailLineResult {
         task,
         message: parseMessage(rawMessage, null),
         cursor,
+        ...at,
       },
     };
   }

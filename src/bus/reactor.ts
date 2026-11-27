@@ -67,9 +67,11 @@ export class ReactorRegistry<Ctx> {
     return this.reactors.some((r) => this.safeMatches(r, event));
   }
 
-  collect(event: SwarmEvent, ctx: Ctx): CollectedEffect[] {
+  /** Effects of every matching reactor; `only` restricts which reactors run (by name). */
+  collect(event: SwarmEvent, ctx: Ctx, only?: (name: string) => boolean): CollectedEffect[] {
     const out: CollectedEffect[] = [];
     for (const reactor of this.reactors) {
+      if (only && !only(reactor.name)) continue;
       if (!this.safeMatches(reactor, event)) continue;
       try {
         for (const effect of reactor.react(event, ctx)) out.push({ reactor: reactor.name, effect });

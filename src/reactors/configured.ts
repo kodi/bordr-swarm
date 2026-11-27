@@ -8,6 +8,9 @@ import type { BoardClient } from "../lib/board.ts";
 import { getMessageAuthorLabel, isAuthoredByProfile } from "../lib/lead-events.ts";
 import type { ConfiguredReactor, ReactorEventSelector } from "../lib/schemas.ts";
 
+/** Name prefix of config-driven reactors in a registry (`config:<name>`). */
+export const CONFIGURED_REACTOR_PREFIX = "config:";
+
 /** The Board event type of an event (`message.posted`, `task.blocked`, ...), or null. */
 export function eventSelectorOf(event: SwarmEvent): string | null {
   switch (event.kind) {
@@ -106,7 +109,7 @@ export function createConfiguredReactor(cfg: ConfiguredReactor): Reactor<unknown
   const ownProfile = reactorProfile(cfg);
   const cooldownMs = cfg.cooldownSeconds * 1000;
   return {
-    name: `config:${cfg.name}`,
+    name: `${CONFIGURED_REACTOR_PREFIX}${cfg.name}`,
     matches: (event) => {
       const type = eventSelectorOf(event);
       if (!cfg.enabled || !type || !selectors.some((sel) => selectorMatches(sel, type))) {
@@ -307,7 +310,7 @@ export function validateConfiguredReactors(
     summary.push(
       `${cfg.name}${cfg.enabled ? "" : " (disabled)"}: on ${on} → ${action} [${cfg.runOn}]`,
     );
-    if ("command" in cfg.run && !commandExists(cfg.run.command[0]!, env)) {
+    if (cfg.enabled && "command" in cfg.run && !commandExists(cfg.run.command[0]!, env)) {
       errors.push(`reactor "${cfg.name}": command "${cfg.run.command[0]}" not found on PATH`);
     }
     if (

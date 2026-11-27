@@ -397,6 +397,40 @@ export function leadWakeEventFromBoardEvent(
   return null;
 }
 
+/** Tail cursor carried by a Board event, if any. */
+function boardCursor(event: SwarmEvent): string | undefined {
+  return event.kind === "board.message" ||
+    event.kind === "board.task" ||
+    event.kind === "board.reaction" ||
+    event.kind === "board.other"
+    ? event.cursor
+    : undefined;
+}
+
+/**
+ * State update for a live event that the catch-up path (or an earlier delivery) already covered:
+ * only the tail cursor moves. Seen markers and reply counts stay as the newer catch-up left them.
+ */
+export function advanceTailCursor(state: LeadWatcherState, event: SwarmEvent): LeadWatcherState {
+  const cursor = boardCursor(event);
+  return cursor ? { ...state, tailCursor: cursor } : state;
+}
+
+/** Skew allowance between the Board's clock and ours when comparing event times. */
+export const CATCH_UP_COVER_MARGIN_MS = 30_000;
+
+/**
+ * True when a live Board event happened before a catch-up read that started at
+ * `catchUpStartedMs` (with a safety margin for clock skew), so that read already reflected it.
+ * Events without a timestamp are never considered covered.
+ */
+export function isCoveredByCatchUp(event: SwarmEvent, catchUpStartedMs: number | null): boolean {
+  if (catchUpStartedMs === null) return false;
+  if (event.kind !== "board.message" && event.kind !== "board.task") return false;
+  const at = event.createdAt ? Date.parse(event.createdAt) : Number.NaN;
+  return Number.isFinite(at) && at < catchUpStartedMs - CATCH_UP_COVER_MARGIN_MS;
+}
+
 /**
  * Pure state update after a live Board event was handled: advances the seen marker of inbox and
  * project threads (so the catch-up path does not report the same message again), remembers the

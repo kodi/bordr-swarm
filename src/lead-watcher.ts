@@ -31,11 +31,13 @@ import {
 } from "./lib/config.ts";
 import { HerdrClient, type HerdrAgent, type HerdrTab } from "./lib/herdr.ts";
 import {
+  advanceTailCursor,
   applyLiveBoardEventToState,
   buildLeadWakePrompt,
   collectLeadEvents,
   createEmptyLeadState,
   enqueueLeadEvents,
+  isCoveredByCatchUp,
   isMessageAlreadyHandled,
   LEAD_ACK_EMOJI,
   selectMessagesToAcknowledge,
@@ -58,6 +60,7 @@ import {
 } from "./lib/registry.ts";
 import { assertNever } from "./lib/session-fsm.ts";
 import {
+  CONFIGURED_REACTOR_PREFIX,
   createConfiguredEffectHandlers,
   createConfiguredReactors,
   type CommandRunner,
@@ -342,14 +345,20 @@ export class LeadWatcher {
     let registryChanged = false;
 
     for (const event of queued) {
+      // Already reflected by a catch-up read (replay after restart, or posted while reading) or
+      // delivered before: Lead's own reactions skip it, and only the cursor moves.
       const duplicate =
+        isCoveredByCatchUp(event, this.lastCatchUpStartedMs) ||
         (event.kind === "board.message" && isMessageAlreadyHandled(event.message, this.state)) ||
         (event.kind === "board.task" &&
           event.op === "blocked" &&
           this.state.seenBlockedTaskIds.includes(event.task.id));
-      const effects: CollectedEffect[] = duplicate
-        ? []
-        : this.reactors.collect(event, this.reactorContext());
+      // Configured reactors see every live event exactly once; they have no catch-up path.
+      const effects: CollectedEffect[] = this.reactors.collect(
+        event,
+        this.reactorContext(),
+        duplicate ? (name) => name.startsWith(CONFIGURED_REACTOR_PREFIX) : undefined,
+      );
 
       const handledIds: string[] = [];
       for (const { reactor, effect } of effects) {
@@ -370,13 +379,17 @@ export class LeadWatcher {
             this.deferredEffects.push({ reactor, effect });
         }
       }
-      this.state = applyLiveBoardEventToState(this.state, event, ctx, handledIds);
+      this.state = duplicate
+        ? advanceTailCursor(this.state, event)
+        : applyLiveBoardEventToState(this.state, event, ctx, handledIds);
     }
     return { events, acks, registryChanged };
   }
 
   /** Effects other than Lead's own (commands, posts) run after the tick's triage. */
   private deferredEffects: CollectedEffect[] = [];
+  /** When the last catch-up read started (our clock); live events older than it are covered. */
+  private lastCatchUpStartedMs: number | null = null;
 
   private async reactAck(messageId: string, threadId: string): Promise<void> {
     const leadProfile = this.swarm.lead.boardProfile;
@@ -827,6 +840,11 @@ export class LeadWatcher {
 
   private async runTick(fullReconcile: boolean): Promise<void> {
     const live = this.drainLiveEvents();
+    // Queue live wake events before anything that can throw: the drain already marked these
+    // messages handled and advanced the cursor, so this is the only copy.
+    this.enqueueEvents(live.events);
+    this.persistState();
+
     if (fullReconcile || live.registryChanged) {
       await this.syncRegistryCatalog();
     }
@@ -836,17 +854,8 @@ export class LeadWatcher {
       await this.reactAck(ack.messageId, ack.threadId);
     }
 
-    const events: LeadWakeEvent[] = [...live.events];
     if (fullReconcile) {
-      events.push(...(await this.collectCatchUpEvents()));
-    }
-
-    if (events.length > 0) {
-      log("INFO", `Detected ${events.length} new Board event(s) for Lead.`);
-      this.state = {
-        ...this.state,
-        pendingByThread: enqueueLeadEvents(this.state.pendingByThread, events),
-      };
+      this.enqueueEvents(await this.collectCatchUpEvents());
     }
     this.persistState();
 
@@ -868,6 +877,15 @@ export class LeadWatcher {
     await this.runDeferredEffects();
   }
 
+  private enqueueEvents(events: LeadWakeEvent[]): void {
+    if (events.length === 0) return;
+    log("INFO", `Detected ${events.length} new Board event(s) for Lead.`);
+    this.state = {
+      ...this.state,
+      pendingByThread: enqueueLeadEvents(this.state.pendingByThread, events),
+    };
+  }
+
   private async runDeferredEffects(): Promise<void> {
     const effects = this.deferredEffects;
     this.deferredEffects = [];
@@ -879,6 +897,7 @@ export class LeadWatcher {
     const inboxChannel = this.swarm.board.inboxChannel;
     const prefix = this.swarm.board.projectChannelPrefix;
     const leadProfile = this.swarm.lead.boardProfile;
+    const startedMs = this.now();
 
     const [inboxRes, projectChannels, blockedTasks] = await Promise.all([
       this.board.readChannel(inboxChannel, { limit: 30 }),
@@ -932,6 +951,8 @@ export class LeadWatcher {
     }
 
     this.state = { ...nextState, pendingByThread: this.state.pendingByThread };
+    // Only a completed catch-up covers older live events.
+    this.lastCatchUpStartedMs = startedMs;
     return events;
   }
 

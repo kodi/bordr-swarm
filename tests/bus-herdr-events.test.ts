@@ -250,6 +250,23 @@ describe("HerdrEventSource", () => {
     await server.close();
   });
 
+  it("reopens pane subscriptions after stop() and start()", async () => {
+    const { server, source } = await setup();
+    source.setWatchedPanes(["w1:p5"]);
+    source.start();
+    await until(
+      () => server.live().filter((c) => c.requests.length > 0).length === 2,
+      "first start subscribed",
+    );
+    source.stop();
+    await until(() => server.live().length === 0, "closed");
+    source.start();
+    await until(
+      () => server.live().filter((c) => c.requests.length > 0).length === 2,
+      "restart re-subscribed the pane",
+    );
+  });
+
   it("is disabled for a non-local herdrTarget", () => {
     const events: SwarmEvent[] = [];
     const source = new HerdrEventSource({

@@ -150,7 +150,12 @@ export class HerdrEventSource {
     this.stopped = false;
     this.global = this.newConn({ kind: "global" });
     void this.open(this.global);
-    for (const conn of this.panes.values()) void this.open(conn);
+    // Fresh connections: stop() closed the previous ones for good.
+    for (const paneId of this.panes.keys()) {
+      const conn = this.newConn({ kind: "pane", paneId });
+      this.panes.set(paneId, conn);
+      void this.open(conn);
+    }
   }
 
   stop(): void {

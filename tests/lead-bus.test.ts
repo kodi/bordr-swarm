@@ -517,3 +517,119 @@ describe("applyLiveBoardEventToState", () => {
     assert.deepEqual(s.seenBlockedTaskIds, []);
   });
 });
+
+describe("code-review regressions", () => {
+  it("real timers keep the process alive (a polling-only daemon must not exit)", async () => {
+    const { realTimers } = await import("../src/bus/timers.ts");
+    const handle = realTimers.setTimeout(() => {}, 60_000) as { hasRef(): boolean };
+    assert.equal(handle.hasRef(), true);
+    realTimers.clearTimeout(handle);
+  });
+
+  it("a live wake event survives a catch-up read that throws in the same tick", async () => {
+    let failInbox = false;
+    const t = setup({
+      inbox: () => {
+        if (failInbox) throw new Error("network down");
+        return [];
+      },
+    });
+    t.start();
+    await settle();
+    failInbox = true;
+    t.bus.publish(postedEvent("c-1", { ...human("msg_fff66666_1", "Hello"), channel: "inbox" }));
+    // A periodic tick (drain + catch-up) whose catch-up fails.
+    await t.watcher.tick().catch(() => {});
+    const state = loadLeadWatcherState(t.statePath);
+    assert.equal(state.pendingByThread.msg_fff66666_1?.[0]?.latestMessageId, "msg_fff66666_1");
+    assert.ok(state.handledMessageIds?.includes("msg_fff66666_1"));
+  });
+
+  it("ignores replayed events older than the last catch-up without regressing markers", async () => {
+    const newest = human("msg_ggg77777_3", "latest");
+    const t = setup({
+      inbox: () => [{ message: human("msg_ggg77777_1", "root"), replies: 2, last: newest }],
+    });
+    t.start();
+    await settle();
+    const prompted = t.herdr.prompted.length;
+    const reactedBefore = [...t.board.reacted];
+    const before = loadLeadWatcherState(t.statePath);
+    assert.equal(before.seenThreadLatestMsgId.msg_ggg77777_1, "msg_ggg77777_3");
+
+    // Replay (e.g. resumed --after) of an older reply and of a long-resolved block, both from
+    // well before the catch-up started (the test clock is 1970, so any 2026 date is "after").
+    const old = new Date(0).toISOString();
+    t.bus.publish(
+      tailEvent({
+        cursor: "c-old-1",
+        type: "message.posted",
+        createdAt: old,
+        payload: {},
+        message: { ...human("msg_ggg77777_2", "older"), channel: "inbox", re: "msg_ggg77777_1" },
+      }),
+    );
+    t.bus.publish(
+      tailEvent({
+        cursor: "c-old-2",
+        type: "task.blocked",
+        createdAt: old,
+        payload: {},
+        message: {
+          id: "msg_hhh_1",
+          channel: "projects/app",
+          text: "x",
+          task: { state: "blocked" },
+        },
+      }),
+    );
+    t.timers.advance(250);
+    await settle();
+    const after = loadLeadWatcherState(t.statePath);
+    assert.equal(
+      after.seenThreadLatestMsgId.msg_ggg77777_1,
+      "msg_ggg77777_3",
+      "marker not regressed",
+    );
+    assert.equal(after.seenThreadReplyCount?.msg_ggg77777_1, 2, "count not bumped");
+    assert.equal(after.pendingByThread.msg_hhh_1, undefined, "no wake for a stale block");
+    assert.equal(after.tailCursor, "c-old-2", "cursor still advances");
+    assert.equal(t.herdr.prompted.length, prompted);
+    assert.deepEqual(t.board.reacted, reactedBefore, "no 👀 for the replayed message");
+  });
+
+  it("does not bump the reply count for a duplicate live event", async () => {
+    const root = human("msg_iii88888_1", "root");
+    const reply = human("msg_iii88888_2", "reply");
+    const t = setup({ inbox: () => [{ message: root, replies: 1, last: reply }] });
+    t.start();
+    await settle();
+    t.bus.publish(postedEvent("c-dup", { ...reply, channel: "inbox", re: "msg_iii88888_1" }));
+    t.timers.advance(250);
+    await settle();
+    assert.equal(loadLeadWatcherState(t.statePath).seenThreadReplyCount?.msg_iii88888_1, 1);
+  });
+
+  it("still runs configured reactors for events Lead's own reactions treat as duplicates", async () => {
+    const ran: string[] = [];
+    const msg = human("msg_jjj99999_1", "deploy?");
+    const t = setup({
+      inbox: () => [{ message: msg, replies: 0, last: null }],
+      reactors: [
+        { name: "audit", on: "message.posted", cooldownSeconds: 0, run: { command: ["audit"] } },
+      ],
+      commandRunner: async (argv) => {
+        ran.push(argv[0]!);
+        return { code: 0, stdout: "", stderr: "", timedOut: false };
+      },
+    });
+    t.start();
+    await settle();
+    // Catch-up already handled it; the live copy arrives afterwards.
+    t.bus.publish(postedEvent("c-a", { ...msg, channel: "inbox" }));
+    t.timers.advance(250);
+    await settle();
+    assert.deepEqual(ran, ["audit"]);
+    assert.equal(t.herdr.prompted.length, 1, "Lead itself is woken only once");
+  });
+});

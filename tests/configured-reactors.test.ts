@@ -297,5 +297,17 @@ describe("validateConfiguredReactors (doctor)", () => {
     assert.match(res.errors[0]!, /definitely-not-a-real-binary-xyz/);
     assert.equal(res.warnings.length, 2);
     assert.equal(res.summary.length, 3);
+
+    const disabled = validateConfiguredReactors(
+      [
+        reactor({
+          name: "off",
+          enabled: false,
+          run: { command: ["definitely-not-a-real-binary-xyz"] },
+        }),
+      ],
+      { projectChannelPrefix: "projects/", env: { PATH: "/bin" } },
+    );
+    assert.deepEqual(disabled.errors, [], "a disabled reactor's command is not required");
   });
 });

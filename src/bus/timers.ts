@@ -9,12 +9,9 @@ export type TimerHandle = unknown;
 
 export const realTimers: Timers = {
   now: () => Date.now(),
-  setTimeout: (fn, ms) => {
-    const t = setTimeout(fn, ms);
-    // Supervisory timers must never keep the daemon process alive on their own.
-    t.unref?.();
-    return t;
-  },
+  // Timers stay ref'd: the scheduler's interval timer is what keeps a polling-only daemon alive.
+  // Every component clears its timers on stop(), so a graceful stop still lets the process exit.
+  setTimeout: (fn, ms) => setTimeout(fn, ms),
   clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
 };
 
